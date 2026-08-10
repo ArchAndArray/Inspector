@@ -48,7 +48,12 @@ async function openAnnotator(photoId, onDone) {
         <button class="tool-btn" id="w-thin" title="Thin">•</button>
         <button class="tool-btn active" id="w-medium" title="Medium">●</button>
         <button class="tool-btn" id="w-thick" title="Thick">⬤</button>
-        <button class="tool-btn" id="btn-erase" title="Eraser">⌫</button>
+        <button class="tool-btn" id="btn-erase" title="Eraser">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="3" y="12" width="14" height="8" rx="1.2" transform="rotate(-32 3 12)" fill="currentColor"/>
+            <path d="M9.5 5.5 L19 15 L15 19 L5.5 9.5 Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+          </svg>
+        </button>
       </div>
       <div class="annotate-canvas-wrap" id="canvas-wrap">
         <canvas id="annotate-canvas" width="${cw}" height="${ch}"></canvas>
@@ -60,9 +65,10 @@ async function openAnnotator(photoId, onDone) {
       </div>
     </div>
   `);
-  document.body.appendChild(view);
+  presentOverlay(view);
 
   const canvas = view.querySelector('#annotate-canvas');
+  canvas.style.touchAction = 'none';
   const ctx = canvas.getContext('2d');
   ctx.drawImage(img, 0, 0, cw, ch);
   if (img.close) img.close();
@@ -150,19 +156,25 @@ async function openAnnotator(photoId, onDone) {
 
   canvas.addEventListener('pointermove', (e) => {
     if (!drawing) return;
-    const p = canvasPoint(e);
-    const pressure = e.pressure && e.pressure > 0 ? e.pressure : 0.5;
-    const w = eraseMode ? currentWidth * 3 : currentWidth * (0.5 + pressure);
-    ctx.globalCompositeOperation = eraseMode ? 'destination-out' : 'source-over';
-    ctx.strokeStyle = currentColor;
-    ctx.lineWidth = w;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.beginPath();
-    ctx.moveTo(lastX, lastY);
-    ctx.lineTo(p.x, p.y);
-    ctx.stroke();
-    lastX = p.x; lastY = p.y;
+    // Apple Pencil samples at a much higher rate than the browser's paint loop; using
+    // coalesced events picks up every intermediate point instead of only the last one
+    // per frame, which is what made fast strokes feel laggy or skip segments.
+    const events = (typeof e.getCoalescedEvents === 'function' && e.getCoalescedEvents().length) ? e.getCoalescedEvents() : [e];
+    for (const ev of events) {
+      const p = canvasPoint(ev);
+      const pressure = ev.pressure && ev.pressure > 0 ? ev.pressure : 0.5;
+      const w = eraseMode ? currentWidth * 3 : currentWidth * (0.5 + pressure);
+      ctx.globalCompositeOperation = eraseMode ? 'destination-out' : 'source-over';
+      ctx.strokeStyle = currentColor;
+      ctx.lineWidth = w;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(lastX, lastY);
+      ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+      lastX = p.x; lastY = p.y;
+    }
     e.preventDefault();
   });
 

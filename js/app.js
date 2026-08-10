@@ -5,7 +5,7 @@ const SEVERITY_LABELS = { 1: 'As New', 2: 'Minor', 3: 'Moderate', 4: 'Severe', 5
 const EXTENT_LABELS = { A: 'None', B: 'Slight (≤5%)', C: 'Moderate (5–20%)', D: 'Wide (20–50%)', E: 'Extensive (>50%)' };
 const PRIORITY_COLORS = { High: '#c81e1e', Medium: '#e0672e', Low: '#4f9d5c', Monitor: '#1e7dc8' };
 const CURRENCY_SYMBOLS = { USD: '$', GBP: '£', EUR: '€' };
-const APP_VERSION = '0.7';
+const APP_VERSION = '0.9';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -24,6 +24,20 @@ function toast(msg) {
   t.textContent = msg;
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 2200);
+}
+
+// Overlays (sheets and fullscreen views) can nest in either direction depending on the
+// flow — a sheet can open a fullscreen view (e.g. New Inspection -> Map picker), and a
+// fullscreen view can open a sheet (e.g. Finding editor -> photo action sheet). A fixed
+// CSS z-index per type can't handle both directions correctly, so instead each overlay
+// gets an increasing z-index at the moment it's shown, guaranteeing whatever opened most
+// recently always renders on top.
+let overlayZCounter = 100;
+function presentOverlay(elToShow) {
+  overlayZCounter += 1;
+  elToShow.style.zIndex = String(overlayZCounter);
+  document.body.appendChild(elToShow);
+  return elToShow;
 }
 
 function fmtDate(iso) {
@@ -121,7 +135,7 @@ function openGridReferenceSheet(onConfirm) {
       </div>
     </div>
   `);
-  document.body.appendChild(sheet);
+  presentOverlay(sheet);
 
   let gridType = 'osgb';
   sheet.querySelectorAll('#grid-type-picker .chip').forEach((chip) => {
@@ -195,7 +209,7 @@ async function openMapPickerSheet(initialCoords, onConfirm) {
       </div>
     </div>
   `);
-  document.body.appendChild(view);
+  presentOverlay(view);
 
   const startLat = (initialCoords && initialCoords.lat) || 51.5074;
   const startLng = (initialCoords && initialCoords.lng) || -0.1278;
@@ -302,7 +316,7 @@ function openPhotoActionSheet(photoId, { onAnnotated, onRemoved } = {}) {
       </div>
     </div>
   `);
-  document.body.appendChild(s);
+  presentOverlay(s);
   s.addEventListener('click', (e) => { if (e.target === s) s.remove(); });
   s.querySelector('#btn-cancel').addEventListener('click', () => s.remove());
   s.querySelector('#btn-annotate').addEventListener('click', async () => {
@@ -330,7 +344,7 @@ function openPhotoSourceSheet({ onFiles, multiple = false }) {
       </div>
     </div>
   `);
-  document.body.appendChild(s);
+  presentOverlay(s);
   s.addEventListener('click', (e) => { if (e.target === s) s.remove(); });
   s.querySelector('#btn-cancel').addEventListener('click', () => s.remove());
   s.querySelector('#btn-camera').addEventListener('click', () => s.querySelector('#src-camera').click());
@@ -424,7 +438,7 @@ function openNewInspectionSheet() {
       </div>
     </div>
   `);
-  document.body.appendChild(sheet);
+  presentOverlay(sheet);
   sheet.querySelector('#f-date').value = new Date().toISOString().slice(0, 10);
 
   const locationField = wireLocationField(sheet, null);
@@ -582,7 +596,7 @@ function openEditHeaderSheet(insp) {
       </div>
     </div>
   `);
-  document.body.appendChild(sheet);
+  presentOverlay(sheet);
   const locationField = wireLocationField(sheet, insp.location);
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
@@ -661,7 +675,7 @@ async function openReportInfoSheet(inspectionId) {
       </div>
     </div>
   `);
-  document.body.appendChild(sheet);
+  presentOverlay(sheet);
 
   // Reads the current state of every field in this sheet and persists it — used both by
   // the Save button and before navigating to the Introduction/Conclusion sub-sheets, so
@@ -765,7 +779,7 @@ function openIntroSheet(inspectionId) {
         </div>
       </div>
     `);
-    document.body.appendChild(sheet);
+    presentOverlay(sheet);
     sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
     sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
     sheet.querySelector('#btn-save').addEventListener('click', async () => {
@@ -800,7 +814,7 @@ function openConclusionSheet(inspectionId) {
         </div>
       </div>
     `);
-    document.body.appendChild(sheet);
+    presentOverlay(sheet);
 
     function renderRecoList() {
       const list = sheet.querySelector('#reco-list');
@@ -858,7 +872,7 @@ function openAddSectionSheet(inspectionId) {
       </div>
     </div>
   `);
-  document.body.appendChild(sheet);
+  presentOverlay(sheet);
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
   sheet.querySelector('#btn-save').addEventListener('click', async () => {
@@ -936,7 +950,7 @@ function openEditSectionSheet(inspectionId, section) {
       </div>
     </div>
   `);
-  document.body.appendChild(sheet);
+  presentOverlay(sheet);
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
   sheet.querySelector('#btn-save').addEventListener('click', async () => {
@@ -983,7 +997,7 @@ async function openAddElementSheet(inspectionId, sectionId) {
       </div>
     </div>
   `);
-  document.body.appendChild(sheet);
+  presentOverlay(sheet);
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
 
@@ -1124,7 +1138,7 @@ function openEditElementSheet(inspectionId, elmt, backHash) {
       </div>
     </div>
   `);
-  document.body.appendChild(sheet);
+  presentOverlay(sheet);
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
   sheet.querySelector('#btn-save').addEventListener('click', async () => {
@@ -1163,7 +1177,11 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
     <div class="fullscreen">
       <div class="topbar">
         <button class="icon-btn" id="btn-close">✕</button>
-        <h1 style="font-size:17px;">Finding</h1>
+        <div style="flex:1; min-width:0;">
+          <h1 style="font-size:17px;">Finding</h1>
+          <span class="sub" id="save-status">&nbsp;</span>
+        </div>
+        <button class="text-btn" id="btn-save-finding">Save</button>
         <button class="text-btn" id="btn-delete-finding" style="color:#ff9d9d;">Delete</button>
       </div>
       <div class="content" style="overflow-y:auto;">
@@ -1223,10 +1241,52 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
       </div>
     </div>
   `);
-  document.body.appendChild(view);
+  presentOverlay(view);
+
+  const saveStatusEl = view.querySelector('#save-status');
+  function flashSaveStatus(text) {
+    saveStatusEl.textContent = text;
+    clearTimeout(flashSaveStatus._t);
+    flashSaveStatus._t = setTimeout(() => { saveStatusEl.textContent = '\u00A0'; }, 1500);
+  }
+
+  // Persists current field values without closing the editor. Called on every
+  // meaningful change (chip taps, checkbox toggle, debounced on typing, and on blur)
+  // so nothing is lost regardless of what interrupts the session — a squeeze gesture,
+  // an accidental navigation, adding a photo, anything.
+  async function persistFields(showStatus) {
+    const sevBtn = view.querySelector('.chip.selected[data-sev]');
+    const extBtn = view.querySelector('.chip.selected[data-ext]');
+    const priBtn = view.querySelector('.chip.selected[data-pri]');
+    const worksRequired = view.querySelector('#f-works-required').checked;
+    await DB.updateFinding(findingId, {
+      severity: sevBtn ? Number(sevBtn.dataset.sev) : null,
+      extent: extBtn ? extBtn.dataset.ext : null,
+      priority: priBtn ? priBtn.dataset.pri : null,
+      worksRequired,
+      worksDescription: worksRequired ? view.querySelector('#f-works-desc').value.trim() : '',
+      costEstimate: worksRequired ? view.querySelector('#f-cost').value.trim() : '',
+      notes: view.querySelector('#f-notes').value.trim()
+    });
+    if (showStatus) flashSaveStatus('Saved');
+  }
+
+  function debounce(fn, wait) {
+    let t;
+    return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait); };
+  }
+  const debouncedAutosave = debounce(() => persistFields(false), 600);
+
+  // Autosave on every text field: as-you-type (debounced) and immediately on blur.
+  ['#f-works-desc', '#f-cost', '#f-notes'].forEach((sel) => {
+    const field = view.querySelector(sel);
+    field.addEventListener('input', debouncedAutosave);
+    field.addEventListener('blur', () => persistFields(false));
+  });
 
   view.querySelector('#f-works-required').addEventListener('change', (e) => {
     view.querySelector('#works-detail').classList.toggle('hidden', !e.target.checked);
+    persistFields(false);
   });
 
   view.querySelectorAll('#priority-picker .chip').forEach((chip) => {
@@ -1234,6 +1294,7 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
       const wasSelected = chip.classList.contains('selected');
       view.querySelectorAll('#priority-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
       if (!wasSelected) { chip.classList.add('selected'); chip.style.background = PRIORITY_COLORS[chip.dataset.pri]; }
+      persistFields(false);
     });
   });
 
@@ -1255,6 +1316,9 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
       });
     });
     grid.querySelector('#btn-add-photo').addEventListener('click', () => {
+      // Persist any in-progress text before navigating to the camera/library, so nothing
+      // is at risk while the photo picker or annotator is open.
+      persistFields(false);
       openPhotoSourceSheet({
         multiple: true,
         onFiles: async (files) => {
@@ -1270,29 +1334,12 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
   }
   renderPhotoGrid();
 
-  async function saveAndClose() {
-    const sevBtn = view.querySelector('.chip.selected[data-sev]');
-    const extBtn = view.querySelector('.chip.selected[data-ext]');
-    const priBtn = view.querySelector('.chip.selected[data-pri]');
-    const worksRequired = view.querySelector('#f-works-required').checked;
-    await DB.updateFinding(findingId, {
-      severity: sevBtn ? Number(sevBtn.dataset.sev) : null,
-      extent: extBtn ? extBtn.dataset.ext : null,
-      priority: priBtn ? priBtn.dataset.pri : null,
-      worksRequired,
-      worksDescription: worksRequired ? view.querySelector('#f-works-desc').value.trim() : '',
-      costEstimate: worksRequired ? view.querySelector('#f-cost').value.trim() : '',
-      notes: view.querySelector('#f-notes').value.trim()
-    });
-    view.remove();
-    renderElement(inspectionId, elementId);
-  }
-
   view.querySelectorAll('#severity-picker .chip').forEach((chip) => {
     chip.addEventListener('click', () => {
       const wasSelected = chip.classList.contains('selected');
       view.querySelectorAll('#severity-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
       if (!wasSelected) { chip.classList.add('selected'); chip.style.background = `var(--sev-${chip.dataset.sev})`; }
+      persistFields(false);
     });
   });
   view.querySelectorAll('#extent-picker .chip').forEach((chip) => {
@@ -1300,10 +1347,16 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
       const wasSelected = chip.classList.contains('selected');
       view.querySelectorAll('#extent-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
       if (!wasSelected) { chip.classList.add('selected'); chip.style.background = 'var(--ink)'; }
+      persistFields(false);
     });
   });
 
-  view.querySelector('#btn-close').addEventListener('click', saveAndClose);
+  view.querySelector('#btn-save-finding').addEventListener('click', () => persistFields(true));
+  view.querySelector('#btn-close').addEventListener('click', async () => {
+    await persistFields(false);
+    view.remove();
+    renderElement(inspectionId, elementId);
+  });
   view.querySelector('#btn-delete-finding').addEventListener('click', async () => {
     if (!confirm('Delete this finding and its photos?')) return;
     await DB.deleteFindingCascade(findingId);
@@ -1365,7 +1418,7 @@ function openNewTemplateSheet() {
       </div>
     </div>
   `);
-  document.body.appendChild(sheet);
+  presentOverlay(sheet);
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
   sheet.querySelector('#btn-save').addEventListener('click', async () => {
