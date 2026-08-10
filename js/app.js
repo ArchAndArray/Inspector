@@ -4,7 +4,8 @@ const appEl = document.getElementById('app');
 const SEVERITY_LABELS = { 1: 'As New', 2: 'Minor', 3: 'Moderate', 4: 'Severe', 5: 'Failed' };
 const EXTENT_LABELS = { A: 'None', B: 'Slight (≤5%)', C: 'Moderate (5–20%)', D: 'Wide (20–50%)', E: 'Extensive (>50%)' };
 const PRIORITY_COLORS = { High: '#c81e1e', Medium: '#e0672e', Low: '#4f9d5c', Monitor: '#1e7dc8' };
-const APP_VERSION = '0.6';
+const CURRENCY_SYMBOLS = { USD: '$', GBP: '£', EUR: '€' };
+const APP_VERSION = '0.7';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -40,6 +41,191 @@ function el(html) {
   const t = document.createElement('template');
   t.innerHTML = html.trim();
   return t.content.firstElementChild;
+}
+
+// ---------- Shared location field (GPS / grid reference / map) ----------
+// Returns { html, wire(sheet, getCoords) } — html is inserted into the sheet's markup,
+// wire() attaches behavior. getCoords() returns the last known {lat, lng} or null.
+function locationFieldHTML(initial) {
+  return `
+    <div class="field">
+      <label>Location</label>
+      <input type="text" id="f-location" placeholder="Enter manually, or use a button below" value="${esc(initial)}">
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+        <button type="button" class="btn btn-secondary" id="btn-use-current-location" style="flex:1; min-width:140px; font-size:13px; padding:10px;">📍 Use Current Location</button>
+        <button type="button" class="btn btn-secondary" id="btn-grid-ref" style="flex:1; min-width:140px; font-size:13px; padding:10px;">🧭 Grid Reference</button>
+        <button type="button" class="btn btn-secondary" id="btn-pick-map" style="flex:1; min-width:140px; font-size:13px; padding:10px;">🗺️ Map</button>
+      </div>
+      <p class="hint">Map picker needs an internet connection to load map tiles.</p>
+    </div>
+  `;
+}
+
+function wireLocationField(sheet, initialCoords) {
+  let coords = initialCoords && initialCoords.lat != null ? { lat: initialCoords.lat, lng: initialCoords.lng } : null;
+  const input = sheet.querySelector('#f-location');
+
+  sheet.querySelector('#btn-use-current-location').addEventListener('click', () => {
+    if (!navigator.geolocation) { toast('Location services not available'); return; }
+    toast('Locating…');
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        input.value = `${coords.lat.toFixed(6)}, ${coords.lng.toFixed(6)}`;
+        toast('Location captured');
+      },
+      () => toast('Could not get location'),
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  });
+
+  sheet.querySelector('#btn-grid-ref').addEventListener('click', () => {
+    openGridReferenceSheet((result) => {
+      coords = { lat: result.lat, lng: result.lon };
+      input.value = `${result.refText} (${result.gridLabel})`;
+      toast('Grid reference converted');
+    });
+  });
+
+  sheet.querySelector('#btn-pick-map').addEventListener('click', () => {
+    openMapPickerSheet(coords, (result) => {
+      coords = { lat: result.lat, lng: result.lng };
+      input.value = `${result.lat.toFixed(6)}, ${result.lng.toFixed(6)}`;
+      toast('Location set from map');
+    });
+  });
+
+  return { getCoords: () => coords, getManualText: () => input.value.trim() };
+}
+
+function openGridReferenceSheet(onConfirm) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Grid reference</h2>
+        <div class="field">
+          <label>Grid type</label>
+          <div class="severity-picker" id="grid-type-picker">
+            <button class="chip selected" data-grid="osgb" style="background:var(--ink);">OS National Grid (GB)</button>
+            <button class="chip" data-grid="irish">Irish National Grid</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>Grid reference</label>
+          <input type="text" id="f-gridref" placeholder="e.g. SU 587 149">
+          <p class="hint" id="grid-hint">Two letters followed by an even number of digits (e.g. SU 587 149).</p>
+        </div>
+        <button class="btn btn-primary btn-block" id="btn-convert">Convert &amp; use</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  document.body.appendChild(sheet);
+
+  let gridType = 'osgb';
+  sheet.querySelectorAll('#grid-type-picker .chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      sheet.querySelectorAll('#grid-type-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
+      chip.classList.add('selected');
+      chip.style.background = 'var(--ink)';
+      gridType = chip.dataset.grid;
+      sheet.querySelector('#grid-hint').textContent = gridType === 'irish'
+        ? 'One letter followed by an even number of digits (e.g. O 15 24).'
+        : 'Two letters followed by an even number of digits (e.g. SU 587 149).';
+    });
+  });
+
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-convert').addEventListener('click', () => {
+    const refText = sheet.querySelector('#f-gridref').value.trim();
+    if (!refText) { toast('Enter a grid reference'); return; }
+    const result = window.GeoGrid ? window.GeoGrid.convert(refText, gridType) : null;
+    if (!result) { toast('Could not parse that grid reference'); return; }
+    sheet.remove();
+    onConfirm({
+      lat: result.lat,
+      lon: result.lon,
+      refText,
+      gridLabel: gridType === 'irish' ? 'Irish National Grid' : 'OS National Grid'
+    });
+  });
+}
+
+let leafletLoadPromise = null;
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  if (leafletLoadPromise) return leafletLoadPromise;
+  leafletLoadPromise = new Promise((resolve, reject) => {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css';
+    document.head.appendChild(link);
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js';
+    script.onload = resolve;
+    script.onerror = () => reject(new Error('Failed to load map library'));
+    document.head.appendChild(script);
+  });
+  return leafletLoadPromise;
+}
+
+async function openMapPickerSheet(initialCoords, onConfirm) {
+  toast('Loading map…');
+  try {
+    await loadLeaflet();
+  } catch (err) {
+    toast('Could not load map — check your internet connection');
+    return;
+  }
+
+  const view = el(`
+    <div class="fullscreen">
+      <div class="topbar">
+        <button class="icon-btn" id="btn-close">✕</button>
+        <div style="flex:1; min-width:0;">
+          <h1 style="font-size:17px;">Pick location</h1>
+          <span class="sub">Needs internet connection · tap the map to place a pin</span>
+        </div>
+      </div>
+      <div id="map-container" style="flex:1;"></div>
+      <div style="padding:16px; border-top:1px solid var(--line); background:var(--paper);">
+        <button class="btn btn-primary btn-block" id="btn-confirm-location" disabled>Confirm location</button>
+      </div>
+    </div>
+  `);
+  document.body.appendChild(view);
+
+  const startLat = (initialCoords && initialCoords.lat) || 51.5074;
+  const startLng = (initialCoords && initialCoords.lng) || -0.1278;
+  const map = L.map(view.querySelector('#map-container')).setView([startLat, startLng], initialCoords ? 15 : 6);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors',
+    maxZoom: 19
+  }).addTo(map);
+
+  let marker = null;
+  if (initialCoords) {
+    marker = L.marker([startLat, startLng]).addTo(map);
+    view.querySelector('#btn-confirm-location').disabled = false;
+  }
+
+  map.on('click', (e) => {
+    if (marker) map.removeLayer(marker);
+    marker = L.marker(e.latlng).addTo(map);
+    view.querySelector('#btn-confirm-location').disabled = false;
+  });
+
+  setTimeout(() => map.invalidateSize(), 100);
+
+  view.querySelector('#btn-close').addEventListener('click', () => view.remove());
+  view.querySelector('#btn-confirm-location').addEventListener('click', () => {
+    if (!marker) return;
+    const pos = marker.getLatLng();
+    view.remove();
+    onConfirm({ lat: pos.lat, lng: pos.lng });
+  });
 }
 
 // iOS Safari quirk: tapping a button while a text field still has focus sometimes only
@@ -232,13 +418,7 @@ function openNewInspectionSheet() {
         <div class="field"><label>Date</label><input type="date" id="f-date"></div>
         <div class="field"><label>Inspector</label><input type="text" id="f-inspector" placeholder="Name"></div>
         <div class="field"><label>Weather</label><input type="text" id="f-weather" placeholder="e.g. Overcast, 14°C"></div>
-        <div class="field">
-          <label>Location</label>
-          <div class="link-row">
-            <input type="text" id="f-location" placeholder="Tap to capture GPS or enter manually" style="flex:1; margin-right:8px;">
-            <button class="small-btn" id="btn-gps">📍 GPS</button>
-          </div>
-        </div>
+        ${locationFieldHTML('')}
         <button class="btn btn-primary btn-block" id="btn-create-inspection">Create inspection</button>
         <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
       </div>
@@ -247,26 +427,14 @@ function openNewInspectionSheet() {
   document.body.appendChild(sheet);
   sheet.querySelector('#f-date').value = new Date().toISOString().slice(0, 10);
 
-  let gpsCoords = null;
-  sheet.querySelector('#btn-gps').addEventListener('click', () => {
-    if (!navigator.geolocation) { toast('GPS not available'); return; }
-    toast('Locating…');
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        gpsCoords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-        sheet.querySelector('#f-location').value = `${gpsCoords.lat.toFixed(6)}, ${gpsCoords.lng.toFixed(6)}`;
-        toast('Location captured');
-      },
-      () => toast('Could not get location'),
-      { enableHighAccuracy: true, timeout: 10000 }
-    );
-  });
+  const locationField = wireLocationField(sheet, null);
 
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
   sheet.querySelector('#btn-create-inspection').addEventListener('click', async () => {
     const structureName = sheet.querySelector('#f-structureName').value.trim();
     if (!structureName) { toast('Enter a structure name'); return; }
+    const coords = locationField.getCoords();
     const insp = await DB.createInspection({
       structureName,
       structureId: sheet.querySelector('#f-structureId').value.trim(),
@@ -274,7 +442,7 @@ function openNewInspectionSheet() {
       date: sheet.querySelector('#f-date').value,
       inspector: sheet.querySelector('#f-inspector').value.trim(),
       weather: sheet.querySelector('#f-weather').value.trim(),
-      location: { ...(gpsCoords || {}), manual: sheet.querySelector('#f-location').value.trim() },
+      location: { ...(coords || {}), manual: locationField.getManualText() },
       title: 'Structural Inspection Report',
       subtitle: ''
     });
@@ -404,7 +572,7 @@ function openEditHeaderSheet(insp) {
         <div class="field"><label>Date</label><input type="date" id="f-date" value="${(insp.date || '').slice(0, 10)}"></div>
         <div class="field"><label>Inspector</label><input type="text" id="f-inspector" value="${esc(insp.inspector)}"></div>
         <div class="field"><label>Weather</label><input type="text" id="f-weather" value="${esc(insp.weather)}"></div>
-        <div class="field"><label>Location</label><input type="text" id="f-location" value="${esc(insp.location && insp.location.manual)}"></div>
+        ${locationFieldHTML(insp.location && insp.location.manual || '')}
         <div class="field"><label>Report title</label><input type="text" id="f-title" value="${esc(insp.title)}"></div>
         <div class="field"><label>Report subtitle</label><input type="text" id="f-subtitle" value="${esc(insp.subtitle)}"></div>
         <div class="field"><label>General notes</label><textarea id="f-notes">${esc(insp.notes)}</textarea></div>
@@ -415,9 +583,11 @@ function openEditHeaderSheet(insp) {
     </div>
   `);
   document.body.appendChild(sheet);
+  const locationField = wireLocationField(sheet, insp.location);
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
   sheet.querySelector('#btn-save').addEventListener('click', async () => {
+    const coords = locationField.getCoords();
     await DB.updateInspection(insp.id, {
       structureName: sheet.querySelector('#f-structureName').value.trim(),
       structureId: sheet.querySelector('#f-structureId').value.trim(),
@@ -425,7 +595,7 @@ function openEditHeaderSheet(insp) {
       date: sheet.querySelector('#f-date').value,
       inspector: sheet.querySelector('#f-inspector').value.trim(),
       weather: sheet.querySelector('#f-weather').value.trim(),
-      location: { ...(insp.location || {}), manual: sheet.querySelector('#f-location').value.trim() },
+      location: { ...(coords || {}), manual: locationField.getManualText() },
       title: sheet.querySelector('#f-title').value.trim() || 'Structural Inspection Report',
       subtitle: sheet.querySelector('#f-subtitle').value.trim(),
       notes: sheet.querySelector('#f-notes').value.trim()
@@ -444,7 +614,8 @@ function openEditHeaderSheet(insp) {
 // ---------- REPORT INFO (client / reference / logos) ----------
 async function openReportInfoSheet(inspectionId) {
   const insp = await DB.get('inspections', inspectionId);
-  let logos = await DB.listLogos(inspectionId);
+  let companyLogo = await DB.getLogoByRole(inspectionId, 'company');
+  let clientLogo = await DB.getLogoByRole(inspectionId, 'client');
 
   const sheet = el(`
     <div class="sheet-backdrop">
@@ -455,12 +626,25 @@ async function openReportInfoSheet(inspectionId) {
         <div class="field"><label>Client</label><input type="text" id="f-client" value="${esc(insp.client)}" placeholder="Client or organization name"></div>
         <div class="field"><label>Reference / project no.</label><input type="text" id="f-reference" value="${esc(insp.reference)}" placeholder="e.g. PRJ-2026-014"></div>
         <div class="field"><label>Report date</label><input type="date" id="f-date" value="${(insp.date || '').slice(0, 10)}"></div>
-        <div class="field">
-          <label>Logos</label>
-          <div class="photo-grid" id="logo-grid"></div>
-          <input type="file" id="logo-file-input" accept="image/*" multiple style="display:none;">
-          <p class="hint">Add one or more logos (e.g. client + your company). On the Arch&amp;Array cover style, the first logo added is used as the company logo (top corner) and the second as the client logo (next to the client name).</p>
+
+        <div class="section-header" style="margin-top:22px;"><h2>Currency</h2></div>
+        <div class="severity-picker" id="currency-picker">
+          <button class="chip ${(!insp.currency || insp.currency === 'USD') ? 'selected' : ''}" data-currency="USD" style="${(!insp.currency || insp.currency === 'USD') ? 'background:var(--ink);' : ''}">$ USD</button>
+          <button class="chip ${insp.currency === 'GBP' ? 'selected' : ''}" data-currency="GBP" style="${insp.currency === 'GBP' ? 'background:var(--ink);' : ''}">£ GBP</button>
+          <button class="chip ${insp.currency === 'EUR' ? 'selected' : ''}" data-currency="EUR" style="${insp.currency === 'EUR' ? 'background:var(--ink);' : ''}">€ EUR</button>
         </div>
+        <p class="hint">Used for cost estimates on findings with works required.</p>
+
+        <div class="section-header" style="margin-top:22px;"><h2>Logos</h2></div>
+        <div class="field">
+          <label>Company logo</label>
+          <div class="photo-grid" id="company-logo-grid"></div>
+        </div>
+        <div class="field">
+          <label>Client logo</label>
+          <div class="photo-grid" id="client-logo-grid"></div>
+        </div>
+        <input type="file" id="logo-file-input" accept="image/*" style="display:none;">
 
         <div class="section-header" style="margin-top:22px;"><h2>Cover style</h2></div>
         <div class="severity-picker" id="cover-style-picker">
@@ -479,8 +663,31 @@ async function openReportInfoSheet(inspectionId) {
   `);
   document.body.appendChild(sheet);
 
-  sheet.querySelector('#btn-intro').addEventListener('click', () => openIntroSheet(inspectionId));
-  sheet.querySelector('#btn-conclusion').addEventListener('click', () => openConclusionSheet(inspectionId));
+  // Reads the current state of every field in this sheet and persists it — used both by
+  // the Save button and before navigating to the Introduction/Conclusion sub-sheets, so
+  // in-progress edits are never silently discarded.
+  async function persistFields() {
+    const styleBtn = sheet.querySelector('#cover-style-picker .chip.selected');
+    const currencyBtn = sheet.querySelector('#currency-picker .chip.selected');
+    await DB.updateInspection(inspectionId, {
+      client: sheet.querySelector('#f-client').value.trim(),
+      reference: sheet.querySelector('#f-reference').value.trim(),
+      date: sheet.querySelector('#f-date').value,
+      currency: currencyBtn ? currencyBtn.dataset.currency : 'USD',
+      coverStyle: styleBtn ? styleBtn.dataset.style : 'basic'
+    });
+  }
+
+  sheet.querySelector('#btn-intro').addEventListener('click', async () => {
+    await persistFields();
+    sheet.remove();
+    openIntroSheet(inspectionId);
+  });
+  sheet.querySelector('#btn-conclusion').addEventListener('click', async () => {
+    await persistFields();
+    sheet.remove();
+    openConclusionSheet(inspectionId);
+  });
 
   sheet.querySelectorAll('#cover-style-picker .chip').forEach((chip) => {
     chip.addEventListener('click', () => {
@@ -490,46 +697,55 @@ async function openReportInfoSheet(inspectionId) {
     });
   });
 
-  function renderLogoGrid() {
-    const grid = sheet.querySelector('#logo-grid');
-    grid.innerHTML = logos.map((p) => `
-      <div class="photo-thumb" data-lid="${p.id}" style="position:relative;">
-        <img src="${blobUrl(p.originalBlob)}">
-        <button class="icon-btn" data-remove-logo="${p.id}" style="position:absolute; top:4px; right:4px; width:24px; height:24px; background:rgba(28,31,38,0.75); font-size:13px;">✕</button>
-      </div>
-    `).join('') + `<div class="photo-add" id="btn-add-logo">＋</div>`;
-    grid.querySelector('#btn-add-logo').addEventListener('click', () => sheet.querySelector('#logo-file-input').click());
-    grid.querySelectorAll('[data-remove-logo]').forEach((btn) => {
-      btn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        await DB.delete('photos', btn.dataset.removeLogo);
-        logos = logos.filter((l) => l.id !== btn.dataset.removeLogo);
-        renderLogoGrid();
-      });
+  sheet.querySelectorAll('#currency-picker .chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      sheet.querySelectorAll('#currency-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
+      chip.classList.add('selected');
+      chip.style.background = 'var(--ink)';
+    });
+  });
+
+  function renderLogoSlot(role) {
+    const grid = sheet.querySelector(role === 'company' ? '#company-logo-grid' : '#client-logo-grid');
+    const logo = role === 'company' ? companyLogo : clientLogo;
+    grid.innerHTML = logo
+      ? `<div class="photo-thumb" data-role="${role}" style="position:relative; width:96px; height:96px;">
+           <img src="${blobUrl(logo.originalBlob)}">
+           <button class="icon-btn" data-remove-role="${role}" style="position:absolute; top:4px; right:4px; width:24px; height:24px; background:rgba(28,31,38,0.75); font-size:13px;">✕</button>
+         </div>`
+      : `<div class="photo-add" data-add-role="${role}" style="width:96px; height:96px;">＋</div>`;
+
+    const addTile = grid.querySelector('[data-add-role]');
+    if (addTile) addTile.addEventListener('click', () => {
+      sheet.querySelector('#logo-file-input').dataset.targetRole = role;
+      sheet.querySelector('#logo-file-input').click();
+    });
+    const removeBtn = grid.querySelector('[data-remove-role]');
+    if (removeBtn) removeBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await DB.removeLogoByRole(inspectionId, role);
+      if (role === 'company') companyLogo = null; else clientLogo = null;
+      renderLogoSlot(role);
     });
   }
-  renderLogoGrid();
+  renderLogoSlot('company');
+  renderLogoSlot('client');
 
   sheet.querySelector('#logo-file-input').addEventListener('change', async (e) => {
-    const files = Array.from(e.target.files);
-    for (const file of files) {
-      const normalized = await normalizeImageFile(file, 1200);
-      const p = await DB.addLogo(inspectionId, normalized);
-      logos.push(p);
-    }
-    renderLogoGrid();
+    const file = e.target.files[0];
+    const role = e.target.dataset.targetRole;
+    if (!file || !role) return;
+    const normalized = await normalizeImageFile(file, 1200);
+    const saved = await DB.setLogoByRole(inspectionId, role, normalized);
+    if (role === 'company') companyLogo = saved; else clientLogo = saved;
+    renderLogoSlot(role);
+    e.target.value = '';
   });
 
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
   sheet.querySelector('#btn-save').addEventListener('click', async () => {
-    const styleBtn = sheet.querySelector('#cover-style-picker .chip.selected');
-    await DB.updateInspection(inspectionId, {
-      client: sheet.querySelector('#f-client').value.trim(),
-      reference: sheet.querySelector('#f-reference').value.trim(),
-      date: sheet.querySelector('#f-date').value,
-      coverStyle: styleBtn ? styleBtn.dataset.style : 'basic'
-    });
+    await persistFields();
     sheet.remove();
     toast('Report info saved');
     renderInspection(inspectionId);
@@ -933,6 +1149,8 @@ function openEditElementSheet(inspectionId, elmt, backHash) {
 // ---------- FINDING EDITOR ----------
 async function openFindingEditor(inspectionId, elementId, findingId) {
   const elmt = await DB.get('elements', elementId);
+  const insp = await DB.get('inspections', inspectionId);
+  const currencySymbol = CURRENCY_SYMBOLS[insp && insp.currency] || '$';
   let finding = findingId ? await DB.get('findings', findingId) : null;
   if (!finding) {
     finding = await DB.createFinding(elementId, {});
@@ -988,7 +1206,13 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
         </div>
         <div id="works-detail" class="${finding.worksRequired ? '' : 'hidden'}">
           <div class="field"><label>Works needed</label><textarea id="f-works-desc" placeholder="Describe the works required…">${esc(finding.worksDescription)}</textarea></div>
-          <div class="field"><label>Cost estimate</label><input type="text" id="f-cost" value="${esc(finding.costEstimate)}" placeholder="e.g. $12,500"></div>
+          <div class="field">
+            <label>Cost estimate</label>
+            <div class="link-row">
+              <span style="font-size:18px; font-weight:700; color:var(--ink-soft); margin-right:8px;">${currencySymbol}</span>
+              <input type="text" id="f-cost" inputmode="decimal" value="${esc(String(finding.costEstimate || '').replace(/^[\$£€\s]+/, ''))}" placeholder="e.g. 12,500" style="flex:1;">
+            </div>
+          </div>
         </div>
 
         <div class="section-header"><h2>Notes</h2></div>

@@ -15,6 +15,8 @@ const PRIORITY_COLORS_RGB = {
   Monitor: [30, 125, 200]
 };
 
+const CURRENCY_SYMBOLS = { USD: '$', GBP: '£', EUR: '€' };
+
 // Loads a blob as an upright, normalized image (corrects EXIF rotation even for photos
 // captured before the in-app fix) and returns a dataURL + pixel dimensions ready for jsPDF.
 async function loadNormalizedImage(blob) {
@@ -63,13 +65,15 @@ async function buildAndSaveInspectionPDF(inspectionId) {
   const insp = await DB.get('inspections', inspectionId);
   const sections = await DB.listSections(inspectionId);
   const coverPhoto = await DB.getCoverPhoto(inspectionId);
-  const logos = await DB.listLogos(inspectionId);
+  const companyLogoPhoto = await DB.getLogoByRole(inspectionId, 'company');
+  const clientLogoPhoto = await DB.getLogoByRole(inspectionId, 'client');
 
   let coverData = null;
   if (coverPhoto) coverData = await loadNormalizedImage(coverPhoto.annotatedBlob || coverPhoto.originalBlob);
 
-  const logoData = [];
-  for (const l of logos) logoData.push(await loadNormalizedImage(l.originalBlob));
+  const companyLogoData = companyLogoPhoto ? await loadNormalizedImage(companyLogoPhoto.originalBlob) : null;
+  const clientLogoData = clientLogoPhoto ? await loadNormalizedImage(clientLogoPhoto.originalBlob) : null;
+  const logoData = [companyLogoData, clientLogoData].filter(Boolean);
 
   async function loadElementData(elmt) {
     const refPhotos = [];
@@ -109,7 +113,7 @@ async function buildAndSaveInspectionPDF(inspectionId) {
 
   // ---------- Cover page ----------
   if (insp.coverStyle === 'archarray') {
-    drawArchArrayCover(doc, { insp, coverData, logoData, pageW, pageH, margin, contentW });
+    drawArchArrayCover(doc, { insp, coverData, companyLogoData, clientLogoData, pageW, pageH, margin, contentW });
   } else {
     drawBasicCover(doc, { insp, coverData, logoData, pageW, pageH, margin, contentW });
   }
@@ -349,7 +353,9 @@ async function buildAndSaveInspectionPDF(inspectionId) {
             doc.setFont('helvetica', 'normal');
             boxLines = doc.splitTextToSize(f.worksDescription, contentW - 20);
           }
-          const estLine = f.costEstimate ? `Cost estimate: ${f.costEstimate}` : '';
+          const currencySymbol = CURRENCY_SYMBOLS[insp.currency] || '$';
+          const cleanCost = String(f.costEstimate || '').replace(/^[\$£€\s]+/, '');
+          const estLine = cleanCost ? `Cost estimate: ${currencySymbol}${cleanCost}` : '';
           const totalLines = boxLines.length + (estLine ? 1 : 0);
           const boxH = 22 + totalLines * 13 + 8;
           doc.setFillColor(247, 238, 233);
@@ -520,7 +526,7 @@ function drawBasicCover(doc, { insp, coverData, logoData, pageW, pageH, margin, 
   doc.text(fmtDate(insp.date), margin, pageH - 40);
 }
 
-function drawArchArrayCover(doc, { insp, coverData, logoData, pageW, pageH, margin, contentW }) {
+function drawArchArrayCover(doc, { insp, coverData, companyLogoData, clientLogoData, pageW, pageH, margin, contentW }) {
   doc.setFillColor(255, 255, 255);
   doc.rect(0, 0, pageW, pageH, 'F');
 
@@ -544,12 +550,11 @@ function drawArchArrayCover(doc, { insp, coverData, logoData, pageW, pageH, marg
   doc.setFillColor(28, 31, 38);
   doc.rect(0, pageH - 6, pageW, 6, 'F');
 
-  // Company logo (first logo), top-left
-  if (logoData[0]) {
-    const l = logoData[0];
-    const h = 24;
-    const w = (l.w / l.h) * h;
-    doc.addImage(l.url, 'JPEG', margin, 40, w, h, undefined, 'FAST');
+  // Company logo, top-left
+  if (companyLogoData) {
+    const h = 48;
+    const w = (companyLogoData.w / companyLogoData.h) * h;
+    doc.addImage(companyLogoData.url, 'JPEG', margin, 40, w, h, undefined, 'FAST');
   }
 
   // Kicker (report title, tracked-out small caps)
@@ -609,16 +614,17 @@ function drawArchArrayCover(doc, { insp, coverData, logoData, pageW, pageH, marg
     doc.addImage(coverData.url, 'JPEG', x, y, w, h, undefined, 'FAST');
   }
 
-  // Client whiteout box, bottom — logo (second logo, if any) + client name
+  // Client whiteout box, bottom — client logo (if any) + client name
   if (insp.client) {
-    const boxY = pageH - 100;
-    const logoBox = logoData[1];
-    const logoW = logoBox ? 26 : 0;
+    const boxH = 64;
+    const boxY = pageH - 116;
+    const logoBox = clientLogoData;
+    const logoH = boxH - 20;
+    const logoW = logoBox ? (logoBox.w / logoBox.h) * logoH : 0;
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(11);
     const textW = doc.getTextWidth(insp.client) + 4;
-    const boxW = 20 + (logoBox ? logoW + 10 : 0) + textW;
-    const boxH = 40;
+    const boxW = 20 + (logoBox ? logoW + 12 : 0) + textW;
     doc.setFillColor(255, 255, 255);
     doc.setDrawColor(215, 218, 222);
     doc.setLineWidth(0.75);
@@ -626,18 +632,16 @@ function drawArchArrayCover(doc, { insp, coverData, logoData, pageW, pageH, marg
 
     let tx = margin + 10;
     if (logoBox) {
-      const lh = boxH - 16;
-      const lw = (logoBox.w / logoBox.h) * lh;
-      doc.addImage(logoBox.url, 'JPEG', tx, boxY + 8, lw, lh, undefined, 'FAST');
-      tx += lw + 10;
+      doc.addImage(logoBox.url, 'JPEG', tx, boxY + 10, logoW, logoH, undefined, 'FAST');
+      tx += logoW + 12;
     }
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(7.5);
     doc.setTextColor(154, 160, 168);
-    drawTrackedText(doc, 'CLIENT', tx, boxY + 15, 1.4);
+    drawTrackedText(doc, 'CLIENT', tx, boxY + boxH / 2 - 6, 1.4);
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(11);
     doc.setTextColor(28, 31, 38);
-    doc.text(insp.client, tx, boxY + 29);
+    doc.text(insp.client, tx, boxY + boxH / 2 + 10);
   }
 }

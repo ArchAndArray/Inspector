@@ -104,6 +104,7 @@ const DB = {
       subtitle: data.subtitle || '',
       client: data.client || '',
       reference: data.reference || '',
+      currency: data.currency || 'USD',
       introduction: data.introduction || '',
       conclusion: data.conclusion || '',
       recommendations: data.recommendations || [],
@@ -242,14 +243,15 @@ const DB = {
   },
 
   // --- Photos ---
-  // photo: { id, kind: 'cover'|'logo'|'element'|'finding', findingId, elementId, inspectionId, originalBlob, annotatedBlob, order, createdAt }
-  async addPhoto({ kind = 'finding', findingId = null, elementId = null, inspectionId = null, originalBlob, order = 0 }) {
+  // photo: { id, kind: 'cover'|'logo'|'element'|'finding', findingId, elementId, inspectionId, role, originalBlob, annotatedBlob, order, createdAt }
+  async addPhoto({ kind = 'finding', findingId = null, elementId = null, inspectionId = null, originalBlob, order = 0, role = null }) {
     const photo = {
       id: uid(),
       kind,
       findingId,
       elementId,
       inspectionId,
+      role,
       originalBlob,
       annotatedBlob: null,
       order,
@@ -300,6 +302,30 @@ const DB = {
   async addLogo(inspectionId, blob) {
     const existing = await this.listLogos(inspectionId);
     return this.addPhoto({ kind: 'logo', inspectionId, originalBlob: blob, order: existing.length });
+  },
+  // Explicit role-based logo access (Company / Client). Falls back to upload order for
+  // logos saved before roles existed, so old data still displays sensibly.
+  async getLogoByRole(inspectionId, role) {
+    const all = await this.listLogos(inspectionId);
+    let found = all.find((p) => p.role === role);
+    if (!found && !all.some((p) => p.role)) {
+      const idx = role === 'company' ? 0 : 1;
+      found = all[idx] || null;
+    }
+    return found || null;
+  },
+  async setLogoByRole(inspectionId, role, blob) {
+    const existing = await this.getLogoByRole(inspectionId, role);
+    if (existing) {
+      existing.originalBlob = blob;
+      existing.role = role;
+      return this.put('photos', existing);
+    }
+    return this.addPhoto({ kind: 'logo', inspectionId, originalBlob: blob, order: 0, role });
+  },
+  async removeLogoByRole(inspectionId, role) {
+    const existing = await this.getLogoByRole(inspectionId, role);
+    if (existing) await this.delete('photos', existing.id);
   },
 
   // --- Templates ---
