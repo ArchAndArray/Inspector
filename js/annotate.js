@@ -1,4 +1,11 @@
 // annotate.js - fullscreen photo markup using Canvas + Pointer Events (Apple Pencil Pro support)
+//
+// Uses two stacked canvases: a base layer holding the photo (drawn once, never touched
+// again) and a transparent overlay layer where all pencil strokes and erasing happen.
+// The eraser uses 'destination-out' compositing, which previously ran on a single flattened
+// canvas and punched through to the photo underneath — keeping annotations on their own
+// layer means the eraser can only ever remove marks, never the photo. The two layers are
+// flattened into one image only at save time.
 
 const ANNOTATE_COLORS = ['#c81e1e', '#f2b705', '#1c1f26', '#ffffff', '#1e7dc8'];
 const ANNOTATE_WIDTHS = { thin: 3, medium: 7, thick: 14 };
@@ -56,7 +63,10 @@ async function openAnnotator(photoId, onDone) {
         </button>
       </div>
       <div class="annotate-canvas-wrap" id="canvas-wrap">
-        <canvas id="annotate-canvas" width="${cw}" height="${ch}"></canvas>
+        <div id="canvas-stack" style="position:relative;">
+          <canvas id="photo-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%;"></canvas>
+          <canvas id="mark-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%; position:absolute; top:0; left:0;"></canvas>
+        </div>
       </div>
       <div class="annotate-toolbar">
         <button class="btn btn-ghost" id="btn-cancel">Cancel</button>
@@ -67,25 +77,29 @@ async function openAnnotator(photoId, onDone) {
   `);
   presentOverlay(view);
 
-  const canvas = view.querySelector('#annotate-canvas');
-  canvas.style.touchAction = 'none';
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(img, 0, 0, cw, ch);
+  const photoCanvas = view.querySelector('#photo-canvas');
+  const markCanvas = view.querySelector('#mark-canvas');
+  markCanvas.style.touchAction = 'none';
+  const photoCtx = photoCanvas.getContext('2d');
+  const ctx = markCanvas.getContext('2d'); // all drawing/erasing happens here only
+
+  photoCtx.drawImage(img, 0, 0, cw, ch);
   if (img.close) img.close();
 
-  // Fit canvas to available space via CSS while preserving pixel resolution
+  // Fit the canvas stack to available space via CSS while preserving pixel resolution
   function fitCanvas() {
     const wrap = view.querySelector('#canvas-wrap');
+    const stack = view.querySelector('#canvas-stack');
     const availW = wrap.clientWidth - 16;
     const availH = wrap.clientHeight - 16;
     const scale = Math.min(availW / cw, availH / ch, 1) || 1;
-    canvas.style.width = Math.round(cw * scale) + 'px';
-    canvas.style.height = Math.round(ch * scale) + 'px';
+    stack.style.width = Math.round(cw * scale) + 'px';
+    stack.style.height = Math.round(ch * scale) + 'px';
   }
   fitCanvas();
   window.addEventListener('resize', fitCanvas);
 
-  // Undo stack: snapshot before each stroke
+  // Undo stack: snapshot of the annotation layer only, before each stroke
   const undoStack = [];
   function pushUndo() {
     undoStack.push(ctx.getImageData(0, 0, cw, ch));
@@ -126,20 +140,21 @@ async function openAnnotator(photoId, onDone) {
     ctx.putImageData(snap, 0, 0);
   });
 
-  // Drawing with Pointer Events (supports Apple Pencil pressure via e.pressure)
+  // Drawing with Pointer Events (supports Apple Pencil pressure via e.pressure) — all on
+  // the annotation layer; the photo layer is never redrawn during the session.
   let drawing = false;
   let lastX = 0, lastY = 0;
 
   function canvasPoint(e) {
-    const rect = canvas.getBoundingClientRect();
+    const rect = markCanvas.getBoundingClientRect();
     const scaleX = cw / rect.width;
     const scaleY = ch / rect.height;
     return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
   }
 
-  canvas.addEventListener('pointerdown', (e) => {
+  markCanvas.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'touch' && e.isPrimary === false) return;
-    canvas.setPointerCapture(e.pointerId);
+    markCanvas.setPointerCapture(e.pointerId);
     pushUndo();
     drawing = true;
     const p = canvasPoint(e);
@@ -154,7 +169,7 @@ async function openAnnotator(photoId, onDone) {
     e.preventDefault();
   });
 
-  canvas.addEventListener('pointermove', (e) => {
+  markCanvas.addEventListener('pointermove', (e) => {
     if (!drawing) return;
     // Apple Pencil samples at a much higher rate than the browser's paint loop; using
     // coalesced events picks up every intermediate point instead of only the last one
@@ -181,11 +196,11 @@ async function openAnnotator(photoId, onDone) {
   function endStroke(e) {
     if (!drawing) return;
     drawing = false;
-    try { canvas.releasePointerCapture(e.pointerId); } catch (err) {}
+    try { markCanvas.releasePointerCapture(e.pointerId); } catch (err) {}
   }
-  canvas.addEventListener('pointerup', endStroke);
-  canvas.addEventListener('pointercancel', endStroke);
-  canvas.addEventListener('pointerleave', endStroke);
+  markCanvas.addEventListener('pointerup', endStroke);
+  markCanvas.addEventListener('pointercancel', endStroke);
+  markCanvas.addEventListener('pointerleave', endStroke);
 
   view.querySelector('#btn-cancel').addEventListener('click', () => {
     window.removeEventListener('resize', fitCanvas);
@@ -193,7 +208,14 @@ async function openAnnotator(photoId, onDone) {
   });
 
   view.querySelector('#btn-save').addEventListener('click', () => {
-    canvas.toBlob(async (blob) => {
+    // Flatten photo + annotation layers into a single image for storage/export.
+    const mergeCanvas = document.createElement('canvas');
+    mergeCanvas.width = cw;
+    mergeCanvas.height = ch;
+    const mergeCtx = mergeCanvas.getContext('2d');
+    mergeCtx.drawImage(photoCanvas, 0, 0);
+    mergeCtx.drawImage(markCanvas, 0, 0);
+    mergeCanvas.toBlob(async (blob) => {
       await DB.setAnnotatedBlob(photoId, blob);
       window.removeEventListener('resize', fitCanvas);
       view.remove();

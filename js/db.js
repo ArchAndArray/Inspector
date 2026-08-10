@@ -2,7 +2,7 @@
 // Stores: inspections, sections, elements, findings, photos, templates
 
 const DB_NAME = 'siteInspectionDB';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 let dbPromise = null;
 
@@ -40,6 +40,17 @@ function openDB() {
         const photosStore = tx.objectStore('photos');
         if (!photosStore.indexNames.contains('elementId')) {
           photosStore.createIndex('elementId', 'elementId', { unique: false });
+        }
+      }
+
+      if (oldVersion < 3) {
+        if (!db.objectStoreNames.contains('riskAssessments')) {
+          const raStore = db.createObjectStore('riskAssessments', { keyPath: 'id' });
+          raStore.createIndex('inspectionId', 'inspectionId', { unique: false });
+        }
+        const photosStore2 = tx.objectStore('photos');
+        if (!photosStore2.indexNames.contains('riskAssessmentId')) {
+          photosStore2.createIndex('riskAssessmentId', 'riskAssessmentId', { unique: false });
         }
       }
     };
@@ -104,6 +115,8 @@ const DB = {
       subtitle: data.subtitle || '',
       client: data.client || '',
       reference: data.reference || '',
+      companyName: data.companyName || '',
+      companyAddress: data.companyAddress || '',
       currency: data.currency || 'USD',
       introduction: data.introduction || '',
       conclusion: data.conclusion || '',
@@ -132,6 +145,8 @@ const DB = {
     for (const el of elements) {
       if (!el.sectionId) await this.deleteElementCascade(el.id);
     }
+    const ra = await this.getRiskAssessment(id);
+    if (ra) await this.deleteRiskAssessmentCascade(ra.id);
     const inspPhotos = await this.getAllByIndex('photos', 'inspectionId', id);
     for (const p of inspPhotos) await this.delete('photos', p.id);
     await this.delete('inspections', id);
@@ -243,14 +258,16 @@ const DB = {
   },
 
   // --- Photos ---
-  // photo: { id, kind: 'cover'|'logo'|'element'|'finding', findingId, elementId, inspectionId, role, originalBlob, annotatedBlob, order, createdAt }
-  async addPhoto({ kind = 'finding', findingId = null, elementId = null, inspectionId = null, originalBlob, order = 0, role = null }) {
+  // photo: { id, kind: 'cover'|'logo'|'element'|'finding'|'signature', findingId, elementId,
+  //          inspectionId, riskAssessmentId, role, originalBlob, annotatedBlob, order, createdAt }
+  async addPhoto({ kind = 'finding', findingId = null, elementId = null, inspectionId = null, riskAssessmentId = null, originalBlob, order = 0, role = null }) {
     const photo = {
       id: uid(),
       kind,
       findingId,
       elementId,
       inspectionId,
+      riskAssessmentId,
       role,
       originalBlob,
       annotatedBlob: null,
@@ -326,6 +343,84 @@ const DB = {
   async removeLogoByRole(inspectionId, role) {
     const existing = await this.getLogoByRole(inspectionId, role);
     if (existing) await this.delete('photos', existing.id);
+  },
+
+  // --- Signatures (used by Risk Assessment sign-off and control-action rows) ---
+  // role is 'operative' | 'manager' | `control:<rowId>`
+  async getSignature(riskAssessmentId, role) {
+    const all = await this.getAllByIndex('photos', 'riskAssessmentId', riskAssessmentId);
+    return all.find((p) => p.kind === 'signature' && p.role === role) || null;
+  },
+  async setSignature(riskAssessmentId, role, blob) {
+    const existing = await this.getSignature(riskAssessmentId, role);
+    if (existing) {
+      existing.originalBlob = blob;
+      return this.put('photos', existing);
+    }
+    return this.addPhoto({ kind: 'signature', riskAssessmentId, originalBlob: blob, role });
+  },
+  async removeSignature(riskAssessmentId, role) {
+    const existing = await this.getSignature(riskAssessmentId, role);
+    if (existing) await this.delete('photos', existing.id);
+  },
+
+  // --- Risk Assessments (one per inspection) ---
+  async getRiskAssessment(inspectionId) {
+    const all = await this.getAllByIndex('riskAssessments', 'inspectionId', inspectionId);
+    return all[0] || null;
+  },
+  async getOrCreateRiskAssessment(inspectionId) {
+    const existing = await this.getRiskAssessment(inspectionId);
+    if (existing) return existing;
+    const insp = await this.get('inspections', inspectionId);
+    const ra = {
+      id: uid(),
+      inspectionId,
+      companyName: (insp && insp.companyName) || '',
+      companyAddress: (insp && insp.companyAddress) || '',
+      assessmentTitle: '',
+      assessmentReference: (insp && insp.reference) || '',
+      assessorName: (insp && insp.inspector) || '',
+      assessmentDate: (insp && insp.date) || '',
+      locationSiteAddress: (insp && insp.location && insp.location.manual) || '',
+      taskDescription: '',
+      hazards: [],
+      controlActions: [],
+      responsiblePersons: '',
+      residualRiskAcceptable: null,
+      operativeName: '',
+      operativeDate: '',
+      operativeTime: '',
+      managerName: '',
+      managerDate: '',
+      managerTime: '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    return this.put('riskAssessments', ra);
+  },
+  async updateRiskAssessment(id, patch) {
+    const existing = await this.get('riskAssessments', id);
+    if (!existing) throw new Error('Risk assessment not found');
+    const updated = { ...existing, ...patch, updatedAt: new Date().toISOString() };
+    return this.put('riskAssessments', updated);
+  },
+  async deleteRiskAssessmentCascade(id) {
+    const photos = await this.getAllByIndex('photos', 'riskAssessmentId', id);
+    for (const p of photos) await this.delete('photos', p.id);
+    await this.delete('riskAssessments', id);
+  },
+  // Distinct hazard type strings used across all risk assessments on this device, for
+  // autocomplete suggestions (most-recently-seen order isn't tracked — alphabetical).
+  async listHazardTypeSuggestions() {
+    const all = await this.getAll('riskAssessments');
+    const seen = new Set();
+    for (const ra of all) {
+      for (const h of (ra.hazards || [])) {
+        if (h.hazardType && h.hazardType.trim()) seen.add(h.hazardType.trim());
+      }
+    }
+    return Array.from(seen).sort((a, b) => a.localeCompare(b));
   },
 
   // --- Templates ---

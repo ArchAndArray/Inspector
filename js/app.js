@@ -5,7 +5,7 @@ const SEVERITY_LABELS = { 1: 'As New', 2: 'Minor', 3: 'Moderate', 4: 'Severe', 5
 const EXTENT_LABELS = { A: 'None', B: 'Slight (≤5%)', C: 'Moderate (5–20%)', D: 'Wide (20–50%)', E: 'Extensive (>50%)' };
 const PRIORITY_COLORS = { High: '#c81e1e', Medium: '#e0672e', Low: '#4f9d5c', Monitor: '#1e7dc8' };
 const CURRENCY_SYMBOLS = { USD: '$', GBP: '£', EUR: '€' };
-const APP_VERSION = '0.9';
+const APP_VERSION = '1.0';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -294,6 +294,7 @@ async function route() {
     if (p.length === 0) await renderHome();
     else if (p[0] === 'inspection' && p[1] && p[2] === 'section' && p[3]) await renderSection(p[1], p[3]);
     else if (p[0] === 'inspection' && p[1] && p[2] === 'element' && p[3]) await renderElement(p[1], p[3]);
+    else if (p[0] === 'inspection' && p[1] && p[2] === 'risk-assessment') await renderRiskAssessment(p[1]);
     else if (p[0] === 'inspection' && p[1] && !p[2]) await renderInspection(p[1]);
     else if (p[0] === 'templates') await renderTemplates();
     else await renderHome();
@@ -472,6 +473,7 @@ async function renderInspection(inspectionId) {
   const sections = await DB.listSections(inspectionId);
   const ungroupedElements = await DB.listElementsBySection(inspectionId, null);
   const coverPhoto = await DB.getCoverPhoto(inspectionId);
+  const riskAssessment = await DB.getRiskAssessment(inspectionId);
 
   async function elementRowHtml(elmt) {
     const s = await DB.getElementConditionSummary(elmt.id);
@@ -525,6 +527,14 @@ async function renderInspection(inspectionId) {
           : `<p class="muted" style="font-size:13px; margin:0;">Used on the report cover page.</p>`}
       </div>
 
+      <div class="list-item" id="btn-open-risk-assessment">
+        <div class="meta">
+          <h3>Risk Assessment</h3>
+          <p>${riskAssessment ? `${(riskAssessment.hazards || []).length} hazard${(riskAssessment.hazards || []).length === 1 ? '' : 's'} · ${(riskAssessment.controlActions || []).length} control action${(riskAssessment.controlActions || []).length === 1 ? '' : 's'}` : 'Not started'}</p>
+        </div>
+        <span class="chevron">›</span>
+      </div>
+
       <div class="section-header"><h2>Sections</h2><button class="small-btn" id="btn-add-section">＋ Add section</button></div>
       ${sections.length ? sectionRows.join('') : `<p class="muted" style="font-size:13px; padding:0 2px;">Optional — use sections to group elements by span, zone, or area.</p>`}
 
@@ -545,6 +555,7 @@ async function renderInspection(inspectionId) {
   document.getElementById('btn-report-info').addEventListener('click', () => openReportInfoSheet(inspectionId));
   document.getElementById('btn-edit-header').addEventListener('click', () => openEditHeaderSheet(insp));
   document.getElementById('btn-add-section').addEventListener('click', () => openAddSectionSheet(inspectionId));
+  document.getElementById('btn-open-risk-assessment').addEventListener('click', () => navigate(`#/inspection/${inspectionId}/risk-assessment`));
   document.getElementById('btn-add-element').addEventListener('click', () => openAddElementSheet(inspectionId, null));
   document.getElementById('btn-add-element-fab').addEventListener('click', () => openAddElementSheet(inspectionId, null));
 
@@ -637,6 +648,8 @@ async function openReportInfoSheet(inspectionId) {
         <div class="sheet-handle"></div>
         <h2>Report info</h2>
         <p class="muted" style="font-size:13px; margin-top:-8px;">Appears on the report cover page.</p>
+        <div class="field"><label>Company name</label><input type="text" id="f-companyName" value="${esc(insp.companyName)}" placeholder="Your company name"></div>
+        <div class="field"><label>Company address</label><input type="text" id="f-companyAddress" value="${esc(insp.companyAddress)}" placeholder="Your company address"></div>
         <div class="field"><label>Client</label><input type="text" id="f-client" value="${esc(insp.client)}" placeholder="Client or organization name"></div>
         <div class="field"><label>Reference / project no.</label><input type="text" id="f-reference" value="${esc(insp.reference)}" placeholder="e.g. PRJ-2026-014"></div>
         <div class="field"><label>Report date</label><input type="date" id="f-date" value="${(insp.date || '').slice(0, 10)}"></div>
@@ -684,6 +697,8 @@ async function openReportInfoSheet(inspectionId) {
     const styleBtn = sheet.querySelector('#cover-style-picker .chip.selected');
     const currencyBtn = sheet.querySelector('#currency-picker .chip.selected');
     await DB.updateInspection(inspectionId, {
+      companyName: sheet.querySelector('#f-companyName').value.trim(),
+      companyAddress: sheet.querySelector('#f-companyAddress').value.trim(),
       client: sheet.querySelector('#f-client').value.trim(),
       reference: sheet.querySelector('#f-reference').value.trim(),
       date: sheet.querySelector('#f-date').value,
@@ -1157,6 +1172,497 @@ function openEditElementSheet(inspectionId, elmt, backHash) {
     await DB.deleteElementCascade(elmt.id);
     sheet.remove();
     navigate(backHash);
+  });
+}
+
+// ---------- RISK ASSESSMENT ----------
+function riskBand(l, s) {
+  const r = (l || 0) * (s || 0);
+  let label = '—', colorVar = '--sev-1';
+  if (r > 0) {
+    if (r <= 3) { label = 'Low'; colorVar = '--sev-1'; }
+    else if (r <= 6) { label = 'Medium'; colorVar = '--sev-3'; }
+    else { label = 'High'; colorVar = '--sev-5'; }
+  }
+  return { r, label, colorVar };
+}
+
+async function renderRiskAssessment(inspectionId) {
+  const insp = await DB.get('inspections', inspectionId);
+  if (!insp) { navigate('#/'); return; }
+  const ra = await DB.getOrCreateRiskAssessment(inspectionId);
+
+  const operativeSig = await DB.getSignature(ra.id, 'operative');
+  const managerSig = await DB.getSignature(ra.id, 'manager');
+
+  const hazardCards = (ra.hazards || []).map((h) => {
+    const band = riskBand(h.likelihood, h.severity);
+    return `
+      <div class="hazard-card" data-hazard="${h.id}" style="background:var(--paper); border-radius:12px; border:1px solid var(--line); padding:14px; margin-bottom:10px;">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+          <div>
+            <div style="font-size:14.5px; font-weight:650;">${esc(h.hazardType || 'Untitled hazard')}</div>
+            ${h.description ? `<div style="font-size:12.5px; color:var(--ink-soft); margin-top:2px;">${esc(h.description)}</div>` : ''}
+          </div>
+        </div>
+        ${h.whoMightBeHarmed ? `<div style="font-size:12.5px; color:var(--ink-soft); margin-top:8px;"><b style="color:var(--ink); font-weight:600;">Who might be harmed:</b> ${esc(h.whoMightBeHarmed)}</div>` : ''}
+        ${h.existingControls ? `<div style="font-size:12.5px; color:var(--ink-soft); margin-top:3px;"><b style="color:var(--ink); font-weight:600;">Existing controls:</b> ${esc(h.existingControls)}</div>` : ''}
+        <div style="display:flex; gap:6px; align-items:center; margin-top:10px;">
+          <span class="badge badge-extent">L ${h.likelihood || '—'}</span>
+          <span class="badge badge-extent">S ${h.severity || '—'}</span>
+          <span class="badge" style="background:var(${band.colorVar}); margin-left:auto;">R ${band.r || '—'} · ${band.label}</span>
+        </div>
+      </div>`;
+  }).join('');
+
+  const controlCards = (ra.controlActions || []).map((c) => `
+    <div class="hazard-card" data-control="${c.id}" style="background:var(--paper); border-radius:12px; border:1px solid var(--line); padding:14px; margin-bottom:10px;">
+      <div style="font-size:14px; font-weight:600; margin-bottom:8px;">${esc(c.controlRequired || 'Untitled action')}</div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px 14px; font-size:12px;">
+        <div><span class="muted" style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.4px; display:block;">Action by</span>${esc(c.actionBy) || '—'}</div>
+        <div><span class="muted" style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.4px; display:block;">Target date</span>${c.targetDate ? fmtDate(c.targetDate) : '—'}</div>
+        <div><span class="muted" style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.4px; display:block;">Completion date</span>${c.completionDate ? fmtDate(c.completionDate) : '—'}</div>
+        <div><span class="muted" style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.4px; display:block;">Signed off by</span>${esc(c.signedOffByName) || '—'}</div>
+      </div>
+    </div>`).join('');
+
+  appEl.innerHTML = `
+    <div class="topbar">
+      <button class="icon-btn" id="btn-back">‹</button>
+      <div style="flex:1; min-width:0;">
+        <h1 style="font-size:17px;">Risk Assessment</h1>
+        <span class="sub">${esc(insp.structureName)}</span>
+      </div>
+      <button class="text-btn" id="btn-export-ra">Export</button>
+    </div>
+    <div class="content">
+      <div class="card" style="margin-top:0;">
+        <div class="link-row" style="margin-bottom:8px;"><strong style="font-size:15px;">Assessment Details</strong><button class="small-btn" id="btn-edit-ra-details">Edit</button></div>
+        <p class="muted" style="margin:4px 0; font-size:14px;">Company: ${esc(ra.companyName) || '—'}</p>
+        <p class="muted" style="margin:4px 0; font-size:14px;">Address: ${esc(ra.companyAddress) || '—'}</p>
+        <p class="muted" style="margin:4px 0; font-size:14px;">Title: ${esc(ra.assessmentTitle) || '—'}</p>
+        <p class="muted" style="margin:4px 0; font-size:14px;">Reference: ${esc(ra.assessmentReference) || '—'}</p>
+        <p class="muted" style="margin:4px 0; font-size:14px;">Assessor: ${esc(ra.assessorName) || '—'}</p>
+        <p class="muted" style="margin:4px 0; font-size:14px;">Date: ${ra.assessmentDate ? fmtDate(ra.assessmentDate) : '—'}</p>
+        <p class="muted" style="margin:4px 0; font-size:14px;">Location: ${esc(ra.locationSiteAddress) || '—'}</p>
+      </div>
+
+      <div class="card">
+        <div class="link-row" style="margin-bottom:8px;"><strong style="font-size:15px;">Description of Task / Activity</strong><button class="small-btn" id="btn-edit-ra-task">Edit</button></div>
+        <p style="margin:0; font-size:14px;">${esc(ra.taskDescription) || '<span class="muted">Not yet described</span>'}</p>
+      </div>
+
+      <div class="section-header" style="margin-top:0;"><h2>Hazard Identification</h2><button class="small-btn" id="btn-add-hazard">＋ Add</button></div>
+      ${hazardCards || `<p class="muted" style="font-size:13px; padding:0 2px;">No hazards logged yet.</p>`}
+
+      <div class="section-header"><h2>Control Actions &amp; Residual Risk</h2><button class="small-btn" id="btn-add-control">＋ Add</button></div>
+      ${controlCards || `<p class="muted" style="font-size:13px; padding:0 2px;">No control actions logged yet.</p>`}
+
+      <div class="section-header"><h2>Sign-off</h2></div>
+      <div class="card">
+        <div class="link-row" style="margin-bottom:8px;"><strong style="font-size:15px;">Responsible Person(s)</strong><button class="small-btn" id="btn-edit-responsible">Edit</button></div>
+        <p style="margin:0 0 16px; font-size:14px;">${esc(ra.responsiblePersons) || '<span class="muted">Not yet specified</span>'}</p>
+
+        <div class="field-label" style="font-size:13px; font-weight:600; color:var(--ink-soft); text-transform:uppercase; letter-spacing:0.3px; margin-bottom:8px;">Residual Risk Acceptable?</div>
+        <div style="display:flex; gap:10px; margin-bottom:20px;" id="residual-toggle">
+          <button class="chip ${ra.residualRiskAcceptable === 'yes' ? 'selected' : ''}" data-val="yes" style="${ra.residualRiskAcceptable === 'yes' ? 'background:var(--sev-1);' : ''}">Yes</button>
+          <button class="chip ${ra.residualRiskAcceptable === 'no' ? 'selected' : ''}" data-val="no" style="${ra.residualRiskAcceptable === 'no' ? 'background:var(--red);' : ''}">No</button>
+        </div>
+
+        <div style="border-top:1px solid var(--line); padding-top:14px; margin-bottom:14px;">
+          <div class="link-row" style="margin-bottom:8px;"><strong style="font-size:14px;">Operative / Assessor</strong><button class="small-btn" id="btn-edit-operative">Edit</button></div>
+          <p class="muted" style="margin:0 0 8px; font-size:13px;">${esc(ra.operativeName) || 'Not yet signed'}${ra.operativeDate ? ` · ${fmtDate(ra.operativeDate)}` : ''}</p>
+          ${operativeSig
+            ? `<div class="photo-thumb" id="operative-sig-thumb" style="width:100px; height:44px;"><img src="${blobUrl(operativeSig.originalBlob)}" style="object-fit:contain; background:#fff;"></div>`
+            : `<button class="btn btn-secondary" id="btn-sign-operative" style="font-size:13px; padding:8px 14px;">✍️ Sign</button>`}
+        </div>
+
+        <div style="border-top:1px solid var(--line); padding-top:14px;">
+          <div class="link-row" style="margin-bottom:8px;"><strong style="font-size:14px;">Manager / Supervisor</strong><button class="small-btn" id="btn-edit-manager">Edit</button></div>
+          <p class="muted" style="margin:0 0 8px; font-size:13px;">${esc(ra.managerName) || 'Not yet signed'}${ra.managerDate ? ` · ${fmtDate(ra.managerDate)}` : ''}</p>
+          ${managerSig
+            ? `<div class="photo-thumb" id="manager-sig-thumb" style="width:100px; height:44px;"><img src="${blobUrl(managerSig.originalBlob)}" style="object-fit:contain; background:#fff;"></div>`
+            : `<button class="btn btn-secondary" id="btn-sign-manager" style="font-size:13px; padding:8px 14px;">✍️ Sign</button>`}
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('btn-back').addEventListener('click', () => navigate(`#/inspection/${inspectionId}`));
+  document.getElementById('btn-export-ra').addEventListener('click', () => exportRiskAssessmentPDF(inspectionId));
+  document.getElementById('btn-edit-ra-details').addEventListener('click', () => openEditRADetailsSheet(inspectionId, ra));
+  document.getElementById('btn-edit-ra-task').addEventListener('click', () => openEditRATaskSheet(inspectionId, ra));
+  document.getElementById('btn-add-hazard').addEventListener('click', () => openHazardEditorSheet(inspectionId, ra, null));
+  document.getElementById('btn-add-control').addEventListener('click', () => openControlActionEditorSheet(inspectionId, ra, null));
+  document.getElementById('btn-edit-responsible').addEventListener('click', () => openEditResponsibleSheet(inspectionId, ra));
+  document.getElementById('btn-edit-operative').addEventListener('click', () => openEditSignOffSheet(inspectionId, ra, 'operative'));
+  document.getElementById('btn-edit-manager').addEventListener('click', () => openEditSignOffSheet(inspectionId, ra, 'manager'));
+
+  appEl.querySelectorAll('[data-hazard]').forEach((card) => {
+    card.addEventListener('click', () => {
+      const h = (ra.hazards || []).find((x) => x.id === card.dataset.hazard);
+      openHazardEditorSheet(inspectionId, ra, h);
+    });
+  });
+  appEl.querySelectorAll('[data-control]').forEach((card) => {
+    card.addEventListener('click', () => {
+      const c = (ra.controlActions || []).find((x) => x.id === card.dataset.control);
+      openControlActionEditorSheet(inspectionId, ra, c);
+    });
+  });
+
+  appEl.querySelectorAll('#residual-toggle .chip').forEach((chip) => {
+    chip.addEventListener('click', async () => {
+      const wasSelected = chip.classList.contains('selected');
+      await DB.updateRiskAssessment(ra.id, { residualRiskAcceptable: wasSelected ? null : chip.dataset.val });
+      renderRiskAssessment(inspectionId);
+    });
+  });
+
+  const signOperativeBtn = document.getElementById('btn-sign-operative');
+  if (signOperativeBtn) signOperativeBtn.addEventListener('click', () => {
+    openSignaturePad(null, async (blob) => {
+      await DB.setSignature(ra.id, 'operative', blob);
+      const now = new Date();
+      await DB.updateRiskAssessment(ra.id, {
+        operativeDate: ra.operativeDate || now.toISOString().slice(0, 10),
+        operativeTime: ra.operativeTime || now.toTimeString().slice(0, 5)
+      });
+      renderRiskAssessment(inspectionId);
+    });
+  });
+  const signManagerBtn = document.getElementById('btn-sign-manager');
+  if (signManagerBtn) signManagerBtn.addEventListener('click', () => {
+    openSignaturePad(null, async (blob) => {
+      await DB.setSignature(ra.id, 'manager', blob);
+      const now = new Date();
+      await DB.updateRiskAssessment(ra.id, {
+        managerDate: ra.managerDate || now.toISOString().slice(0, 10),
+        managerTime: ra.managerTime || now.toTimeString().slice(0, 5)
+      });
+      renderRiskAssessment(inspectionId);
+    });
+  });
+
+  const opThumb = document.getElementById('operative-sig-thumb');
+  if (opThumb) opThumb.addEventListener('click', () => {
+    openSignaturePad(operativeSig.originalBlob, async (blob) => {
+      await DB.setSignature(ra.id, 'operative', blob);
+      renderRiskAssessment(inspectionId);
+    });
+  });
+  const mgThumb = document.getElementById('manager-sig-thumb');
+  if (mgThumb) mgThumb.addEventListener('click', () => {
+    openSignaturePad(managerSig.originalBlob, async (blob) => {
+      await DB.setSignature(ra.id, 'manager', blob);
+      renderRiskAssessment(inspectionId);
+    });
+  });
+}
+
+function openEditRADetailsSheet(inspectionId, ra) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Assessment details</h2>
+        <div class="field"><label>Company name</label><input type="text" id="f-companyName" value="${esc(ra.companyName)}"></div>
+        <div class="field"><label>Company address</label><input type="text" id="f-companyAddress" value="${esc(ra.companyAddress)}"></div>
+        <div class="field"><label>Assessment title</label><input type="text" id="f-title" value="${esc(ra.assessmentTitle)}" placeholder="e.g. Bridge Deck Inspection RA"></div>
+        <div class="field"><label>Assessment reference</label><input type="text" id="f-reference" value="${esc(ra.assessmentReference)}"></div>
+        <div class="field"><label>Assessor name</label><input type="text" id="f-assessor" value="${esc(ra.assessorName)}"></div>
+        <div class="field"><label>Assessment date</label><input type="date" id="f-assessDate" value="${(ra.assessmentDate || '').slice(0, 10)}"></div>
+        <div class="field"><label>Location / site address</label><input type="text" id="f-location" value="${esc(ra.locationSiteAddress)}"></div>
+        <button class="btn btn-primary btn-block" id="btn-save">Save</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-save').addEventListener('click', async () => {
+    await DB.updateRiskAssessment(ra.id, {
+      companyName: sheet.querySelector('#f-companyName').value.trim(),
+      companyAddress: sheet.querySelector('#f-companyAddress').value.trim(),
+      assessmentTitle: sheet.querySelector('#f-title').value.trim(),
+      assessmentReference: sheet.querySelector('#f-reference').value.trim(),
+      assessorName: sheet.querySelector('#f-assessor').value.trim(),
+      assessmentDate: sheet.querySelector('#f-assessDate').value,
+      locationSiteAddress: sheet.querySelector('#f-location').value.trim()
+    });
+    sheet.remove();
+    renderRiskAssessment(inspectionId);
+  });
+}
+
+function openEditRATaskSheet(inspectionId, ra) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Description of task / activity</h2>
+        <div class="field"><textarea id="f-task" style="min-height:140px;">${esc(ra.taskDescription)}</textarea></div>
+        <button class="btn btn-primary btn-block" id="btn-save">Save</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-save').addEventListener('click', async () => {
+    await DB.updateRiskAssessment(ra.id, { taskDescription: sheet.querySelector('#f-task').value.trim() });
+    sheet.remove();
+    renderRiskAssessment(inspectionId);
+  });
+}
+
+function openEditResponsibleSheet(inspectionId, ra) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Responsible person(s)</h2>
+        <div class="field"><textarea id="f-resp" placeholder="Name / role">${esc(ra.responsiblePersons)}</textarea></div>
+        <button class="btn btn-primary btn-block" id="btn-save">Save</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-save').addEventListener('click', async () => {
+    await DB.updateRiskAssessment(ra.id, { responsiblePersons: sheet.querySelector('#f-resp').value.trim() });
+    sheet.remove();
+    renderRiskAssessment(inspectionId);
+  });
+}
+
+function openEditSignOffSheet(inspectionId, ra, role) {
+  const nameVal = role === 'operative' ? ra.operativeName : ra.managerName;
+  const dateVal = role === 'operative' ? ra.operativeDate : ra.managerDate;
+  const timeVal = role === 'operative' ? ra.operativeTime : ra.managerTime;
+  const label = role === 'operative' ? 'Operative / Assessor' : 'Manager / Supervisor';
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>${label}</h2>
+        <div class="field"><label>Name</label><input type="text" id="f-name" value="${esc(nameVal)}"></div>
+        <div class="row-2">
+          <div class="field"><label>Date</label><input type="date" id="f-date" value="${(dateVal || '').slice(0, 10)}"></div>
+          <div class="field"><label>Time</label><input type="time" id="f-time" value="${esc(timeVal)}"></div>
+        </div>
+        <button class="btn btn-primary btn-block" id="btn-save">Save</button>
+        <button class="btn btn-danger btn-block" id="btn-clear-sig" style="margin-top:8px;">Clear signature</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-save').addEventListener('click', async () => {
+    const patch = {};
+    if (role === 'operative') {
+      patch.operativeName = sheet.querySelector('#f-name').value.trim();
+      patch.operativeDate = sheet.querySelector('#f-date').value;
+      patch.operativeTime = sheet.querySelector('#f-time').value;
+    } else {
+      patch.managerName = sheet.querySelector('#f-name').value.trim();
+      patch.managerDate = sheet.querySelector('#f-date').value;
+      patch.managerTime = sheet.querySelector('#f-time').value;
+    }
+    await DB.updateRiskAssessment(ra.id, patch);
+    sheet.remove();
+    renderRiskAssessment(inspectionId);
+  });
+  sheet.querySelector('#btn-clear-sig').addEventListener('click', async () => {
+    await DB.removeSignature(ra.id, role);
+    sheet.remove();
+    renderRiskAssessment(inspectionId);
+  });
+}
+
+async function openHazardEditorSheet(inspectionId, ra, hazard) {
+  const isNew = !hazard;
+  const h = hazard || { id: DB.uid(), hazardType: '', description: '', whoMightBeHarmed: '', existingControls: '', likelihood: null, severity: null };
+  const suggestions = await DB.listHazardTypeSuggestions();
+
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>${isNew ? 'Add hazard' : 'Edit hazard'}</h2>
+        <div class="field">
+          <label>Hazard type</label>
+          <input type="text" id="f-hazType" list="hazard-suggestions" value="${esc(h.hazardType)}" placeholder="e.g. Working at Height">
+          <datalist id="hazard-suggestions">${suggestions.map((s) => `<option value="${esc(s)}">`).join('')}</datalist>
+        </div>
+        <div class="field"><label>Location / description of hazard</label><textarea id="f-hazDesc">${esc(h.description)}</textarea></div>
+        <div class="field"><label>Who might be harmed</label><input type="text" id="f-hazWho" value="${esc(h.whoMightBeHarmed)}"></div>
+        <div class="field"><label>Existing controls</label><textarea id="f-hazControls">${esc(h.existingControls)}</textarea></div>
+
+        <div class="field">
+          <label>Likelihood</label>
+          <div class="severity-picker" id="likelihood-picker">
+            ${[1, 2, 3].map((n) => `<button class="chip ${h.likelihood === n ? 'selected' : ''}" data-l="${n}" style="${h.likelihood === n ? 'background:var(--ink);' : ''}">${n}</button>`).join('')}
+          </div>
+        </div>
+        <div class="field">
+          <label>Severity</label>
+          <div class="severity-picker" id="severity-picker-haz">
+            ${[1, 2, 3].map((n) => `<button class="chip ${h.severity === n ? 'selected' : ''}" data-s="${n}" style="${h.severity === n ? 'background:var(--ink);' : ''}">${n}</button>`).join('')}
+          </div>
+        </div>
+        <div class="card" id="r-preview" style="text-align:center; font-weight:700;"></div>
+
+        <button class="btn btn-primary btn-block" id="btn-save">Save hazard</button>
+        ${!isNew ? '<button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:8px;">Delete hazard</button>' : ''}
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+
+  let currentL = h.likelihood, currentS = h.severity;
+  function updateRPreview() {
+    const band = riskBand(currentL, currentS);
+    const box = sheet.querySelector('#r-preview');
+    box.style.background = currentL && currentS ? `var(${band.colorVar})` : 'var(--bg)';
+    box.style.color = currentL && currentS ? '#fff' : 'var(--ink-soft)';
+    box.textContent = currentL && currentS ? `Risk Rating: ${band.r} · ${band.label}` : 'Select likelihood and severity';
+  }
+  updateRPreview();
+
+  sheet.querySelectorAll('#likelihood-picker .chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const was = chip.classList.contains('selected');
+      sheet.querySelectorAll('#likelihood-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
+      currentL = was ? null : Number(chip.dataset.l);
+      if (!was) { chip.classList.add('selected'); chip.style.background = 'var(--ink)'; }
+      updateRPreview();
+    });
+  });
+  sheet.querySelectorAll('#severity-picker-haz .chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const was = chip.classList.contains('selected');
+      sheet.querySelectorAll('#severity-picker-haz .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
+      currentS = was ? null : Number(chip.dataset.s);
+      if (!was) { chip.classList.add('selected'); chip.style.background = 'var(--ink)'; }
+      updateRPreview();
+    });
+  });
+
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-save').addEventListener('click', async () => {
+    const updated = {
+      id: h.id,
+      hazardType: sheet.querySelector('#f-hazType').value.trim(),
+      description: sheet.querySelector('#f-hazDesc').value.trim(),
+      whoMightBeHarmed: sheet.querySelector('#f-hazWho').value.trim(),
+      existingControls: sheet.querySelector('#f-hazControls').value.trim(),
+      likelihood: currentL,
+      severity: currentS
+    };
+    const hazards = [...(ra.hazards || [])];
+    const idx = hazards.findIndex((x) => x.id === h.id);
+    if (idx >= 0) hazards[idx] = updated; else hazards.push(updated);
+    await DB.updateRiskAssessment(ra.id, { hazards });
+    sheet.remove();
+    renderRiskAssessment(inspectionId);
+  });
+  const deleteBtn = sheet.querySelector('#btn-delete');
+  if (deleteBtn) deleteBtn.addEventListener('click', async () => {
+    if (!confirm('Delete this hazard?')) return;
+    const hazards = (ra.hazards || []).filter((x) => x.id !== h.id);
+    await DB.updateRiskAssessment(ra.id, { hazards });
+    sheet.remove();
+    renderRiskAssessment(inspectionId);
+  });
+}
+
+async function openControlActionEditorSheet(inspectionId, ra, control) {
+  const isNew = !control;
+  const c = control || { id: DB.uid(), controlRequired: '', actionBy: '', targetDate: '', completionDate: '', signedOffByName: '' };
+  const sigRole = `control:${c.id}`;
+  let sig = await DB.getSignature(ra.id, sigRole);
+
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>${isNew ? 'Add control action' : 'Edit control action'}</h2>
+        <div class="field"><label>Additional controls required</label><textarea id="f-controlReq">${esc(c.controlRequired)}</textarea></div>
+        <div class="field"><label>Action by</label><input type="text" id="f-actionBy" value="${esc(c.actionBy)}"></div>
+        <div class="row-2">
+          <div class="field"><label>Target date</label><input type="date" id="f-targetDate" value="${(c.targetDate || '').slice(0, 10)}"></div>
+          <div class="field"><label>Completion date</label><input type="date" id="f-completionDate" value="${(c.completionDate || '').slice(0, 10)}"></div>
+        </div>
+        <div class="field"><label>Signed off by (name)</label><input type="text" id="f-signedOff" value="${esc(c.signedOffByName)}"></div>
+        <div class="field">
+          <label>Signature</label>
+          <div id="sig-area"></div>
+        </div>
+        <button class="btn btn-primary btn-block" id="btn-save">Save</button>
+        ${!isNew ? '<button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:8px;">Delete control action</button>' : ''}
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+
+  function renderSigArea() {
+    const area = sheet.querySelector('#sig-area');
+    area.innerHTML = sig
+      ? `<div class="photo-thumb" id="control-sig-thumb" style="width:100px; height:44px;"><img src="${blobUrl(sig.originalBlob)}" style="object-fit:contain; background:#fff;"></div>`
+      : `<button class="btn btn-secondary" id="btn-sign-control" style="font-size:13px; padding:8px 14px;" type="button">✍️ Sign</button>`;
+    const signBtn = area.querySelector('#btn-sign-control');
+    if (signBtn) signBtn.addEventListener('click', () => {
+      openSignaturePad(null, async (blob) => {
+        sig = await DB.setSignature(ra.id, sigRole, blob);
+        renderSigArea();
+      });
+    });
+    const thumb = area.querySelector('#control-sig-thumb');
+    if (thumb) thumb.addEventListener('click', () => {
+      openSignaturePad(sig.originalBlob, async (blob) => {
+        sig = await DB.setSignature(ra.id, sigRole, blob);
+        renderSigArea();
+      });
+    });
+  }
+  renderSigArea();
+
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-save').addEventListener('click', async () => {
+    const updated = {
+      id: c.id,
+      controlRequired: sheet.querySelector('#f-controlReq').value.trim(),
+      actionBy: sheet.querySelector('#f-actionBy').value.trim(),
+      targetDate: sheet.querySelector('#f-targetDate').value,
+      completionDate: sheet.querySelector('#f-completionDate').value,
+      signedOffByName: sheet.querySelector('#f-signedOff').value.trim()
+    };
+    const controlActions = [...(ra.controlActions || [])];
+    const idx = controlActions.findIndex((x) => x.id === c.id);
+    if (idx >= 0) controlActions[idx] = updated; else controlActions.push(updated);
+    await DB.updateRiskAssessment(ra.id, { controlActions });
+    sheet.remove();
+    renderRiskAssessment(inspectionId);
+  });
+  const deleteBtn = sheet.querySelector('#btn-delete');
+  if (deleteBtn) deleteBtn.addEventListener('click', async () => {
+    if (!confirm('Delete this control action?')) return;
+    await DB.removeSignature(ra.id, sigRole);
+    const controlActions = (ra.controlActions || []).filter((x) => x.id !== c.id);
+    await DB.updateRiskAssessment(ra.id, { controlActions });
+    sheet.remove();
+    renderRiskAssessment(inspectionId);
   });
 }
 

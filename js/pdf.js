@@ -645,3 +645,266 @@ function drawArchArrayCover(doc, { insp, coverData, companyLogoData, clientLogoD
     doc.text(insp.client, tx, boxY + boxH / 2 + 10);
   }
 }
+
+// ---------- Risk Assessment (standalone export, matches the uploaded template layout) ----------
+
+function riskBandPdf(l, s) {
+  const r = (l || 0) * (s || 0);
+  const label = r === 0 ? '' : r <= 3 ? 'Low' : r <= 6 ? 'Medium' : 'High';
+  const color = r <= 3 ? [79, 157, 92] : r <= 6 ? [224, 167, 46] : [200, 30, 30];
+  return { r, label, color };
+}
+
+async function exportRiskAssessmentPDF(inspectionId) {
+  if (!window.jspdf) {
+    toast('PDF library not loaded. Connect to the internet once to cache it, then try again.');
+    return;
+  }
+  toast('Building risk assessment…');
+  try {
+    await buildAndSaveRiskAssessmentPDF(inspectionId);
+  } catch (err) {
+    console.error('Risk assessment export failed', err);
+    toast('Export failed: ' + (err && err.message ? err.message : 'unknown error'));
+  }
+}
+
+async function buildAndSaveRiskAssessmentPDF(inspectionId) {
+  const insp = await DB.get('inspections', inspectionId);
+  const ra = await DB.getRiskAssessment(inspectionId);
+  if (!ra) { toast('No risk assessment to export yet'); return; }
+
+  const operativeSigPhoto = await DB.getSignature(ra.id, 'operative');
+  const managerSigPhoto = await DB.getSignature(ra.id, 'manager');
+  const operativeSigData = operativeSigPhoto ? await loadNormalizedImage(operativeSigPhoto.originalBlob) : null;
+  const managerSigData = managerSigPhoto ? await loadNormalizedImage(managerSigPhoto.originalBlob) : null;
+
+  const controlSigMap = {};
+  for (const c of (ra.controlActions || [])) {
+    const sigPhoto = await DB.getSignature(ra.id, `control:${c.id}`);
+    if (sigPhoto) controlSigMap[c.id] = await loadNormalizedImage(sigPhoto.originalBlob);
+  }
+
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 40;
+  const contentW = pageW - margin * 2;
+  let y = margin;
+
+  function blackBar(text, yPos, h) {
+    h = h || 20;
+    if (yPos + h > pageH - margin) { doc.addPage(); yPos = margin; }
+    doc.setFillColor(20, 20, 20);
+    doc.rect(margin, yPos, contentW, h, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.text(text, margin + 8, yPos + h - 6);
+    return yPos + h + 10;
+  }
+
+  // ---- Header ----
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(28, 31, 38);
+  doc.text('Company Name:', margin, y + 10);
+  doc.setFont('helvetica', 'bold');
+  doc.text(ra.companyName || '—', margin + 95, y + 10);
+  y += 20;
+  doc.setFont('helvetica', 'normal');
+  doc.text('Address:', margin, y + 10);
+  doc.setFont('helvetica', 'bold');
+  doc.text(ra.companyAddress || '—', margin + 95, y + 10);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(26);
+  doc.setTextColor(28, 31, 38);
+  doc.text('Risk Assessment', pageW - margin, margin + 26, { align: 'right' });
+
+  y = margin + 56;
+  doc.setDrawColor(20, 20, 20);
+  doc.setLineWidth(1.2);
+  doc.line(margin, y, pageW - margin, y);
+  y += 20;
+
+  function labelValueRow(label1, val1, label2, val2, yy) {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.setTextColor(74, 79, 90);
+    doc.text(label1, margin, yy);
+    doc.setTextColor(28, 31, 38);
+    doc.setFont('helvetica', 'bold');
+    doc.text(val1 || '—', margin + 110, yy);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(74, 79, 90);
+    doc.text(label2, margin + contentW / 2, yy);
+    doc.setTextColor(28, 31, 38);
+    doc.setFont('helvetica', 'bold');
+    doc.text(val2 || '—', margin + contentW / 2 + 90, yy);
+    return yy + 20;
+  }
+  y = labelValueRow('Assessment Title:', ra.assessmentTitle, 'Reference:', ra.assessmentReference, y);
+  y = labelValueRow('Assessor:', ra.assessorName, 'Date:', fmtDate(ra.assessmentDate), y);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(74, 79, 90);
+  doc.text('Location / Site Address:', margin, y);
+  doc.setTextColor(28, 31, 38);
+  doc.setFont('helvetica', 'bold');
+  doc.text(ra.locationSiteAddress || '—', margin + 130, y);
+  y += 22;
+
+  // ---- Task description ----
+  y = blackBar('Description of Task / Activity', y);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(28, 31, 38);
+  const taskLines = doc.splitTextToSize(ra.taskDescription || '—', contentW - 10);
+  doc.text(taskLines, margin + 5, y);
+  y += taskLines.length * 13 + 16;
+
+  // ---- Risk matrix legend ----
+  if (y + 80 > pageH - margin) { doc.addPage(); y = margin; }
+  y = blackBar('Risk Matrix', y);
+  doc.setDrawColor(210, 213, 218);
+  doc.rect(margin, y, contentW, 62);
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(28, 31, 38);
+  doc.text('Likelihood (L): 1 – Unlikely   2 – Possible   3 – Likely', margin + 8, y + 18);
+  doc.text('Severity (S): 1 – Minor Injury   2 – Serious Injury   3 – Major Injury / Fatality', margin + 8, y + 34);
+  doc.text('Risk Rating (R) = L × S    (1–3 Low   4–6 Medium   7–9 High)', margin + 8, y + 50);
+  y += 62 + 18;
+
+  // ---- Hazard Identification table ----
+  if (y + 60 > pageH - margin) { doc.addPage(); y = margin; }
+  y = blackBar('Hazard Identification & Initial Risk Rating', y);
+  const hazardRows = (ra.hazards || []).map((h) => {
+    const band = riskBandPdf(h.likelihood, h.severity);
+    return [h.hazardType || '', h.description || '', h.whoMightBeHarmed || '', h.existingControls || '', h.likelihood || '', h.severity || '', band.r || ''];
+  });
+  if (doc.autoTable && hazardRows.length) {
+    doc.autoTable({
+      startY: y,
+      margin: { left: margin, right: margin },
+      head: [['Hazard Type', 'Location / Description', 'Who Might Be Harmed', 'Existing Controls', 'L', 'S', 'R']],
+      body: hazardRows,
+      styles: { font: 'helvetica', fontSize: 8.5, cellPadding: 5 },
+      headStyles: { fillColor: [20, 20, 20], textColor: 255 },
+      columnStyles: { 4: { halign: 'center' }, 5: { halign: 'center' }, 6: { halign: 'center' } },
+      didParseCell: (data) => {
+        if (data.section === 'body' && data.column.index === 6) {
+          const r = Number(data.cell.raw);
+          if (r) {
+            data.cell.styles.fillColor = r <= 3 ? [79, 157, 92] : r <= 6 ? [224, 167, 46] : [200, 30, 30];
+            data.cell.styles.textColor = 255;
+            data.cell.styles.fontStyle = 'bold';
+          }
+        }
+      }
+    });
+    y = doc.lastAutoTable.finalY + 18;
+  } else {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.setTextColor(120, 124, 132);
+    doc.text('No hazards logged.', margin, y);
+    y += 20;
+  }
+
+  // ---- Control Actions table ----
+  if (y + 60 > pageH - margin) { doc.addPage(); y = margin; }
+  y = blackBar('Control Actions & Residual Risk Rating', y);
+  const controlRows = (ra.controlActions || []).map((c) => [
+    c.controlRequired || '', c.actionBy || '',
+    c.targetDate ? fmtDate(c.targetDate) : '', c.completionDate ? fmtDate(c.completionDate) : '',
+    c.signedOffByName || ''
+  ]);
+  if (doc.autoTable && controlRows.length) {
+    doc.autoTable({
+      startY: y,
+      margin: { left: margin, right: margin },
+      head: [['Additional Controls Required', 'Action By', 'Target Date', 'Completion Date', 'Signed Off By']],
+      body: controlRows,
+      styles: { font: 'helvetica', fontSize: 8.5, cellPadding: 5, minCellHeight: 28 },
+      headStyles: { fillColor: [20, 20, 20], textColor: 255 },
+      didDrawCell: (data) => {
+        if (data.section === 'body' && data.column.index === 4) {
+          const rowRecord = (ra.controlActions || [])[data.row.index];
+          const sigData = rowRecord && controlSigMap[rowRecord.id];
+          if (sigData) {
+            const h = Math.min(data.cell.height - 6, 18);
+            const w = (sigData.w / sigData.h) * h;
+            doc.addImage(sigData.url, 'PNG', data.cell.x + 2, data.cell.y + data.cell.height - h - 3, w, h, undefined, 'FAST');
+          }
+        }
+      }
+    });
+    y = doc.lastAutoTable.finalY + 18;
+  } else {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.setTextColor(120, 124, 132);
+    doc.text('No control actions logged.', margin, y);
+    y += 20;
+  }
+
+  // ---- Responsible Person(s) ----
+  if (y + 40 > pageH - margin) { doc.addPage(); y = margin; }
+  y = blackBar('Responsible Person(s)', y);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(28, 31, 38);
+  const respLines = doc.splitTextToSize(ra.responsiblePersons || '—', contentW - 10);
+  doc.text(respLines, margin + 5, y);
+  y += respLines.length * 13 + 16;
+
+  // ---- Residual Risk Acceptable ----
+  if (y + 50 > pageH - margin) { doc.addPage(); y = margin; }
+  y = blackBar('Residual Risk Acceptable?', y);
+  const yesChecked = ra.residualRiskAcceptable === 'yes';
+  const noChecked = ra.residualRiskAcceptable === 'no';
+  doc.setDrawColor(28, 31, 38);
+  doc.rect(margin + 5, y - 8, 10, 10);
+  if (yesChecked) { doc.setFillColor(20, 20, 20); doc.rect(margin + 6.5, y - 6.5, 7, 7, 'F'); }
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10);
+  doc.setTextColor(28, 31, 38);
+  doc.text('Yes', margin + 20, y);
+  doc.setFont('helvetica', 'normal');
+  doc.text('— Risk reduced to as low as reasonably practicable', margin + 46, y);
+  y += 18;
+  doc.rect(margin + 5, y - 8, 10, 10);
+  if (noChecked) { doc.setFillColor(20, 20, 20); doc.rect(margin + 6.5, y - 6.5, 7, 7, 'F'); }
+  doc.setFont('helvetica', 'bold');
+  doc.text('No', margin + 20, y);
+  doc.setFont('helvetica', 'normal');
+  doc.text('— Further controls required before work proceeds', margin + 46, y);
+  y += 30;
+
+  // ---- Sign-off ----
+  if (y + 90 > pageH - margin) { doc.addPage(); y = margin; }
+  const colW = contentW / 2 - 10;
+  function signBlock(x, label, name, sigData, date, time) {
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.setTextColor(28, 31, 38);
+    doc.text(label, x, y);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Name: ${name || '—'}`, x, y + 16);
+    if (sigData) {
+      const h = 30;
+      const w = Math.min((sigData.w / sigData.h) * h, colW);
+      doc.addImage(sigData.url, 'PNG', x, y + 22, w, h, undefined, 'FAST');
+    }
+    doc.text(`Date: ${date ? fmtDate(date) : '—'}   Time: ${time || '—'}`, x, y + 62);
+  }
+  signBlock(margin, 'Operative / Assessor', ra.operativeName, operativeSigData, ra.operativeDate, ra.operativeTime);
+  signBlock(margin + colW + 20, 'Manager / Supervisor', ra.managerName, managerSigData, ra.managerDate, ra.managerTime);
+
+  const filename = `${(insp.structureName || 'inspection').replace(/[^a-z0-9]+/gi, '_')}_RiskAssessment_${(ra.assessmentDate || '').slice(0, 10)}.pdf`;
+  doc.save(filename);
+  toast('Risk assessment saved');
+}
