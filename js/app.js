@@ -1,20 +1,8 @@
 // app.js - routing + view rendering for the Site Inspection app
 
 const appEl = document.getElementById('app');
-const SEVERITY_LABELS = {
-  1: 'As New',
-  2: 'Minor',
-  3: 'Moderate',
-  4: 'Severe',
-  5: 'Failed'
-};
-const EXTENT_LABELS = {
-  A: 'None',
-  B: 'Slight (≤5%)',
-  C: 'Moderate (5–20%)',
-  D: 'Wide (20–50%)',
-  E: 'Extensive (>50%)'
-};
+const SEVERITY_LABELS = { 1: 'As New', 2: 'Minor', 3: 'Moderate', 4: 'Severe', 5: 'Failed' };
+const EXTENT_LABELS = { A: 'None', B: 'Slight (≤5%)', C: 'Moderate (5–20%)', D: 'Wide (20–50%)', E: 'Extensive (>50%)' };
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -28,11 +16,11 @@ function clearObjectUrls() {
 }
 
 function toast(msg) {
-  const el = document.createElement('div');
-  el.className = 'toast';
-  el.textContent = msg;
-  document.body.appendChild(el);
-  setTimeout(() => el.remove(), 2200);
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2200);
 }
 
 function fmtDate(iso) {
@@ -52,38 +40,103 @@ function el(html) {
   return t.content.firstElementChild;
 }
 
-// ---------- Routing ----------
-function navigate(hash) {
-  window.location.hash = hash;
+// Re-encodes a captured/selected photo to correct pixel orientation (fixes iOS EXIF
+// rotation so portrait photos don't appear sideways in canvas-based annotation/PDF export),
+// and caps resolution to keep storage reasonable.
+async function normalizeImageFile(file, maxDim = 3000) {
+  try {
+    const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    let w = bitmap.width, h = bitmap.height;
+    const longEdge = Math.max(w, h);
+    if (longEdge > maxDim) {
+      const scale = maxDim / longEdge;
+      w = Math.round(w * scale);
+      h = Math.round(h * scale);
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h);
+    if (bitmap.close) bitmap.close();
+    return await new Promise((resolve) => canvas.toBlob((blob) => resolve(blob || file), 'image/jpeg', 0.9));
+  } catch (err) {
+    console.warn('normalizeImageFile failed, using original file', err);
+    return file;
+  }
 }
 
+// ---------- Routing ----------
+function navigate(hash) { window.location.hash = hash; }
 window.addEventListener('hashchange', route);
 window.addEventListener('DOMContentLoaded', route);
 
 function parseHash() {
-  const h = window.location.hash.replace(/^#\/?/, '');
-  return h.split('/').filter(Boolean);
+  return window.location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
 }
 
 async function route() {
   clearObjectUrls();
-  const parts = parseHash();
+  const p = parseHash();
   try {
-    if (parts.length === 0) {
-      await renderHome();
-    } else if (parts[0] === 'inspection' && parts[1] && !parts[2]) {
-      await renderInspection(parts[1]);
-    } else if (parts[0] === 'inspection' && parts[1] && parts[2] === 'element' && parts[3]) {
-      await renderElement(parts[1], parts[3]);
-    } else if (parts[0] === 'templates') {
-      await renderTemplates();
-    } else {
-      await renderHome();
-    }
+    if (p.length === 0) await renderHome();
+    else if (p[0] === 'inspection' && p[1] && p[2] === 'section' && p[3]) await renderSection(p[1], p[3]);
+    else if (p[0] === 'inspection' && p[1] && p[2] === 'element' && p[3]) await renderElement(p[1], p[3]);
+    else if (p[0] === 'inspection' && p[1] && !p[2]) await renderInspection(p[1]);
+    else if (p[0] === 'templates') await renderTemplates();
+    else await renderHome();
   } catch (err) {
     console.error(err);
     appEl.innerHTML = `<div class="center-note">Something went wrong loading this screen.<br>${esc(err.message)}</div>`;
   }
+}
+
+// ---------- Reusable: photo action sheet (used by cover, element photos, finding photos) ----------
+function openPhotoActionSheet(photoId, { onAnnotated, onRemoved } = {}) {
+  const s = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Photo</h2>
+        <button class="btn btn-primary btn-block" id="btn-annotate">✏️ Edit — draw with Pencil</button>
+        <button class="btn btn-danger btn-block" id="btn-remove" style="margin-top:10px;">Remove photo</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel" style="margin-top:10px;">Cancel</button>
+      </div>
+    </div>
+  `);
+  document.body.appendChild(s);
+  s.addEventListener('click', (e) => { if (e.target === s) s.remove(); });
+  s.querySelector('#btn-cancel').addEventListener('click', () => s.remove());
+  s.querySelector('#btn-annotate').addEventListener('click', async () => {
+    s.remove();
+    await openAnnotator(photoId, onAnnotated);
+  });
+  s.querySelector('#btn-remove').addEventListener('click', async () => {
+    await DB.delete('photos', photoId);
+    s.remove();
+    if (onRemoved) onRemoved();
+  });
+}
+
+function openPhotoSourceSheet({ onFiles, multiple = false }) {
+  const s = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Add photo</h2>
+        <button class="btn btn-primary btn-block" id="btn-camera">📷 Take photo</button>
+        <button class="btn btn-secondary btn-block" id="btn-library" style="margin-top:10px;">🖼 Choose from library</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel" style="margin-top:10px;">Cancel</button>
+        <input type="file" id="src-camera" accept="image/*" capture="environment" style="display:none;">
+        <input type="file" id="src-library" accept="image/*" ${multiple ? 'multiple' : ''} style="display:none;">
+      </div>
+    </div>
+  `);
+  document.body.appendChild(s);
+  s.addEventListener('click', (e) => { if (e.target === s) s.remove(); });
+  s.querySelector('#btn-cancel').addEventListener('click', () => s.remove());
+  s.querySelector('#btn-camera').addEventListener('click', () => s.querySelector('#src-camera').click());
+  s.querySelector('#btn-library').addEventListener('click', () => s.querySelector('#src-library').click());
+  s.querySelector('#src-camera').addEventListener('change', (e) => { const f = e.target.files; s.remove(); if (f.length) onFiles(f); });
+  s.querySelector('#src-library').addEventListener('change', (e) => { const f = e.target.files; s.remove(); if (f.length) onFiles(f); });
 }
 
 // ---------- HOME ----------
@@ -116,9 +169,7 @@ async function renderHome() {
     <button class="fab" id="btn-new-inspection">＋</button>
   `;
 
-  appEl.querySelectorAll('.list-item').forEach((row) => {
-    row.addEventListener('click', () => navigate(`#/inspection/${row.dataset.id}`));
-  });
+  appEl.querySelectorAll('.list-item').forEach((row) => row.addEventListener('click', () => navigate(`#/inspection/${row.dataset.id}`)));
   document.getElementById('btn-new-inspection').addEventListener('click', openNewInspectionSheet);
   document.getElementById('btn-templates').addEventListener('click', () => navigate('#/templates'));
 }
@@ -129,14 +180,8 @@ function openNewInspectionSheet() {
       <div class="sheet">
         <div class="sheet-handle"></div>
         <h2>New inspection</h2>
-        <div class="field">
-          <label>Structure name / project</label>
-          <input type="text" id="f-structureName" placeholder="e.g. Riverside Footbridge">
-        </div>
-        <div class="field">
-          <label>Structure ID</label>
-          <input type="text" id="f-structureId" placeholder="e.g. BR-0042">
-        </div>
+        <div class="field"><label>Structure name / project</label><input type="text" id="f-structureName" placeholder="e.g. Riverside Footbridge"></div>
+        <div class="field"><label>Structure ID</label><input type="text" id="f-structureId" placeholder="e.g. BR-0042"></div>
         <div class="field">
           <label>Inspection type</label>
           <select id="f-inspectionType">
@@ -147,19 +192,10 @@ function openNewInspectionSheet() {
           </select>
         </div>
         <div class="row-2">
-          <div class="field">
-            <label>Date</label>
-            <input type="date" id="f-date">
-          </div>
-          <div class="field">
-            <label>Inspector</label>
-            <input type="text" id="f-inspector" placeholder="Name">
-          </div>
+          <div class="field"><label>Date</label><input type="date" id="f-date"></div>
+          <div class="field"><label>Inspector</label><input type="text" id="f-inspector" placeholder="Name"></div>
         </div>
-        <div class="field">
-          <label>Weather</label>
-          <input type="text" id="f-weather" placeholder="e.g. Overcast, 14°C">
-        </div>
+        <div class="field"><label>Weather</label><input type="text" id="f-weather" placeholder="e.g. Overcast, 14°C"></div>
         <div class="field">
           <label>Location</label>
           <div class="link-row">
@@ -190,11 +226,8 @@ function openNewInspectionSheet() {
     );
   });
 
-  sheet.addEventListener('click', (e) => {
-    if (e.target === sheet) sheet.remove();
-  });
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
-
   sheet.querySelector('#btn-create-inspection').addEventListener('click', async () => {
     const structureName = sheet.querySelector('#f-structureName').value.trim();
     if (!structureName) { toast('Enter a structure name'); return; }
@@ -218,29 +251,35 @@ function openNewInspectionSheet() {
 async function renderInspection(inspectionId) {
   const insp = await DB.get('inspections', inspectionId);
   if (!insp) { navigate('#/'); return; }
-  const elements = await DB.listElements(inspectionId);
-  const summary = await DB.getInspectionSummary(inspectionId);
+  const sections = await DB.listSections(inspectionId);
+  const ungroupedElements = await DB.listElementsBySection(inspectionId, null);
   const coverPhoto = await DB.getCoverPhoto(inspectionId);
 
-  const summaryMap = {};
-  summary.forEach((s) => { summaryMap[s.element.id] = s; });
-
-  const elementRows = elements.map((elmt) => {
-    const s = summaryMap[elmt.id];
+  async function elementRowHtml(elmt) {
+    const s = await DB.getElementConditionSummary(elmt.id);
     const badge = s.worstSeverity
       ? `<span class="badge badge-sev-${s.worstSeverity}">S${s.worstSeverity}</span> <span class="badge badge-extent">${s.worstExtent || '—'}</span>`
       : `<span class="badge badge-none">No findings</span>`;
+    const subline = [elmt.materialType, elmt.location].filter(Boolean).join(' · ') || `${s.findingCount} finding${s.findingCount === 1 ? '' : 's'}`;
     return `
-      <div class="list-item" data-id="${elmt.id}">
-        <div class="meta">
-          <h3>${esc(elmt.name)}</h3>
-          <p>${s.findingCount} finding${s.findingCount === 1 ? '' : 's'}</p>
-        </div>
-        ${badge}
+      <div class="list-item" data-el="${elmt.id}">
+        <div class="meta"><h3>${esc(elmt.name)}</h3><p>${esc(subline)}</p></div>
+        ${badge}<span class="chevron">›</span>
+      </div>`;
+  }
+
+  const sectionRows = [];
+  for (const sec of sections) {
+    const secElements = await DB.listElementsBySection(inspectionId, sec.id);
+    sectionRows.push(`
+      <div class="list-item" data-sec="${sec.id}">
+        <div class="meta"><h3>${esc(sec.name)}</h3><p>${secElements.length} element${secElements.length === 1 ? '' : 's'}${sec.comments ? ' · ' + esc(sec.comments) : ''}</p></div>
         <span class="chevron">›</span>
-      </div>
-    `;
-  }).join('');
+      </div>`);
+  }
+
+  const ungroupedRows = [];
+  for (const e of ungroupedElements) ungroupedRows.push(await elementRowHtml(e));
 
   appEl.innerHTML = `
     <div class="topbar">
@@ -249,64 +288,69 @@ async function renderInspection(inspectionId) {
         <h1 style="font-size:17px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(insp.structureName)}</h1>
         <span class="sub">${esc(insp.inspectionType || 'Inspection')} · ${fmtDate(insp.date)}</span>
       </div>
+      <button class="text-btn muted" id="btn-report-info">Report info</button>
       <button class="text-btn" id="btn-export">Export</button>
     </div>
     <div class="content">
-      <div class="card" id="header-card">
-        <div class="link-row" style="margin-bottom:8px;">
-          <strong style="font-size:15px;">Inspection details</strong>
-          <button class="small-btn" id="btn-edit-header">Edit</button>
-        </div>
+      <div class="card">
+        <div class="link-row" style="margin-bottom:8px;"><strong style="font-size:15px;">Inspection details</strong><button class="small-btn" id="btn-edit-header">Edit</button></div>
         <p class="muted" style="margin:4px 0; font-size:14px;">Structure ID: ${esc(insp.structureId || '—')}</p>
         <p class="muted" style="margin:4px 0; font-size:14px;">Inspector: ${esc(insp.inspector || '—')}</p>
         <p class="muted" style="margin:4px 0; font-size:14px;">Weather: ${esc(insp.weather || '—')}</p>
         <p class="muted" style="margin:4px 0; font-size:14px;">Location: ${esc(insp.location && insp.location.manual || '—')}</p>
       </div>
 
-      <div class="card" id="cover-card">
-        <div class="link-row" style="margin-bottom:10px;">
-          <strong style="font-size:15px;">Cover photo</strong>
-          <button class="small-btn" id="btn-cover-photo">${coverPhoto ? 'Replace' : 'Add photo'}</button>
-        </div>
-        ${coverPhoto ? `<div class="photo-thumb" style="width:120px; height:120px;"><img src="${blobUrl(coverPhoto.originalBlob)}"></div>` : `<p class="muted" style="font-size:13px; margin:0;">Used on the report cover page.</p>`}
-        <input type="file" id="cover-file-input" accept="image/*" capture="environment" style="display:none;">
+      <div class="card">
+        <div class="link-row" style="margin-bottom:10px;"><strong style="font-size:15px;">Cover photo</strong>${!coverPhoto ? '<button class="small-btn" id="btn-add-cover">＋ Add</button>' : ''}</div>
+        ${coverPhoto
+          ? `<div class="photo-thumb" id="cover-thumb" style="width:120px; height:120px;"><img src="${blobUrl(coverPhoto.originalBlob)}">${coverPhoto.annotatedBlob ? '<div class="annotated-dot"></div>' : ''}</div>`
+          : `<p class="muted" style="font-size:13px; margin:0;">Used on the report cover page.</p>`}
       </div>
 
-      <div class="section-header">
-        <h2>Elements</h2>
-        <button class="small-btn" id="btn-add-element">＋ Add</button>
-      </div>
-      ${elements.length ? elementRows : `
+      <div class="section-header"><h2>Sections</h2><button class="small-btn" id="btn-add-section">＋ Add section</button></div>
+      ${sections.length ? sectionRows.join('') : `<p class="muted" style="font-size:13px; padding:0 2px;">Optional — use sections to group elements by span, zone, or area.</p>`}
+
+      <div class="section-header"><h2>Elements</h2><button class="small-btn" id="btn-add-element">＋ Add</button></div>
+      ${ungroupedElements.length ? ungroupedRows.join('') : (sections.length ? `<p class="muted" style="font-size:13px; padding:0 2px;">Elements not assigned to a section appear here.</p>` : `
         <div class="empty-state">
           <div class="glyph">▦</div>
           <h3>No elements yet</h3>
           <p>Add structural elements to begin logging findings.</p>
         </div>
-      `}
+      `)}
     </div>
     <button class="fab" id="btn-add-element-fab">＋</button>
   `;
 
   document.getElementById('btn-back').addEventListener('click', () => navigate('#/'));
   document.getElementById('btn-export').addEventListener('click', () => exportInspectionPDF(inspectionId));
+  document.getElementById('btn-report-info').addEventListener('click', () => openReportInfoSheet(inspectionId));
   document.getElementById('btn-edit-header').addEventListener('click', () => openEditHeaderSheet(insp));
-  document.getElementById('btn-add-element').addEventListener('click', () => openAddElementSheet(inspectionId));
-  document.getElementById('btn-add-element-fab').addEventListener('click', () => openAddElementSheet(inspectionId));
+  document.getElementById('btn-add-section').addEventListener('click', () => openAddSectionSheet(inspectionId));
+  document.getElementById('btn-add-element').addEventListener('click', () => openAddElementSheet(inspectionId, null));
+  document.getElementById('btn-add-element-fab').addEventListener('click', () => openAddElementSheet(inspectionId, null));
 
-  document.getElementById('btn-cover-photo').addEventListener('click', () => {
-    document.getElementById('cover-file-input').click();
+  const addCoverBtn = document.getElementById('btn-add-cover');
+  if (addCoverBtn) addCoverBtn.addEventListener('click', () => {
+    openPhotoSourceSheet({
+      onFiles: async (files) => {
+        const normalized = await normalizeImageFile(files[0]);
+        await DB.setCoverPhoto(inspectionId, normalized);
+        toast('Cover photo saved');
+        renderInspection(inspectionId);
+      }
+    });
   });
-  document.getElementById('cover-file-input').addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    await DB.setCoverPhoto(inspectionId, file);
-    toast('Cover photo saved');
-    renderInspection(inspectionId);
+  const coverThumb = document.getElementById('cover-thumb');
+  if (coverThumb) coverThumb.addEventListener('click', () => {
+    openPhotoActionSheet(coverPhoto.id, {
+      onAnnotated: () => renderInspection(inspectionId),
+      onRemoved: () => renderInspection(inspectionId)
+    });
   });
 
-  appEl.querySelectorAll('.list-item[data-id]').forEach((row) => {
-    row.addEventListener('click', () => navigate(`#/inspection/${inspectionId}/element/${row.dataset.id}`));
-  });
+  appEl.querySelectorAll('.list-item[data-sec]').forEach((row) => row.addEventListener('click', () => navigate(`#/inspection/${inspectionId}/section/${row.dataset.sec}`)));
+  appEl.querySelectorAll('.list-item[data-el]').forEach((row) => row.addEventListener('click', () => navigate(`#/inspection/${inspectionId}/element/${row.dataset.el}`)));
 }
 
 function openEditHeaderSheet(insp) {
@@ -319,9 +363,7 @@ function openEditHeaderSheet(insp) {
         <div class="field"><label>Structure ID</label><input type="text" id="f-structureId" value="${esc(insp.structureId)}"></div>
         <div class="field">
           <label>Inspection type</label>
-          <select id="f-inspectionType">
-            ${['Routine', 'Detailed', 'Special', 'Follow-up'].map((t) => `<option value="${t}" ${insp.inspectionType === t ? 'selected' : ''}>${t}</option>`).join('')}
-          </select>
+          <select id="f-inspectionType">${['Routine', 'Detailed', 'Special', 'Follow-up'].map((t) => `<option value="${t}" ${insp.inspectionType === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
         </div>
         <div class="row-2">
           <div class="field"><label>Date</label><input type="date" id="f-date" value="${(insp.date || '').slice(0, 10)}"></div>
@@ -358,27 +400,208 @@ function openEditHeaderSheet(insp) {
     renderInspection(insp.id);
   });
   sheet.querySelector('#btn-delete').addEventListener('click', async () => {
-    if (!confirm('Delete this inspection and all its elements, findings, and photos? This cannot be undone.')) return;
+    if (!confirm('Delete this inspection and all its sections, elements, findings, and photos? This cannot be undone.')) return;
     await DB.deleteInspectionCascade(insp.id);
     sheet.remove();
     navigate('#/');
   });
 }
 
-async function openAddElementSheet(inspectionId) {
+// ---------- REPORT INFO (client / reference / logos) ----------
+async function openReportInfoSheet(inspectionId) {
+  const insp = await DB.get('inspections', inspectionId);
+  let logos = await DB.listLogos(inspectionId);
+
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Report info</h2>
+        <p class="muted" style="font-size:13px; margin-top:-8px;">Appears on the report cover page.</p>
+        <div class="field"><label>Client</label><input type="text" id="f-client" value="${esc(insp.client)}" placeholder="Client or organization name"></div>
+        <div class="field"><label>Reference / project no.</label><input type="text" id="f-reference" value="${esc(insp.reference)}" placeholder="e.g. PRJ-2026-014"></div>
+        <div class="field"><label>Report date</label><input type="date" id="f-date" value="${(insp.date || '').slice(0, 10)}"></div>
+        <div class="field">
+          <label>Logos</label>
+          <div class="photo-grid" id="logo-grid"></div>
+          <input type="file" id="logo-file-input" accept="image/*" multiple style="display:none;">
+          <p class="hint">Add one or more logos (e.g. client + your company). They'll appear at the top of the cover page.</p>
+        </div>
+        <button class="btn btn-primary btn-block" id="btn-save">Save</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  document.body.appendChild(sheet);
+
+  function renderLogoGrid() {
+    const grid = sheet.querySelector('#logo-grid');
+    grid.innerHTML = logos.map((p) => `
+      <div class="photo-thumb" data-lid="${p.id}" style="position:relative;">
+        <img src="${blobUrl(p.originalBlob)}">
+        <button class="icon-btn" data-remove-logo="${p.id}" style="position:absolute; top:4px; right:4px; width:24px; height:24px; background:rgba(28,31,38,0.75); font-size:13px;">✕</button>
+      </div>
+    `).join('') + `<div class="photo-add" id="btn-add-logo">＋</div>`;
+    grid.querySelector('#btn-add-logo').addEventListener('click', () => sheet.querySelector('#logo-file-input').click());
+    grid.querySelectorAll('[data-remove-logo]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await DB.delete('photos', btn.dataset.removeLogo);
+        logos = logos.filter((l) => l.id !== btn.dataset.removeLogo);
+        renderLogoGrid();
+      });
+    });
+  }
+  renderLogoGrid();
+
+  sheet.querySelector('#logo-file-input').addEventListener('change', async (e) => {
+    const files = Array.from(e.target.files);
+    for (const file of files) {
+      const normalized = await normalizeImageFile(file, 1200);
+      const p = await DB.addLogo(inspectionId, normalized);
+      logos.push(p);
+    }
+    renderLogoGrid();
+  });
+
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-save').addEventListener('click', async () => {
+    await DB.updateInspection(inspectionId, {
+      client: sheet.querySelector('#f-client').value.trim(),
+      reference: sheet.querySelector('#f-reference').value.trim(),
+      date: sheet.querySelector('#f-date').value
+    });
+    sheet.remove();
+    toast('Report info saved');
+    renderInspection(inspectionId);
+  });
+}
+
+// ---------- ADD SECTION ----------
+function openAddSectionSheet(inspectionId) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>New section</h2>
+        <div class="field"><label>Name / descriptor</label><input type="text" id="f-name" placeholder="e.g. Span 2, North Approach"></div>
+        <div class="field"><label>Comments</label><textarea id="f-comments" placeholder="Optional notes about this section"></textarea></div>
+        <button class="btn btn-primary btn-block" id="btn-save">Add section</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  document.body.appendChild(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-save').addEventListener('click', async () => {
+    const name = sheet.querySelector('#f-name').value.trim();
+    if (!name) { toast('Enter a name'); return; }
+    const existing = await DB.listSections(inspectionId);
+    const sec = await DB.createSection(inspectionId, { name, comments: sheet.querySelector('#f-comments').value.trim(), order: existing.length });
+    sheet.remove();
+    navigate(`#/inspection/${inspectionId}/section/${sec.id}`);
+  });
+}
+
+// ---------- SECTION DETAIL ----------
+async function renderSection(inspectionId, sectionId) {
+  const insp = await DB.get('inspections', inspectionId);
+  const section = await DB.get('sections', sectionId);
+  if (!insp || !section) { navigate(`#/inspection/${inspectionId}`); return; }
+  const elements = await DB.listElementsBySection(inspectionId, sectionId);
+
+  const rows = [];
+  for (const elmt of elements) {
+    const s = await DB.getElementConditionSummary(elmt.id);
+    const badge = s.worstSeverity
+      ? `<span class="badge badge-sev-${s.worstSeverity}">S${s.worstSeverity}</span> <span class="badge badge-extent">${s.worstExtent || '—'}</span>`
+      : `<span class="badge badge-none">No findings</span>`;
+    const subline = [elmt.materialType, elmt.location].filter(Boolean).join(' · ') || `${s.findingCount} finding${s.findingCount === 1 ? '' : 's'}`;
+    rows.push(`
+      <div class="list-item" data-el="${elmt.id}">
+        <div class="meta"><h3>${esc(elmt.name)}</h3><p>${esc(subline)}</p></div>
+        ${badge}<span class="chevron">›</span>
+      </div>`);
+  }
+
+  appEl.innerHTML = `
+    <div class="topbar">
+      <button class="icon-btn" id="btn-back">‹</button>
+      <div style="flex:1; min-width:0;">
+        <h1 style="font-size:17px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(section.name)}</h1>
+        <span class="sub">${esc(insp.structureName)}</span>
+      </div>
+      <button class="text-btn" id="btn-edit-section">Edit</button>
+    </div>
+    <div class="content">
+      ${section.comments ? `<div class="card"><p style="margin:0; font-size:14px;">${esc(section.comments)}</p></div>` : ''}
+      <div class="section-header" style="margin-top:0;"><h2>Elements</h2><button class="small-btn" id="btn-add-element">＋ Add</button></div>
+      ${elements.length ? rows.join('') : `
+        <div class="empty-state">
+          <div class="glyph">▦</div>
+          <h3>No elements yet</h3>
+          <p>Add elements within this section.</p>
+        </div>
+      `}
+    </div>
+    <button class="fab" id="btn-add-element-fab">＋</button>
+  `;
+
+  document.getElementById('btn-back').addEventListener('click', () => navigate(`#/inspection/${inspectionId}`));
+  document.getElementById('btn-edit-section').addEventListener('click', () => openEditSectionSheet(inspectionId, section));
+  document.getElementById('btn-add-element').addEventListener('click', () => openAddElementSheet(inspectionId, sectionId));
+  document.getElementById('btn-add-element-fab').addEventListener('click', () => openAddElementSheet(inspectionId, sectionId));
+  appEl.querySelectorAll('.list-item[data-el]').forEach((row) => row.addEventListener('click', () => navigate(`#/inspection/${inspectionId}/element/${row.dataset.el}`)));
+}
+
+function openEditSectionSheet(inspectionId, section) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Edit section</h2>
+        <div class="field"><label>Name / descriptor</label><input type="text" id="f-name" value="${esc(section.name)}"></div>
+        <div class="field"><label>Comments</label><textarea id="f-comments">${esc(section.comments)}</textarea></div>
+        <button class="btn btn-primary btn-block" id="btn-save">Save</button>
+        <button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:8px;">Delete section</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  document.body.appendChild(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-save').addEventListener('click', async () => {
+    const name = sheet.querySelector('#f-name').value.trim();
+    if (!name) { toast('Enter a name'); return; }
+    await DB.updateSection(section.id, { name, comments: sheet.querySelector('#f-comments').value.trim() });
+    sheet.remove();
+    renderSection(inspectionId, section.id);
+  });
+  sheet.querySelector('#btn-delete').addEventListener('click', async () => {
+    if (!confirm('Delete this section and all elements, findings, and photos within it?')) return;
+    await DB.deleteSectionCascade(section.id);
+    sheet.remove();
+    navigate(`#/inspection/${inspectionId}`);
+  });
+}
+
+// ---------- ADD ELEMENT ----------
+async function openAddElementSheet(inspectionId, sectionId) {
   const templates = await DB.listTemplates();
   const sheet = el(`
     <div class="sheet-backdrop">
       <div class="sheet">
         <div class="sheet-handle"></div>
         <h2>Add element</h2>
-        <div class="field">
-          <label>Element name</label>
-          <div class="link-row">
-            <input type="text" id="f-elname" placeholder="e.g. Pier 2, Deck Span 3" style="flex:1; margin-right:8px;">
-            <button class="btn btn-primary" id="btn-add-single">Add</button>
-          </div>
+        <div class="field"><label>Element name</label><input type="text" id="f-name" placeholder="e.g. Pier 2, Bearing SE"></div>
+        <div class="row-2">
+          <div class="field"><label>Material type</label><input type="text" id="f-material" placeholder="e.g. Reinforced concrete"></div>
+          <div class="field"><label>Location</label><input type="text" id="f-location" placeholder="e.g. Chainage 12+400"></div>
         </div>
+        <button class="btn btn-primary btn-block" id="btn-add-single">Add element</button>
         ${templates.length ? `
           <div class="section-header" style="margin-top:22px;"><h2>Apply a template</h2></div>
           <div id="tpl-list">
@@ -399,29 +622,37 @@ async function openAddElementSheet(inspectionId) {
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
 
   sheet.querySelector('#btn-add-single').addEventListener('click', async () => {
-    const name = sheet.querySelector('#f-elname').value.trim();
+    const name = sheet.querySelector('#f-name').value.trim();
     if (!name) { toast('Enter an element name'); return; }
     const existing = await DB.listElements(inspectionId);
-    await DB.createElement(inspectionId, { name, order: existing.length });
+    const elmt = await DB.createElement(inspectionId, {
+      name,
+      sectionId: sectionId || null,
+      materialType: sheet.querySelector('#f-material').value.trim(),
+      location: sheet.querySelector('#f-location').value.trim(),
+      order: existing.length
+    });
     sheet.remove();
-    renderInspection(inspectionId);
+    if (sectionId) renderSection(inspectionId, sectionId); else renderInspection(inspectionId);
   });
 
   sheet.querySelectorAll('[data-tpl]').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      await DB.applyTemplate(inspectionId, btn.dataset.tpl);
+      await DB.applyTemplate(inspectionId, btn.dataset.tpl, sectionId || null);
       sheet.remove();
       toast('Template applied');
-      renderInspection(inspectionId);
+      if (sectionId) renderSection(inspectionId, sectionId); else renderInspection(inspectionId);
     });
   });
 }
 
-// ---------- ELEMENT DETAIL (findings) ----------
+// ---------- ELEMENT DETAIL ----------
 async function renderElement(inspectionId, elementId) {
   const elmt = await DB.get('elements', elementId);
   if (!elmt) { navigate(`#/inspection/${inspectionId}`); return; }
+  const backHash = elmt.sectionId ? `#/inspection/${inspectionId}/section/${elmt.sectionId}` : `#/inspection/${inspectionId}`;
   const findings = await DB.listFindings(elementId);
+  let elementPhotos = await DB.listPhotosForElement(elementId);
 
   const findingCards = [];
   for (const f of findings) {
@@ -442,16 +673,22 @@ async function renderElement(inspectionId, elementId) {
     `);
   }
 
+  const subline = [elmt.materialType, elmt.location].filter(Boolean).join(' · ');
+
   appEl.innerHTML = `
     <div class="topbar">
       <button class="icon-btn" id="btn-back">‹</button>
       <div style="flex:1; min-width:0;">
         <h1 style="font-size:17px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(elmt.name)}</h1>
-        <span class="sub">${findings.length} finding${findings.length === 1 ? '' : 's'}</span>
+        <span class="sub">${esc(subline) || 'Element'}</span>
       </div>
-      <button class="text-btn" id="btn-rename">Rename</button>
+      <button class="text-btn" id="btn-edit-element">Edit</button>
     </div>
     <div class="content">
+      <div class="section-header" style="margin-top:0;"><h2>Element photos</h2></div>
+      <div class="photo-grid" id="element-photo-grid"></div>
+
+      <div class="section-header"><h2>Findings</h2></div>
       ${findings.length ? findingCards.join('') : `
         <div class="empty-state">
           <div class="glyph">＋</div>
@@ -463,22 +700,56 @@ async function renderElement(inspectionId, elementId) {
     <button class="fab" id="btn-add-finding">＋</button>
   `;
 
-  document.getElementById('btn-back').addEventListener('click', () => navigate(`#/inspection/${inspectionId}`));
-  document.getElementById('btn-add-finding').addEventListener('click', () => openFindingEditor(inspectionId, elementId, null));
-  document.getElementById('btn-rename').addEventListener('click', () => openRenameElementSheet(inspectionId, elmt));
+  function renderElementPhotoGrid() {
+    const grid = document.getElementById('element-photo-grid');
+    grid.innerHTML = elementPhotos.map((p) => `
+      <div class="photo-thumb" data-pid="${p.id}">
+        <img src="${blobUrl(p.annotatedBlob || p.originalBlob)}">
+        ${p.annotatedBlob ? '<div class="annotated-dot"></div>' : ''}
+      </div>
+    `).join('') + `<div class="photo-add" id="btn-add-element-photo">📷</div>`;
+    grid.querySelectorAll('.photo-thumb').forEach((thumb) => {
+      thumb.addEventListener('click', () => {
+        openPhotoActionSheet(thumb.dataset.pid, {
+          onAnnotated: async () => { elementPhotos = await DB.listPhotosForElement(elementId); renderElementPhotoGrid(); },
+          onRemoved: async () => { elementPhotos = await DB.listPhotosForElement(elementId); renderElementPhotoGrid(); }
+        });
+      });
+    });
+    grid.querySelector('#btn-add-element-photo').addEventListener('click', () => {
+      openPhotoSourceSheet({
+        multiple: true,
+        onFiles: async (files) => {
+          for (const file of Array.from(files)) {
+            const normalized = await normalizeImageFile(file);
+            await DB.addElementPhoto(elementId, normalized);
+          }
+          elementPhotos = await DB.listPhotosForElement(elementId);
+          renderElementPhotoGrid();
+        }
+      });
+    });
+  }
+  renderElementPhotoGrid();
 
-  appEl.querySelectorAll('.list-item[data-id]').forEach((row) => {
-    row.addEventListener('click', () => openFindingEditor(inspectionId, elementId, row.dataset.id));
-  });
+  document.getElementById('btn-back').addEventListener('click', () => navigate(backHash));
+  document.getElementById('btn-add-finding').addEventListener('click', () => openFindingEditor(inspectionId, elementId, null));
+  document.getElementById('btn-edit-element').addEventListener('click', () => openEditElementSheet(inspectionId, elmt, backHash));
+
+  appEl.querySelectorAll('.list-item[data-id]').forEach((row) => row.addEventListener('click', () => openFindingEditor(inspectionId, elementId, row.dataset.id)));
 }
 
-function openRenameElementSheet(inspectionId, elmt) {
+function openEditElementSheet(inspectionId, elmt, backHash) {
   const sheet = el(`
     <div class="sheet-backdrop">
       <div class="sheet">
         <div class="sheet-handle"></div>
         <h2>Edit element</h2>
         <div class="field"><label>Name</label><input type="text" id="f-name" value="${esc(elmt.name)}"></div>
+        <div class="row-2">
+          <div class="field"><label>Material type</label><input type="text" id="f-material" value="${esc(elmt.materialType)}"></div>
+          <div class="field"><label>Location</label><input type="text" id="f-location" value="${esc(elmt.location)}"></div>
+        </div>
         <button class="btn btn-primary btn-block" id="btn-save">Save</button>
         <button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:8px;">Delete element</button>
         <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
@@ -491,7 +762,11 @@ function openRenameElementSheet(inspectionId, elmt) {
   sheet.querySelector('#btn-save').addEventListener('click', async () => {
     const name = sheet.querySelector('#f-name').value.trim();
     if (!name) { toast('Enter a name'); return; }
-    await DB.put('elements', { ...elmt, name });
+    await DB.updateElement(elmt.id, {
+      name,
+      materialType: sheet.querySelector('#f-material').value.trim(),
+      location: sheet.querySelector('#f-location').value.trim()
+    });
     sheet.remove();
     renderElement(inspectionId, elmt.id);
   });
@@ -499,7 +774,7 @@ function openRenameElementSheet(inspectionId, elmt) {
     if (!confirm('Delete this element and all its findings and photos?')) return;
     await DB.deleteElementCascade(elmt.id);
     sheet.remove();
-    navigate(`#/inspection/${inspectionId}`);
+    navigate(backHash);
   });
 }
 
@@ -539,14 +814,10 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
         </div>
 
         <div class="section-header"><h2>Notes</h2></div>
-        <div class="field">
-          <textarea id="f-notes" placeholder="Describe the finding…">${esc(finding.notes)}</textarea>
-        </div>
+        <div class="field"><textarea id="f-notes" placeholder="Describe the finding…">${esc(finding.notes)}</textarea></div>
 
         <div class="section-header"><h2>Photos</h2></div>
         <div class="photo-grid" id="photo-grid"></div>
-        <input type="file" id="finding-file-input" accept="image/*" capture="environment" style="display:none;">
-        <input type="file" id="finding-file-input-lib" accept="image/*" multiple style="display:none;">
       </div>
     </div>
   `);
@@ -562,70 +833,28 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
     `).join('') + `<div class="photo-add" id="btn-add-photo">📷</div>`;
 
     grid.querySelectorAll('.photo-thumb').forEach((thumb) => {
-      thumb.addEventListener('click', () => openPhotoActionSheet(thumb.dataset.pid));
-    });
-    grid.querySelector('#btn-add-photo').addEventListener('click', openPhotoSourceSheet);
-  }
-  renderPhotoGrid();
-
-  function openPhotoSourceSheet() {
-    const s = el(`
-      <div class="sheet-backdrop">
-        <div class="sheet">
-          <div class="sheet-handle"></div>
-          <h2>Add photo</h2>
-          <button class="btn btn-primary btn-block" id="btn-camera">📷 Take photo</button>
-          <button class="btn btn-secondary btn-block" id="btn-library" style="margin-top:10px;">🖼 Choose from library</button>
-          <button class="btn btn-ghost btn-block" id="btn-cancel" style="margin-top:10px;">Cancel</button>
-        </div>
-      </div>
-    `);
-    document.body.appendChild(s);
-    s.addEventListener('click', (e) => { if (e.target === s) s.remove(); });
-    s.querySelector('#btn-cancel').addEventListener('click', () => s.remove());
-    s.querySelector('#btn-camera').addEventListener('click', () => { s.remove(); view.querySelector('#finding-file-input').click(); });
-    s.querySelector('#btn-library').addEventListener('click', () => { s.remove(); view.querySelector('#finding-file-input-lib').click(); });
-  }
-
-  async function handleFiles(fileList) {
-    const files = Array.from(fileList);
-    for (const file of files) {
-      const p = await DB.addPhoto({ findingId, originalBlob: file, order: photos.length });
-      photos.push(p);
-    }
-    renderPhotoGrid();
-  }
-  view.querySelector('#finding-file-input').addEventListener('change', (e) => handleFiles(e.target.files));
-  view.querySelector('#finding-file-input-lib').addEventListener('change', (e) => handleFiles(e.target.files));
-
-  function openPhotoActionSheet(photoId) {
-    const s = el(`
-      <div class="sheet-backdrop">
-        <div class="sheet">
-          <div class="sheet-handle"></div>
-          <h2>Photo</h2>
-          <button class="btn btn-primary btn-block" id="btn-annotate">✏️ Annotate with Pencil</button>
-          <button class="btn btn-danger btn-block" id="btn-remove" style="margin-top:10px;">Remove photo</button>
-          <button class="btn btn-ghost btn-block" id="btn-cancel" style="margin-top:10px;">Cancel</button>
-        </div>
-      </div>
-    `);
-    document.body.appendChild(s);
-    s.addEventListener('click', (e) => { if (e.target === s) s.remove(); });
-    s.querySelector('#btn-cancel').addEventListener('click', () => s.remove());
-    s.querySelector('#btn-annotate').addEventListener('click', async () => {
-      s.remove();
-      await openAnnotator(photoId, () => {
-        DB.listPhotosForFinding(findingId).then((p) => { photos = p; renderPhotoGrid(); });
+      thumb.addEventListener('click', () => {
+        openPhotoActionSheet(thumb.dataset.pid, {
+          onAnnotated: async () => { photos = await DB.listPhotosForFinding(findingId); renderPhotoGrid(); },
+          onRemoved: async () => { photos = await DB.listPhotosForFinding(findingId); renderPhotoGrid(); }
+        });
       });
     });
-    s.querySelector('#btn-remove').addEventListener('click', async () => {
-      await DB.delete('photos', photoId);
-      photos = photos.filter((p) => p.id !== photoId);
-      s.remove();
-      renderPhotoGrid();
+    grid.querySelector('#btn-add-photo').addEventListener('click', () => {
+      openPhotoSourceSheet({
+        multiple: true,
+        onFiles: async (files) => {
+          for (const file of Array.from(files)) {
+            const normalized = await normalizeImageFile(file);
+            await DB.addPhoto({ kind: 'finding', findingId, originalBlob: normalized, order: photos.length });
+          }
+          photos = await DB.listPhotosForFinding(findingId);
+          renderPhotoGrid();
+        }
+      });
     });
   }
+  renderPhotoGrid();
 
   async function saveAndClose() {
     const sevBtn = view.querySelector('.chip.selected[data-sev]');
@@ -643,20 +872,14 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
     chip.addEventListener('click', () => {
       const wasSelected = chip.classList.contains('selected');
       view.querySelectorAll('#severity-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
-      if (!wasSelected) {
-        chip.classList.add('selected');
-        chip.style.background = `var(--sev-${chip.dataset.sev})`;
-      }
+      if (!wasSelected) { chip.classList.add('selected'); chip.style.background = `var(--sev-${chip.dataset.sev})`; }
     });
   });
   view.querySelectorAll('#extent-picker .chip').forEach((chip) => {
     chip.addEventListener('click', () => {
       const wasSelected = chip.classList.contains('selected');
       view.querySelectorAll('#extent-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
-      if (!wasSelected) {
-        chip.classList.add('selected');
-        chip.style.background = 'var(--ink)';
-      }
+      if (!wasSelected) { chip.classList.add('selected'); chip.style.background = 'var(--ink)'; }
     });
   });
 
@@ -678,13 +901,10 @@ async function renderTemplates() {
       <h1>Element templates</h1>
     </div>
     <div class="content">
-      <p class="muted" style="font-size:13px; margin-top:0;">Templates let you quickly populate a standard set of elements (e.g. "Standard Bridge") when starting a new inspection.</p>
+      <p class="muted" style="font-size:13px; margin-top:0;">Templates let you quickly populate a standard set of elements (e.g. "Standard Bridge") when starting a new inspection or section.</p>
       ${templates.length ? templates.map((t) => `
         <div class="list-item" data-id="${t.id}">
-          <div class="meta">
-            <h3>${esc(t.name)}</h3>
-            <p>${t.elements.map((e) => esc(e.name)).join(', ')}</p>
-          </div>
+          <div class="meta"><h3>${esc(t.name)}</h3><p>${t.elements.map((e) => esc(e.name)).join(', ')}</p></div>
           <button class="small-btn" data-del="${t.id}">Delete</button>
         </div>
       `).join('') : `

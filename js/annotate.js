@@ -4,20 +4,33 @@ const ANNOTATE_COLORS = ['#c81e1e', '#f2b705', '#1c1f26', '#ffffff', '#1e7dc8'];
 const ANNOTATE_WIDTHS = { thin: 3, medium: 7, thick: 14 };
 const MAX_CANVAS_DIM = 2400; // cap resolution to keep memory/perf sane on large photos
 
+async function loadBitmapCorrected(blob) {
+  try {
+    return await createImageBitmap(blob, { imageOrientation: 'from-image' });
+  } catch (err) {
+    // Fallback path for browsers without the imageOrientation option
+    const url = URL.createObjectURL(blob);
+    const img = await new Promise((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = reject;
+      i.src = url;
+    });
+    URL.revokeObjectURL(url);
+    return img;
+  }
+}
+
 async function openAnnotator(photoId, onDone) {
   const photo = await DB.get('photos', photoId);
   if (!photo) return;
   const sourceBlob = photo.annotatedBlob || photo.originalBlob;
-  const imgUrl = URL.createObjectURL(sourceBlob);
-  const img = new Image();
-  await new Promise((resolve, reject) => {
-    img.onload = resolve;
-    img.onerror = reject;
-    img.src = imgUrl;
-  });
+  const img = await loadBitmapCorrected(sourceBlob);
+  const naturalW = img.width || img.naturalWidth;
+  const naturalH = img.height || img.naturalHeight;
 
   // Determine canvas pixel size (cap long edge)
-  let cw = img.naturalWidth, ch = img.naturalHeight;
+  let cw = naturalW, ch = naturalH;
   const longEdge = Math.max(cw, ch);
   if (longEdge > MAX_CANVAS_DIM) {
     const scale = MAX_CANVAS_DIM / longEdge;
@@ -52,7 +65,7 @@ async function openAnnotator(photoId, onDone) {
   const canvas = view.querySelector('#annotate-canvas');
   const ctx = canvas.getContext('2d');
   ctx.drawImage(img, 0, 0, cw, ch);
-  URL.revokeObjectURL(imgUrl);
+  if (img.close) img.close();
 
   // Fit canvas to available space via CSS while preserving pixel resolution
   function fitCanvas() {
@@ -125,7 +138,6 @@ async function openAnnotator(photoId, onDone) {
     drawing = true;
     const p = canvasPoint(e);
     lastX = p.x; lastY = p.y;
-    // draw a dot for taps
     const pressure = e.pressure && e.pressure > 0 ? e.pressure : 0.5;
     const w = eraseMode ? currentWidth * 3 : currentWidth * (0.5 + pressure);
     ctx.globalCompositeOperation = eraseMode ? 'destination-out' : 'source-over';

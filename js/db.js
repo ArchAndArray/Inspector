@@ -1,8 +1,8 @@
 // db.js - IndexedDB wrapper for the Site Inspection app
-// Stores: inspections, elements, findings, photos, templates
+// Stores: inspections, sections, elements, findings, photos, templates
 
 const DB_NAME = 'siteInspectionDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise = null;
 
@@ -13,25 +13,34 @@ function openDB() {
 
     req.onupgradeneeded = (event) => {
       const db = event.target.result;
+      const tx = event.target.transaction;
+      const oldVersion = event.oldVersion;
 
-      if (!db.objectStoreNames.contains('inspections')) {
+      if (oldVersion < 1) {
         db.createObjectStore('inspections', { keyPath: 'id' });
-      }
-      if (!db.objectStoreNames.contains('elements')) {
-        const store = db.createObjectStore('elements', { keyPath: 'id' });
-        store.createIndex('inspectionId', 'inspectionId', { unique: false });
-      }
-      if (!db.objectStoreNames.contains('findings')) {
-        const store = db.createObjectStore('findings', { keyPath: 'id' });
-        store.createIndex('elementId', 'elementId', { unique: false });
-      }
-      if (!db.objectStoreNames.contains('photos')) {
-        const store = db.createObjectStore('photos', { keyPath: 'id' });
-        store.createIndex('findingId', 'findingId', { unique: false });
-        store.createIndex('inspectionId', 'inspectionId', { unique: false });
-      }
-      if (!db.objectStoreNames.contains('templates')) {
+
+        const elStore = db.createObjectStore('elements', { keyPath: 'id' });
+        elStore.createIndex('inspectionId', 'inspectionId', { unique: false });
+
+        const fStore = db.createObjectStore('findings', { keyPath: 'id' });
+        fStore.createIndex('elementId', 'elementId', { unique: false });
+
+        const pStore = db.createObjectStore('photos', { keyPath: 'id' });
+        pStore.createIndex('findingId', 'findingId', { unique: false });
+        pStore.createIndex('inspectionId', 'inspectionId', { unique: false });
+
         db.createObjectStore('templates', { keyPath: 'id' });
+      }
+
+      if (oldVersion < 2) {
+        if (!db.objectStoreNames.contains('sections')) {
+          const sStore = db.createObjectStore('sections', { keyPath: 'id' });
+          sStore.createIndex('inspectionId', 'inspectionId', { unique: false });
+        }
+        const photosStore = tx.objectStore('photos');
+        if (!photosStore.indexNames.contains('elementId')) {
+          photosStore.createIndex('elementId', 'elementId', { unique: false });
+        }
       }
     };
 
@@ -45,7 +54,7 @@ function uid() {
   return 'id_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 9);
 }
 
-function tx(storeName, mode) {
+function txStore(storeName, mode) {
   return openDB().then((db) => db.transaction(storeName, mode).objectStore(storeName));
 }
 
@@ -61,24 +70,24 @@ const DB = {
 
   // Generic CRUD
   async put(storeName, obj) {
-    const store = await tx(storeName, 'readwrite');
+    const store = await txStore(storeName, 'readwrite');
     await reqToPromise(store.put(obj));
     return obj;
   },
   async get(storeName, id) {
-    const store = await tx(storeName, 'readonly');
+    const store = await txStore(storeName, 'readonly');
     return reqToPromise(store.get(id));
   },
   async getAll(storeName) {
-    const store = await tx(storeName, 'readonly');
+    const store = await txStore(storeName, 'readonly');
     return reqToPromise(store.getAll());
   },
   async delete(storeName, id) {
-    const store = await tx(storeName, 'readwrite');
+    const store = await txStore(storeName, 'readwrite');
     return reqToPromise(store.delete(id));
   },
   async getAllByIndex(storeName, indexName, value) {
-    const store = await tx(storeName, 'readonly');
+    const store = await txStore(storeName, 'readonly');
     const idx = store.index(indexName);
     return reqToPromise(idx.getAll(value));
   },
@@ -92,13 +101,14 @@ const DB = {
       structureName: data.structureName || '',
       title: data.title || 'Structural Inspection Report',
       subtitle: data.subtitle || '',
+      client: data.client || '',
+      reference: data.reference || '',
       location: data.location || { lat: null, lng: null, manual: '' },
       weather: data.weather || '',
       inspectionType: data.inspectionType || '',
       inspector: data.inspector || '',
       date: data.date || now,
       notes: data.notes || '',
-      coverPhotoId: null,
       createdAt: now,
       updatedAt: now
     };
@@ -111,12 +121,14 @@ const DB = {
     return this.put('inspections', updated);
   },
   async deleteInspectionCascade(id) {
+    const sections = await this.getAllByIndex('sections', 'inspectionId', id);
+    for (const s of sections) await this.deleteSectionCascade(s.id);
     const elements = await this.getAllByIndex('elements', 'inspectionId', id);
     for (const el of elements) {
-      await this.deleteElementCascade(el.id);
+      if (!el.sectionId) await this.deleteElementCascade(el.id);
     }
-    const coverPhotos = await this.getAllByIndex('photos', 'inspectionId', id);
-    for (const p of coverPhotos) await this.delete('photos', p.id);
+    const inspPhotos = await this.getAllByIndex('photos', 'inspectionId', id);
+    for (const p of inspPhotos) await this.delete('photos', p.id);
     await this.delete('inspections', id);
   },
   async listInspections() {
@@ -124,27 +136,71 @@ const DB = {
     return all.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
   },
 
+  // --- Sections ---
+  async createSection(inspectionId, data) {
+    const section = {
+      id: uid(),
+      inspectionId,
+      name: data.name || 'Untitled section',
+      comments: data.comments || '',
+      order: data.order || 0,
+      createdAt: new Date().toISOString()
+    };
+    return this.put('sections', section);
+  },
+  async updateSection(id, patch) {
+    const existing = await this.get('sections', id);
+    if (!existing) throw new Error('Section not found');
+    return this.put('sections', { ...existing, ...patch });
+  },
+  async listSections(inspectionId) {
+    const all = await this.getAllByIndex('sections', 'inspectionId', inspectionId);
+    return all.sort((a, b) => a.order - b.order);
+  },
+  async deleteSectionCascade(sectionId) {
+    const section = await this.get('sections', sectionId);
+    if (!section) return;
+    const elements = await this.getAllByIndex('elements', 'inspectionId', section.inspectionId);
+    const inSection = elements.filter((e) => e.sectionId === sectionId);
+    for (const el of inSection) await this.deleteElementCascade(el.id);
+    await this.delete('sections', sectionId);
+  },
+
   // --- Elements ---
   async createElement(inspectionId, data) {
     const el = {
       id: uid(),
       inspectionId,
+      sectionId: data.sectionId || null,
       name: data.name || 'Untitled element',
       category: data.category || '',
+      materialType: data.materialType || '',
+      location: data.location || '',
       order: data.order || 0,
       createdAt: new Date().toISOString()
     };
     return this.put('elements', el);
   },
+  async updateElement(id, patch) {
+    const existing = await this.get('elements', id);
+    if (!existing) throw new Error('Element not found');
+    return this.put('elements', { ...existing, ...patch });
+  },
   async listElements(inspectionId) {
     const all = await this.getAllByIndex('elements', 'inspectionId', inspectionId);
     return all.sort((a, b) => a.order - b.order);
+  },
+  async listElementsBySection(inspectionId, sectionId) {
+    const all = await this.listElements(inspectionId);
+    return all.filter((e) => (e.sectionId || null) === (sectionId || null));
   },
   async deleteElementCascade(elementId) {
     const findings = await this.getAllByIndex('findings', 'elementId', elementId);
     for (const f of findings) {
       await this.deleteFindingCascade(f.id);
     }
+    const elPhotos = await this.getAllByIndex('photos', 'elementId', elementId);
+    for (const p of elPhotos) await this.delete('photos', p.id);
     await this.delete('elements', elementId);
   },
 
@@ -178,11 +234,13 @@ const DB = {
   },
 
   // --- Photos ---
-  // photo: { id, findingId (or null), inspectionId (set for cover photo), originalBlob, annotatedBlob, order, createdAt }
-  async addPhoto({ findingId = null, inspectionId = null, originalBlob, order = 0 }) {
+  // photo: { id, kind: 'cover'|'logo'|'element'|'finding', findingId, elementId, inspectionId, originalBlob, annotatedBlob, order, createdAt }
+  async addPhoto({ kind = 'finding', findingId = null, elementId = null, inspectionId = null, originalBlob, order = 0 }) {
     const photo = {
       id: uid(),
+      kind,
       findingId,
+      elementId,
       inspectionId,
       originalBlob,
       annotatedBlob: null,
@@ -199,20 +257,41 @@ const DB = {
   },
   async listPhotosForFinding(findingId) {
     const all = await this.getAllByIndex('photos', 'findingId', findingId);
+    return all.filter((p) => p.kind !== 'logo').sort((a, b) => a.order - b.order);
+  },
+  async listPhotosForElement(elementId) {
+    const all = await this.getAllByIndex('photos', 'elementId', elementId);
     return all.sort((a, b) => a.order - b.order);
+  },
+  async addElementPhoto(elementId, blob) {
+    const existing = await this.listPhotosForElement(elementId);
+    return this.addPhoto({ kind: 'element', elementId, originalBlob: blob, order: existing.length });
   },
   async getCoverPhoto(inspectionId) {
     const all = await this.getAllByIndex('photos', 'inspectionId', inspectionId);
-    return all[0] || null;
+    return all.find((p) => p.kind === 'cover' || !p.kind) || null;
   },
   async setCoverPhoto(inspectionId, blob) {
     const existing = await this.getCoverPhoto(inspectionId);
     if (existing) {
       existing.originalBlob = blob;
       existing.annotatedBlob = null;
+      existing.kind = 'cover';
       return this.put('photos', existing);
     }
-    return this.addPhoto({ inspectionId, originalBlob: blob });
+    return this.addPhoto({ kind: 'cover', inspectionId, originalBlob: blob });
+  },
+  async removeCoverPhoto(inspectionId) {
+    const existing = await this.getCoverPhoto(inspectionId);
+    if (existing) await this.delete('photos', existing.id);
+  },
+  async listLogos(inspectionId) {
+    const all = await this.getAllByIndex('photos', 'inspectionId', inspectionId);
+    return all.filter((p) => p.kind === 'logo').sort((a, b) => a.order - b.order);
+  },
+  async addLogo(inspectionId, blob) {
+    const existing = await this.listLogos(inspectionId);
+    return this.addPhoto({ kind: 'logo', inspectionId, originalBlob: blob, order: existing.length });
   },
 
   // --- Templates ---
@@ -232,36 +311,38 @@ const DB = {
   async deleteTemplate(id) {
     return this.delete('templates', id);
   },
-  async applyTemplate(inspectionId, templateId) {
+  async applyTemplate(inspectionId, templateId, sectionId = null) {
     const tpl = await this.get('templates', templateId);
     if (!tpl) throw new Error('Template not found');
     const existing = await this.listElements(inspectionId);
     let order = existing.length;
     const created = [];
     for (const e of tpl.elements) {
-      created.push(await this.createElement(inspectionId, { name: e.name, category: e.category, order: order++ }));
+      created.push(await this.createElement(inspectionId, { name: e.name, category: e.category, sectionId, order: order++ }));
     }
     return created;
   },
 
   // --- Aggregate helpers ---
+  async getElementConditionSummary(elementId) {
+    const findings = await this.listFindings(elementId);
+    let worstSeverity = 0;
+    let worstExtent = '';
+    const extentOrder = ['A', 'B', 'C', 'D', 'E'];
+    for (const f of findings) {
+      if (f.severity && f.severity > worstSeverity) worstSeverity = f.severity;
+      if (f.extent && (!worstExtent || extentOrder.indexOf(f.extent) > extentOrder.indexOf(worstExtent))) {
+        worstExtent = f.extent;
+      }
+    }
+    return { findingCount: findings.length, worstSeverity, worstExtent };
+  },
   async getInspectionSummary(inspectionId) {
     const elements = await this.listElements(inspectionId);
     const summary = [];
-    for (const el of elements) {
-      const findings = await this.listFindings(el.id);
-      let worstSeverity = 0;
-      let worstExtent = '';
-      const extentOrder = ['A', 'B', 'C', 'D', 'E'];
-      for (const f of findings) {
-        if (f.severity && f.severity > worstSeverity) worstSeverity = f.severity;
-        if (f.extent && extentOrder.indexOf(f.extent) > extentOrder.indexOf(worstExtent || 'A') ) {
-          if (!worstExtent || extentOrder.indexOf(f.extent) > extentOrder.indexOf(worstExtent)) {
-            worstExtent = f.extent;
-          }
-        }
-      }
-      summary.push({ element: el, findingCount: findings.length, worstSeverity, worstExtent });
+    for (const elmt of elements) {
+      const s = await this.getElementConditionSummary(elmt.id);
+      summary.push({ element: elmt, ...s });
     }
     return summary;
   }
