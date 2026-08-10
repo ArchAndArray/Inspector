@@ -5,7 +5,7 @@ const SEVERITY_LABELS = { 1: 'As New', 2: 'Minor', 3: 'Moderate', 4: 'Severe', 5
 const EXTENT_LABELS = { A: 'None', B: 'Slight (≤5%)', C: 'Moderate (5–20%)', D: 'Wide (20–50%)', E: 'Extensive (>50%)' };
 const PRIORITY_COLORS = { High: '#c81e1e', Medium: '#e0672e', Low: '#4f9d5c', Monitor: '#1e7dc8' };
 const CURRENCY_SYMBOLS = { USD: '$', GBP: '£', EUR: '€' };
-const APP_VERSION = '1.0';
+const APP_VERSION = '1.1';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -25,6 +25,19 @@ function toast(msg) {
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 2200);
 }
+
+// Surfaces any otherwise-silent JS error as a visible toast. Without this, a throw
+// happening outside a try/catch (e.g. before an async function's first await) fails
+// with zero visible feedback — exactly the "button does nothing" symptom.
+window.addEventListener('error', (e) => {
+  console.error('Uncaught error:', e.error || e.message);
+  toast('Error: ' + (e.message || 'something went wrong') + ' (line ' + (e.lineno || '?') + ')');
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const msg = (e.reason && e.reason.message) ? e.reason.message : String(e.reason);
+  console.error('Unhandled promise rejection:', e.reason);
+  toast('Error: ' + msg);
+});
 
 // Overlays (sheets and fullscreen views) can nest in either direction depending on the
 // flow — a sheet can open a fullscreen view (e.g. New Inspection -> Map picker), and a
@@ -551,7 +564,9 @@ async function renderInspection(inspectionId) {
   `;
 
   document.getElementById('btn-back').addEventListener('click', () => navigate('#/'));
-  document.getElementById('btn-export').addEventListener('click', () => exportInspectionPDF(inspectionId));
+  document.getElementById('btn-export').addEventListener('click', () => {
+    try { exportInspectionPDF(inspectionId); } catch (err) { console.error(err); toast('Error: ' + err.message); }
+  });
   document.getElementById('btn-report-info').addEventListener('click', () => openReportInfoSheet(inspectionId));
   document.getElementById('btn-edit-header').addEventListener('click', () => openEditHeaderSheet(insp));
   document.getElementById('btn-add-section').addEventListener('click', () => openAddSectionSheet(inspectionId));
@@ -1289,7 +1304,9 @@ async function renderRiskAssessment(inspectionId) {
   `;
 
   document.getElementById('btn-back').addEventListener('click', () => navigate(`#/inspection/${inspectionId}`));
-  document.getElementById('btn-export-ra').addEventListener('click', () => exportRiskAssessmentPDF(inspectionId));
+  document.getElementById('btn-export-ra').addEventListener('click', () => {
+    try { exportRiskAssessmentPDF(inspectionId); } catch (err) { console.error(err); toast('Error: ' + err.message); }
+  });
   document.getElementById('btn-edit-ra-details').addEventListener('click', () => openEditRADetailsSheet(inspectionId, ra));
   document.getElementById('btn-edit-ra-task').addEventListener('click', () => openEditRATaskSheet(inspectionId, ra));
   document.getElementById('btn-add-hazard').addEventListener('click', () => openHazardEditorSheet(inspectionId, ra, null));
