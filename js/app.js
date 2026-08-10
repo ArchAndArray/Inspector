@@ -4,7 +4,7 @@ const appEl = document.getElementById('app');
 const SEVERITY_LABELS = { 1: 'As New', 2: 'Minor', 3: 'Moderate', 4: 'Severe', 5: 'Failed' };
 const EXTENT_LABELS = { A: 'None', B: 'Slight (≤5%)', C: 'Moderate (5–20%)', D: 'Wide (20–50%)', E: 'Extensive (>50%)' };
 const PRIORITY_COLORS = { High: '#c81e1e', Medium: '#e0672e', Low: '#4f9d5c', Monitor: '#1e7dc8' };
-const APP_VERSION = '0.4';
+const APP_VERSION = '0.6';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -459,10 +459,16 @@ async function openReportInfoSheet(inspectionId) {
           <label>Logos</label>
           <div class="photo-grid" id="logo-grid"></div>
           <input type="file" id="logo-file-input" accept="image/*" multiple style="display:none;">
-          <p class="hint">Add one or more logos (e.g. client + your company). They'll appear at the top of the cover page.</p>
+          <p class="hint">Add one or more logos (e.g. client + your company). On the Arch&amp;Array cover style, the first logo added is used as the company logo (top corner) and the second as the client logo (next to the client name).</p>
         </div>
 
-        <div class="section-header" style="margin-top:24px;"><h2>Report content</h2></div>
+        <div class="section-header" style="margin-top:22px;"><h2>Cover style</h2></div>
+        <div class="severity-picker" id="cover-style-picker">
+          <button class="chip ${(!insp.coverStyle || insp.coverStyle === 'basic') ? 'selected' : ''}" data-style="basic" style="${(!insp.coverStyle || insp.coverStyle === 'basic') ? 'background:var(--ink);' : ''}">Basic</button>
+          <button class="chip ${insp.coverStyle === 'archarray' ? 'selected' : ''}" data-style="archarray" style="${insp.coverStyle === 'archarray' ? 'background:var(--ink);' : ''}">Arch&amp;Array</button>
+        </div>
+
+        <div class="section-header" style="margin-top:22px;"><h2>Report content</h2></div>
         <button class="btn btn-secondary btn-block" id="btn-intro">📝 Introduction / Summary${insp.introduction ? ' — added' : ''}</button>
         <button class="btn btn-secondary btn-block" id="btn-conclusion" style="margin-top:10px;">📋 Conclusion &amp; Recommendations${(insp.conclusion || (insp.recommendations && insp.recommendations.length)) ? ' — added' : ''}</button>
 
@@ -475,6 +481,14 @@ async function openReportInfoSheet(inspectionId) {
 
   sheet.querySelector('#btn-intro').addEventListener('click', () => openIntroSheet(inspectionId));
   sheet.querySelector('#btn-conclusion').addEventListener('click', () => openConclusionSheet(inspectionId));
+
+  sheet.querySelectorAll('#cover-style-picker .chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      sheet.querySelectorAll('#cover-style-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
+      chip.classList.add('selected');
+      chip.style.background = 'var(--ink)';
+    });
+  });
 
   function renderLogoGrid() {
     const grid = sheet.querySelector('#logo-grid');
@@ -509,10 +523,12 @@ async function openReportInfoSheet(inspectionId) {
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
   sheet.querySelector('#btn-save').addEventListener('click', async () => {
+    const styleBtn = sheet.querySelector('#cover-style-picker .chip.selected');
     await DB.updateInspection(inspectionId, {
       client: sheet.querySelector('#f-client').value.trim(),
       reference: sheet.querySelector('#f-reference').value.trim(),
-      date: sheet.querySelector('#f-date').value
+      date: sheet.querySelector('#f-date').value,
+      coverStyle: styleBtn ? styleBtn.dataset.style : 'basic'
     });
     sheet.remove();
     toast('Report info saved');

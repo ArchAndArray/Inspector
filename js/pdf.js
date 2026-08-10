@@ -108,70 +108,11 @@ async function buildAndSaveInspectionPDF(inspectionId) {
   const contentW = pageW - margin * 2;
 
   // ---------- Cover page ----------
-  doc.setFillColor(255, 255, 255);
-  doc.rect(0, 0, pageW, pageH, 'F');
-
-  // Red curved swoosh, bleeding off the bottom-right — built from overlapping filled
-  // ellipses (avoids relying on jsPDF's less consistent low-level path API).
-  doc.setFillColor(200, 30, 30);
-  const swooshR = pageW * 0.85;
-  doc.ellipse(pageW * 0.78, pageH * 1.02, swooshR, swooshR * 0.62, 'F');
-
-  // Logos strip at the top (letterhead-style), if any
-  if (logoData.length) {
-    const logoH = 34;
-    const gap = 16;
-    const widths = logoData.map((l) => (l.w / l.h) * logoH);
-    const totalW = widths.reduce((a, b) => a + b, 0) + gap * (logoData.length - 1);
-    let lx = pageW - margin - totalW;
-    const ly = 44;
-    logoData.forEach((l, i) => {
-      doc.addImage(l.url, 'JPEG', lx, ly, widths[i], logoH, undefined, 'FAST');
-      lx += widths[i] + gap;
-    });
+  if (insp.coverStyle === 'archarray') {
+    drawArchArrayCover(doc, { insp, coverData, logoData, pageW, pageH, margin, contentW });
+  } else {
+    drawBasicCover(doc, { insp, coverData, logoData, pageW, pageH, margin, contentW });
   }
-
-  doc.setTextColor(28, 31, 38);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(28);
-  doc.text(insp.title || 'Structural Inspection Report', margin, 110, { maxWidth: contentW });
-
-  if (insp.subtitle) {
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(14);
-    doc.setTextColor(74, 79, 90);
-    doc.text(insp.subtitle, margin, 136, { maxWidth: contentW });
-  }
-
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(20);
-  doc.setTextColor(28, 31, 38);
-  doc.text(insp.structureName || '', margin, 175, { maxWidth: contentW });
-
-  if (insp.client || insp.reference) {
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(11);
-    doc.setTextColor(74, 79, 90);
-    const line = [insp.client ? `Client: ${insp.client}` : null, insp.reference ? `Reference: ${insp.reference}` : null].filter(Boolean).join('    ·    ');
-    doc.text(line, margin, 196, { maxWidth: contentW });
-  }
-
-  if (coverData) {
-    const maxW = contentW * 0.8;
-    const maxH = pageH * 0.3;
-    let w = maxW, h = (coverData.h / coverData.w) * w;
-    if (h > maxH) { h = maxH; w = (coverData.w / coverData.h) * h; }
-    const x = (pageW - w) / 2;
-    const y = pageH - h - 90;
-    doc.setFillColor(255, 255, 255);
-    doc.roundedRect(x - 6, y - 6, w + 12, h + 12, 4, 4, 'F');
-    doc.addImage(coverData.url, 'JPEG', x, y, w, h, undefined, 'FAST');
-  }
-
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(10);
-  doc.setTextColor(120, 124, 132);
-  doc.text(fmtDate(insp.date), margin, pageH - 40);
 
   // ---------- Introduction / Summary ----------
   if (insp.introduction) {
@@ -500,4 +441,203 @@ function pageHeading(doc, text, y) {
   doc.setLineWidth(1.5);
   doc.line(48, y + 6, 48 + 36, y + 6);
   return y + 30;
+}
+
+// Draws text with manual letter-spacing (jsPDF's core text() has no tracking option).
+function drawTrackedText(doc, text, x, y, tracking) {
+  let cx = x;
+  for (const ch of text) {
+    doc.text(ch, cx, y);
+    cx += doc.getTextWidth(ch) + tracking;
+  }
+  return cx;
+}
+
+function drawBasicCover(doc, { insp, coverData, logoData, pageW, pageH, margin, contentW }) {
+  doc.setFillColor(255, 255, 255);
+  doc.rect(0, 0, pageW, pageH, 'F');
+
+  // Red curved swoosh, bleeding off the bottom-right — built from an overlapping filled
+  // ellipse (avoids relying on jsPDF's less consistent low-level path API).
+  doc.setFillColor(200, 30, 30);
+  const swooshR = pageW * 0.85;
+  doc.ellipse(pageW * 0.78, pageH * 1.02, swooshR, swooshR * 0.62, 'F');
+
+  // Logos strip at the top (letterhead-style), if any
+  if (logoData.length) {
+    const logoH = 34;
+    const gap = 16;
+    const widths = logoData.map((l) => (l.w / l.h) * logoH);
+    const totalW = widths.reduce((a, b) => a + b, 0) + gap * (logoData.length - 1);
+    let lx = pageW - margin - totalW;
+    const ly = 44;
+    logoData.forEach((l, i) => {
+      doc.addImage(l.url, 'JPEG', lx, ly, widths[i], logoH, undefined, 'FAST');
+      lx += widths[i] + gap;
+    });
+  }
+
+  doc.setTextColor(28, 31, 38);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(28);
+  doc.text(insp.title || 'Structural Inspection Report', margin, 110, { maxWidth: contentW });
+
+  if (insp.subtitle) {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(14);
+    doc.setTextColor(74, 79, 90);
+    doc.text(insp.subtitle, margin, 136, { maxWidth: contentW });
+  }
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(20);
+  doc.setTextColor(28, 31, 38);
+  doc.text(insp.structureName || '', margin, 175, { maxWidth: contentW });
+
+  if (insp.client || insp.reference) {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(11);
+    doc.setTextColor(74, 79, 90);
+    const line = [insp.client ? `Client: ${insp.client}` : null, insp.reference ? `Reference: ${insp.reference}` : null].filter(Boolean).join('    ·    ');
+    doc.text(line, margin, 196, { maxWidth: contentW });
+  }
+
+  if (coverData) {
+    const maxW = contentW * 0.8;
+    const maxH = pageH * 0.3;
+    let w = maxW, h = (coverData.h / coverData.w) * w;
+    if (h > maxH) { h = maxH; w = (coverData.w / coverData.h) * h; }
+    const x = (pageW - w) / 2;
+    const y = pageH - h - 90;
+    doc.setFillColor(255, 255, 255);
+    doc.roundedRect(x - 6, y - 6, w + 12, h + 12, 4, 4, 'F');
+    doc.addImage(coverData.url, 'JPEG', x, y, w, h, undefined, 'FAST');
+  }
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(120, 124, 132);
+  doc.text(fmtDate(insp.date), margin, pageH - 40);
+}
+
+function drawArchArrayCover(doc, { insp, coverData, logoData, pageW, pageH, margin, contentW }) {
+  doc.setFillColor(255, 255, 255);
+  doc.rect(0, 0, pageW, pageH, 'F');
+
+  // Background: pylon + fanning cable array
+  const pylonX = pageW * 0.82;
+  doc.setFillColor(28, 31, 38);
+  doc.rect(pylonX - 6, pageH * 0.11, 12, pageH * 0.89, 'F');
+
+  const fanTopY = pageH * 0.15;
+  doc.setDrawColor(200, 30, 30);
+  doc.setLineWidth(1);
+  [0.18, 0.30, 0.42, 0.54, 0.66, 0.78].forEach((frac, i) => {
+    doc.line(pylonX, fanTopY + i * 16, pageW * frac * 0.9, pageH);
+  });
+  doc.setDrawColor(230, 150, 150);
+  doc.setLineWidth(0.8);
+  [0.18, 0.26, 0.34].forEach((frac, i) => {
+    doc.line(pylonX, fanTopY + 30 + i * 24, pageW, pageH * (0.55 + frac));
+  });
+
+  doc.setFillColor(28, 31, 38);
+  doc.rect(0, pageH - 6, pageW, 6, 'F');
+
+  // Company logo (first logo), top-left
+  if (logoData[0]) {
+    const l = logoData[0];
+    const h = 24;
+    const w = (l.w / l.h) * h;
+    doc.addImage(l.url, 'JPEG', margin, 40, w, h, undefined, 'FAST');
+  }
+
+  // Kicker (report title, tracked-out small caps)
+  let ty = 118;
+  doc.setTextColor(200, 30, 30);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10);
+  drawTrackedText(doc, (insp.title || 'Structural Inspection Report').toUpperCase(), margin, ty, 1.6);
+
+  // Hero: structure name, serif
+  ty += 34;
+  doc.setTextColor(28, 31, 38);
+  doc.setFont('times', 'bold');
+  doc.setFontSize(30);
+  const heroLines = doc.splitTextToSize(insp.structureName || '', contentW - 60);
+  doc.text(heroLines, margin, ty);
+  ty += heroLines.length * 30;
+
+  // Subtitle, serif italic
+  if (insp.subtitle) {
+    ty += 6;
+    doc.setFont('times', 'italic');
+    doc.setFontSize(13);
+    doc.setTextColor(91, 96, 105);
+    doc.text(insp.subtitle, margin, ty, { maxWidth: contentW - 60 });
+    ty += 18;
+  }
+
+  // Red rule
+  ty += 8;
+  doc.setDrawColor(200, 30, 30);
+  doc.setLineWidth(2);
+  doc.line(margin, ty, margin + 40, ty);
+
+  // Date, then Reference — tracked small text
+  ty += 22;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(91, 96, 105);
+  drawTrackedText(doc, fmtDate(insp.date), margin, ty, 1);
+  if (insp.reference) {
+    ty += 15;
+    drawTrackedText(doc, `Ref. ${insp.reference}`, margin, ty, 1);
+  }
+
+  // Cover photo, roughly mid-page
+  if (coverData) {
+    const w = contentW - 20;
+    const maxH = pageH * 0.3;
+    let h = (coverData.h / coverData.w) * w;
+    if (h > maxH) h = maxH;
+    const x = margin;
+    const y = pageH * 0.44;
+    doc.setFillColor(255, 255, 255);
+    doc.setDrawColor(220, 223, 228);
+    doc.roundedRect(x - 4, y - 4, w + 8, h + 8, 3, 3, 'FD');
+    doc.addImage(coverData.url, 'JPEG', x, y, w, h, undefined, 'FAST');
+  }
+
+  // Client whiteout box, bottom — logo (second logo, if any) + client name
+  if (insp.client) {
+    const boxY = pageH - 100;
+    const logoBox = logoData[1];
+    const logoW = logoBox ? 26 : 0;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(11);
+    const textW = doc.getTextWidth(insp.client) + 4;
+    const boxW = 20 + (logoBox ? logoW + 10 : 0) + textW;
+    const boxH = 40;
+    doc.setFillColor(255, 255, 255);
+    doc.setDrawColor(215, 218, 222);
+    doc.setLineWidth(0.75);
+    doc.roundedRect(margin, boxY, boxW, boxH, 3, 3, 'FD');
+
+    let tx = margin + 10;
+    if (logoBox) {
+      const lh = boxH - 16;
+      const lw = (logoBox.w / logoBox.h) * lh;
+      doc.addImage(logoBox.url, 'JPEG', tx, boxY + 8, lw, lh, undefined, 'FAST');
+      tx += lw + 10;
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.setTextColor(154, 160, 168);
+    drawTrackedText(doc, 'CLIENT', tx, boxY + 15, 1.4);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(11);
+    doc.setTextColor(28, 31, 38);
+    doc.text(insp.client, tx, boxY + 29);
+  }
 }

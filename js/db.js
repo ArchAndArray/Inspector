@@ -100,6 +100,7 @@ const DB = {
       structureId: data.structureId || '',
       structureName: data.structureName || '',
       title: data.title || 'Structural Inspection Report',
+      coverStyle: data.coverStyle || 'basic',
       subtitle: data.subtitle || '',
       client: data.client || '',
       reference: data.reference || '',
