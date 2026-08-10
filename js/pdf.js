@@ -8,6 +8,13 @@ const SEV_COLORS_RGB = {
   5: [200, 30, 30]
 };
 
+const PRIORITY_COLORS_RGB = {
+  High: [200, 30, 30],
+  Medium: [224, 103, 46],
+  Low: [79, 157, 92],
+  Monitor: [30, 125, 200]
+};
+
 // Loads a blob as an upright, normalized image (corrects EXIF rotation even for photos
 // captured before the in-app fix) and returns a dataURL + pixel dimensions ready for jsPDF.
 async function loadNormalizedImage(blob) {
@@ -161,6 +168,22 @@ async function exportInspectionPDF(inspectionId) {
   doc.setFontSize(10);
   doc.setTextColor(120, 124, 132);
   doc.text(fmtDate(insp.date), margin, pageH - 40);
+
+  // ---------- Introduction / Summary ----------
+  if (insp.introduction) {
+    doc.addPage();
+    let iy = margin;
+    iy = pageHeading(doc, 'Introduction / Summary', iy);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(11);
+    doc.setTextColor(28, 31, 38);
+    const introLines = doc.splitTextToSize(insp.introduction, contentW);
+    for (const line of introLines) {
+      if (iy > pageH - margin) { doc.addPage(); iy = margin; }
+      doc.text(line, margin, iy);
+      iy += 15;
+    }
+  }
 
   // ---------- Details page ----------
   doc.addPage();
@@ -348,6 +371,18 @@ async function exportInspectionPDF(inspectionId) {
           doc.setFont('helvetica', 'bold');
           doc.setFontSize(10);
           doc.text(label, bx + 8, y + 14);
+          bx += w + 8;
+        }
+        if (f.priority) {
+          const col = PRIORITY_COLORS_RGB[f.priority] || [120, 124, 132];
+          doc.setFillColor(col[0], col[1], col[2]);
+          const label = `Priority: ${f.priority}`;
+          const w = doc.getTextWidth(label) + 16;
+          doc.roundedRect(bx, y, w, 20, 10, 10, 'F');
+          doc.setTextColor(255, 255, 255);
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(10);
+          doc.text(label, bx + 8, y + 14);
         }
         y += 32;
 
@@ -359,6 +394,37 @@ async function exportInspectionPDF(inspectionId) {
           if (y + lines.length * 13 > pageH - margin) { doc.addPage(); y = margin; }
           doc.text(lines, margin, y);
           y += lines.length * 13 + 8;
+        }
+
+        if (f.worksRequired) {
+          if (y + 40 > pageH - margin) { doc.addPage(); y = margin; }
+          const boxTop = y;
+          let boxLines = [];
+          if (f.worksDescription) {
+            doc.setFont('helvetica', 'normal');
+            boxLines = doc.splitTextToSize(f.worksDescription, contentW - 20);
+          }
+          const estLine = f.costEstimate ? `Cost estimate: ${f.costEstimate}` : '';
+          const totalLines = boxLines.length + (estLine ? 1 : 0);
+          const boxH = 22 + totalLines * 13 + 8;
+          doc.setFillColor(247, 238, 233);
+          doc.roundedRect(margin, boxTop, contentW, boxH, 4, 4, 'F');
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(10);
+          doc.setTextColor(28, 31, 38);
+          doc.text('Works required', margin + 10, boxTop + 15);
+          let wy = boxTop + 15 + 15;
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(10);
+          if (boxLines.length) {
+            doc.text(boxLines, margin + 10, wy);
+            wy += boxLines.length * 13;
+          }
+          if (estLine) {
+            doc.setFont('helvetica', 'bold');
+            doc.text(estLine, margin + 10, wy);
+          }
+          y = boxTop + boxH + 10;
         }
 
         if (f.photos.length) {
@@ -381,6 +447,38 @@ async function exportInspectionPDF(inspectionId) {
         doc.line(margin, y - 8, pageW - margin, y - 8);
       }
       y += 12;
+    }
+  }
+
+  // ---------- Conclusion & Recommendations ----------
+  if (insp.conclusion || (insp.recommendations && insp.recommendations.length)) {
+    doc.addPage();
+    let cy = margin;
+    if (insp.conclusion) {
+      cy = pageHeading(doc, 'Conclusion', cy);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(11);
+      doc.setTextColor(28, 31, 38);
+      const lines = doc.splitTextToSize(insp.conclusion, contentW);
+      for (const line of lines) {
+        if (cy > pageH - margin) { doc.addPage(); cy = margin; }
+        doc.text(line, margin, cy);
+        cy += 15;
+      }
+    }
+    if (insp.recommendations && insp.recommendations.length) {
+      cy += 20;
+      if (cy > pageH - margin - 60) { doc.addPage(); cy = margin; }
+      cy = pageHeading(doc, 'Recommendations', cy);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(11);
+      doc.setTextColor(28, 31, 38);
+      insp.recommendations.forEach((rec, i) => {
+        const lines = doc.splitTextToSize(`${i + 1}. ${rec}`, contentW);
+        if (cy + lines.length * 15 > pageH - margin) { doc.addPage(); cy = margin; }
+        doc.text(lines, margin, cy);
+        cy += lines.length * 15 + 6;
+      });
     }
   }
 

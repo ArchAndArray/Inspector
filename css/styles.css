@@ -307,7 +307,7 @@ button {
 .sheet-backdrop {
   position: fixed; inset: 0;
   background: rgba(20,22,26,0.45);
-  z-index: 40;
+  z-index: 55;
   display: flex;
   align-items: flex-end;
 }
@@ -388,6 +388,22 @@ button {
   touch-action: none;
 }
 .annotate-canvas-wrap canvas { touch-action: none; display: block; max-width: 100%; max-height: 100%; }
+
+/* Checkbox rows (e.g. Works Required) */
+.checkbox-row { display: flex; align-items: center; gap: 10px; padding: 4px 0 14px; }
+.checkbox-row input[type="checkbox"] { width: 22px; height: 22px; flex-shrink: 0; }
+.checkbox-row label { font-size: 15px; font-weight: 600; color: var(--ink); text-transform: none; margin: 0; }
+
+/* Recommendation list rows */
+.reco-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.reco-row .reco-num { font-weight: 700; color: var(--ink-soft); width: 22px; text-align: right; flex-shrink: 0; font-size: 14px; }
+.reco-row input { flex: 1; }
+.reco-remove { background: none; border: none; color: var(--red); font-size: 22px; padding: 4px 6px; line-height: 1; }
+
+.badge-priority-high { background: var(--red); }
+.badge-priority-medium { background: #e0672e; }
+.badge-priority-low { background: #4f9d5c; }
+.badge-priority-monitor { background: #1e7dc8; }
 
 /* Utility */
 .muted { color: var(--ink-soft); }

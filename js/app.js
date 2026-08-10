@@ -3,6 +3,7 @@
 const appEl = document.getElementById('app');
 const SEVERITY_LABELS = { 1: 'As New', 2: 'Minor', 3: 'Moderate', 4: 'Severe', 5: 'Failed' };
 const EXTENT_LABELS = { A: 'None', B: 'Slight (≤5%)', C: 'Moderate (5–20%)', D: 'Wide (20–50%)', E: 'Extensive (>50%)' };
+const PRIORITY_COLORS = { High: '#c81e1e', Medium: '#e0672e', Low: '#4f9d5c', Monitor: '#1e7dc8' };
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -191,10 +192,8 @@ function openNewInspectionSheet() {
             <option value="Follow-up">Follow-up</option>
           </select>
         </div>
-        <div class="row-2">
-          <div class="field"><label>Date</label><input type="date" id="f-date"></div>
-          <div class="field"><label>Inspector</label><input type="text" id="f-inspector" placeholder="Name"></div>
-        </div>
+        <div class="field"><label>Date</label><input type="date" id="f-date"></div>
+        <div class="field"><label>Inspector</label><input type="text" id="f-inspector" placeholder="Name"></div>
         <div class="field"><label>Weather</label><input type="text" id="f-weather" placeholder="e.g. Overcast, 14°C"></div>
         <div class="field">
           <label>Location</label>
@@ -365,10 +364,8 @@ function openEditHeaderSheet(insp) {
           <label>Inspection type</label>
           <select id="f-inspectionType">${['Routine', 'Detailed', 'Special', 'Follow-up'].map((t) => `<option value="${t}" ${insp.inspectionType === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
         </div>
-        <div class="row-2">
-          <div class="field"><label>Date</label><input type="date" id="f-date" value="${(insp.date || '').slice(0, 10)}"></div>
-          <div class="field"><label>Inspector</label><input type="text" id="f-inspector" value="${esc(insp.inspector)}"></div>
-        </div>
+        <div class="field"><label>Date</label><input type="date" id="f-date" value="${(insp.date || '').slice(0, 10)}"></div>
+        <div class="field"><label>Inspector</label><input type="text" id="f-inspector" value="${esc(insp.inspector)}"></div>
         <div class="field"><label>Weather</label><input type="text" id="f-weather" value="${esc(insp.weather)}"></div>
         <div class="field"><label>Location</label><input type="text" id="f-location" value="${esc(insp.location && insp.location.manual)}"></div>
         <div class="field"><label>Report title</label><input type="text" id="f-title" value="${esc(insp.title)}"></div>
@@ -427,12 +424,20 @@ async function openReportInfoSheet(inspectionId) {
           <input type="file" id="logo-file-input" accept="image/*" multiple style="display:none;">
           <p class="hint">Add one or more logos (e.g. client + your company). They'll appear at the top of the cover page.</p>
         </div>
-        <button class="btn btn-primary btn-block" id="btn-save">Save</button>
+
+        <div class="section-header" style="margin-top:24px;"><h2>Report content</h2></div>
+        <button class="btn btn-secondary btn-block" id="btn-intro">📝 Introduction / Summary${insp.introduction ? ' — added' : ''}</button>
+        <button class="btn btn-secondary btn-block" id="btn-conclusion" style="margin-top:10px;">📋 Conclusion &amp; Recommendations${(insp.conclusion || (insp.recommendations && insp.recommendations.length)) ? ' — added' : ''}</button>
+
+        <button class="btn btn-primary btn-block" id="btn-save" style="margin-top:22px;">Save</button>
         <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
       </div>
     </div>
   `);
   document.body.appendChild(sheet);
+
+  sheet.querySelector('#btn-intro').addEventListener('click', () => openIntroSheet(inspectionId));
+  sheet.querySelector('#btn-conclusion').addEventListener('click', () => openConclusionSheet(inspectionId));
 
   function renderLogoGrid() {
     const grid = sheet.querySelector('#logo-grid');
@@ -475,6 +480,98 @@ async function openReportInfoSheet(inspectionId) {
     sheet.remove();
     toast('Report info saved');
     renderInspection(inspectionId);
+  });
+}
+
+function openIntroSheet(inspectionId) {
+  DB.get('inspections', inspectionId).then((insp) => {
+    const sheet = el(`
+      <div class="sheet-backdrop">
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <h2>Introduction / Summary</h2>
+          <div class="field"><textarea id="f-intro" style="min-height:220px;" placeholder="Summarize the purpose and scope of this inspection…">${esc(insp.introduction)}</textarea></div>
+          <button class="btn btn-primary btn-block" id="btn-save">Save</button>
+          <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+        </div>
+      </div>
+    `);
+    document.body.appendChild(sheet);
+    sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+    sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+    sheet.querySelector('#btn-save').addEventListener('click', async () => {
+      await DB.updateInspection(inspectionId, { introduction: sheet.querySelector('#f-intro').value.trim() });
+      sheet.remove();
+      toast('Introduction saved');
+      openReportInfoSheet(inspectionId);
+    });
+  });
+}
+
+function openConclusionSheet(inspectionId) {
+  DB.get('inspections', inspectionId).then((insp) => {
+    let recommendations = (insp.recommendations && insp.recommendations.length) ? [...insp.recommendations] : [''];
+
+    const sheet = el(`
+      <div class="sheet-backdrop">
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <h2>Conclusion &amp; Recommendations</h2>
+          <div class="field">
+            <label>Conclusion</label>
+            <textarea id="f-conclusion" style="min-height:180px;" placeholder="Overall condition assessment and conclusion…">${esc(insp.conclusion)}</textarea>
+          </div>
+          <div class="field">
+            <label>Recommendations</label>
+            <div id="reco-list"></div>
+            <button class="small-btn" id="btn-add-reco">＋ Add recommendation</button>
+          </div>
+          <button class="btn btn-primary btn-block" id="btn-save" style="margin-top:8px;">Save</button>
+          <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+        </div>
+      </div>
+    `);
+    document.body.appendChild(sheet);
+
+    function renderRecoList() {
+      const list = sheet.querySelector('#reco-list');
+      list.innerHTML = recommendations.map((text, i) => `
+        <div class="reco-row">
+          <span class="reco-num">${i + 1}.</span>
+          <input type="text" class="reco-input" data-i="${i}" value="${esc(text)}" placeholder="Recommendation text">
+          <button class="reco-remove" data-remove="${i}">✕</button>
+        </div>
+      `).join('');
+      list.querySelectorAll('.reco-input').forEach((input) => {
+        input.addEventListener('input', (e) => { recommendations[Number(e.target.dataset.i)] = e.target.value; });
+      });
+      list.querySelectorAll('[data-remove]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          recommendations.splice(Number(btn.dataset.remove), 1);
+          if (!recommendations.length) recommendations = [''];
+          renderRecoList();
+        });
+      });
+    }
+    renderRecoList();
+
+    sheet.querySelector('#btn-add-reco').addEventListener('click', () => {
+      recommendations.push('');
+      renderRecoList();
+    });
+
+    sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+    sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+    sheet.querySelector('#btn-save').addEventListener('click', async () => {
+      const cleaned = recommendations.map((r) => r.trim()).filter(Boolean);
+      await DB.updateInspection(inspectionId, {
+        conclusion: sheet.querySelector('#f-conclusion').value.trim(),
+        recommendations: cleaned
+      });
+      sheet.remove();
+      toast('Conclusion saved');
+      openReportInfoSheet(inspectionId);
+    });
   });
 }
 
@@ -664,6 +761,8 @@ async function renderElement(inspectionId, elementId) {
           <div style="display:flex; gap:6px; margin-bottom:6px; flex-wrap:wrap;">
             ${f.severity ? `<span class="badge badge-sev-${f.severity}">S${f.severity} · ${SEVERITY_LABELS[f.severity]}</span>` : `<span class="badge badge-none">No severity</span>`}
             ${f.extent ? `<span class="badge badge-extent">${f.extent} · ${EXTENT_LABELS[f.extent]}</span>` : ''}
+            ${f.priority ? `<span class="badge badge-priority-${f.priority.toLowerCase()}">${esc(f.priority)}</span>` : ''}
+            ${f.worksRequired ? `<span class="badge badge-none" style="background:var(--ink); color:#fff;">Works required</span>` : ''}
           </div>
           <p style="margin:0 0 8px; font-size:14px;">${esc(f.notes) || '<span class="muted">No notes</span>'}</p>
           ${photos.length ? `<div style="display:flex; gap:6px;">${photoThumbs}${photos.length > 4 ? `<div class="muted" style="align-self:center; font-size:12px;">+${photos.length - 4}</div>` : ''}</div>` : ''}
@@ -780,12 +879,14 @@ function openEditElementSheet(inspectionId, elmt, backHash) {
 
 // ---------- FINDING EDITOR ----------
 async function openFindingEditor(inspectionId, elementId, findingId) {
+  const elmt = await DB.get('elements', elementId);
   let finding = findingId ? await DB.get('findings', findingId) : null;
   if (!finding) {
     finding = await DB.createFinding(elementId, {});
     findingId = finding.id;
   }
   let photos = await DB.listPhotosForFinding(findingId);
+  const elMeta = [elmt.materialType, elmt.location].filter(Boolean).join('   ·   ');
 
   const view = el(`
     <div class="fullscreen">
@@ -795,6 +896,11 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
         <button class="text-btn" id="btn-delete-finding" style="color:#ff9d9d;">Delete</button>
       </div>
       <div class="content" style="overflow-y:auto;">
+        <div class="card" style="margin-top:0;">
+          <strong style="font-size:16px;">${esc(elmt.name)}</strong>
+          ${elMeta ? `<p class="muted" style="margin:4px 0 0; font-size:13px;">${esc(elMeta)}</p>` : ''}
+        </div>
+
         <div class="section-header" style="margin-top:0;"><h2>Severity</h2></div>
         <div class="severity-picker" id="severity-picker">
           ${[1, 2, 3, 4, 5].map((s) => `
@@ -813,6 +919,25 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
           `).join('')}
         </div>
 
+        <div class="section-header"><h2>Priority</h2></div>
+        <div class="severity-picker" id="priority-picker">
+          ${['High', 'Medium', 'Low', 'Monitor'].map((p) => `
+            <button class="chip ${finding.priority === p ? 'selected' : ''}" data-pri="${p}" style="${finding.priority === p ? `background:${PRIORITY_COLORS[p]};` : ''}">
+              ${p}
+            </button>
+          `).join('')}
+        </div>
+
+        <div class="section-header"><h2>Works</h2></div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="f-works-required" ${finding.worksRequired ? 'checked' : ''}>
+          <label for="f-works-required">Works required</label>
+        </div>
+        <div id="works-detail" class="${finding.worksRequired ? '' : 'hidden'}">
+          <div class="field"><label>Works needed</label><textarea id="f-works-desc" placeholder="Describe the works required…">${esc(finding.worksDescription)}</textarea></div>
+          <div class="field"><label>Cost estimate</label><input type="text" id="f-cost" value="${esc(finding.costEstimate)}" placeholder="e.g. $12,500"></div>
+        </div>
+
         <div class="section-header"><h2>Notes</h2></div>
         <div class="field"><textarea id="f-notes" placeholder="Describe the finding…">${esc(finding.notes)}</textarea></div>
 
@@ -822,6 +947,18 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
     </div>
   `);
   document.body.appendChild(view);
+
+  view.querySelector('#f-works-required').addEventListener('change', (e) => {
+    view.querySelector('#works-detail').classList.toggle('hidden', !e.target.checked);
+  });
+
+  view.querySelectorAll('#priority-picker .chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const wasSelected = chip.classList.contains('selected');
+      view.querySelectorAll('#priority-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
+      if (!wasSelected) { chip.classList.add('selected'); chip.style.background = PRIORITY_COLORS[chip.dataset.pri]; }
+    });
+  });
 
   function renderPhotoGrid() {
     const grid = view.querySelector('#photo-grid');
@@ -859,9 +996,15 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
   async function saveAndClose() {
     const sevBtn = view.querySelector('.chip.selected[data-sev]');
     const extBtn = view.querySelector('.chip.selected[data-ext]');
+    const priBtn = view.querySelector('.chip.selected[data-pri]');
+    const worksRequired = view.querySelector('#f-works-required').checked;
     await DB.updateFinding(findingId, {
       severity: sevBtn ? Number(sevBtn.dataset.sev) : null,
       extent: extBtn ? extBtn.dataset.ext : null,
+      priority: priBtn ? priBtn.dataset.pri : null,
+      worksRequired,
+      worksDescription: worksRequired ? view.querySelector('#f-works-desc').value.trim() : '',
+      costEstimate: worksRequired ? view.querySelector('#f-cost').value.trim() : '',
       notes: view.querySelector('#f-notes').value.trim()
     });
     view.remove();
