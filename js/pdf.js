@@ -20,12 +20,13 @@ const PRIORITY_COLORS_RGB = {
 async function loadNormalizedImage(blob) {
   try {
     const bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    const w = bitmap.width, h = bitmap.height; // capture before close() — close() resets these to 0
     const canvas = document.createElement('canvas');
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
+    canvas.width = w;
+    canvas.height = h;
     canvas.getContext('2d').drawImage(bitmap, 0, 0);
     if (bitmap.close) bitmap.close();
-    return { url: canvas.toDataURL('image/jpeg', 0.92), w: bitmap.width, h: bitmap.height };
+    return { url: canvas.toDataURL('image/jpeg', 0.92), w, h };
   } catch (err) {
     // Fallback: plain read, no orientation correction available
     const url = await new Promise((resolve, reject) => {
