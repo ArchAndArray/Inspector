@@ -4,6 +4,7 @@ const appEl = document.getElementById('app');
 const SEVERITY_LABELS = { 1: 'As New', 2: 'Minor', 3: 'Moderate', 4: 'Severe', 5: 'Failed' };
 const EXTENT_LABELS = { A: 'None', B: 'Slight (≤5%)', C: 'Moderate (5–20%)', D: 'Wide (20–50%)', E: 'Extensive (>50%)' };
 const PRIORITY_COLORS = { High: '#c81e1e', Medium: '#e0672e', Low: '#4f9d5c', Monitor: '#1e7dc8' };
+const APP_VERSION = '0.4';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -40,6 +41,18 @@ function el(html) {
   t.innerHTML = html.trim();
   return t.content.firstElementChild;
 }
+
+// iOS Safari quirk: tapping a button while a text field still has focus sometimes only
+// dismisses the keyboard on the first tap, requiring a second tap to register the click.
+// Blurring the active field as soon as a touch/pointer lands elsewhere fixes this everywhere.
+document.addEventListener('pointerdown', (e) => {
+  const active = document.activeElement;
+  if (!active) return;
+  const isField = active.tagName === 'INPUT' || active.tagName === 'TEXTAREA';
+  if (isField && active !== e.target && !(e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
+    active.blur();
+  }
+}, true);
 
 // Re-encodes a captured/selected photo to correct pixel orientation (fixes iOS EXIF
 // rotation so portrait photos don't appear sideways in canvas-based annotation/PDF export),
@@ -140,6 +153,25 @@ function openPhotoSourceSheet({ onFiles, multiple = false }) {
   s.querySelector('#src-library').addEventListener('change', (e) => { const f = e.target.files; s.remove(); if (f.length) onFiles(f); });
 }
 
+// ---------- Force update / resync from GitHub ----------
+async function forceUpdate() {
+  toast('Checking for updates…');
+  try {
+    if ('caches' in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    }
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((r) => r.unregister()));
+    }
+    setTimeout(() => window.location.reload(), 500);
+  } catch (err) {
+    console.error('Update check failed', err);
+    toast('Update check failed — try again while online');
+  }
+}
+
 // ---------- HOME ----------
 async function renderHome() {
   const inspections = await DB.listInspections();
@@ -155,7 +187,11 @@ async function renderHome() {
 
   appEl.innerHTML = `
     <div class="topbar">
-      <h1>Inspections</h1>
+      <div style="flex:1; min-width:0;">
+        <h1>Inspector</h1>
+        <span class="sub">by Arch&amp;Array · v${APP_VERSION}</span>
+      </div>
+      <button class="icon-btn" id="btn-update" title="Check for updates">⟳</button>
       <button class="icon-btn" id="btn-templates" title="Element templates">☰</button>
     </div>
     <div class="content">
@@ -173,6 +209,7 @@ async function renderHome() {
   appEl.querySelectorAll('.list-item').forEach((row) => row.addEventListener('click', () => navigate(`#/inspection/${row.dataset.id}`)));
   document.getElementById('btn-new-inspection').addEventListener('click', openNewInspectionSheet);
   document.getElementById('btn-templates').addEventListener('click', () => navigate('#/templates'));
+  document.getElementById('btn-update').addEventListener('click', forceUpdate);
 }
 
 function openNewInspectionSheet() {

@@ -2,11 +2,9 @@
 
 ## Updating an existing install
 
-If you already deployed this app: upload these updated files over the old ones in your repo (same file paths — `js/db.js`, `js/app.js`, `js/annotate.js`, `js/pdf.js`, `sw.js` have all changed). Your existing inspections, elements, findings, and photos are preserved automatically — the local database upgrades itself in place the next time the app opens.
+**Easiest method (v0.4+):** open the app, tap the **⟳** icon on the home screen (top right, next to the templates menu). This clears the cached app files and service worker, then reloads — pulling fresh files straight from GitHub Pages. Use this any time after you've pushed an update, instead of waiting on iOS's own background check.
 
-Because the service worker caches files for offline use, the iPad may need the app **closed fully and reopened while online once** to pick up the new version (iOS Safari checks for service worker updates on launch). If changes don't appear, remove the app from the home screen, reload the site in Safari once online, then re-add it.
-
-**Known limitation:** photos captured before this update may still appear rotated in exports — the orientation fix only applies to new photos captured from now on. If an older cover photo is sideways, easiest fix is to remove and re-add it from the inspection's Cover photo section.
+**Manual method:** upload the updated files over the old ones in your repo (same file paths). Your existing inspections, elements, findings, and photos are preserved automatically — the local database upgrades itself in place. If the ⟳ button isn't available yet (i.e. updating from a version before it existed), remove the app from the home screen, reload the site in Safari once online, then re-add it.
 
 
 This is a local-first PWA. It stores everything on the iPad itself (IndexedDB) and works fully offline once installed. No App Store, no account.

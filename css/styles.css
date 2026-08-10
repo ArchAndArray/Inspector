@@ -36,6 +36,7 @@ input, textarea {
 button {
   font-family: inherit;
   cursor: pointer;
+  touch-action: manipulation;
 }
 
 #app {

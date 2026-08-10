@@ -50,7 +50,15 @@ async function exportInspectionPDF(inspectionId) {
     return;
   }
   toast('Building report…');
+  try {
+    await buildAndSaveInspectionPDF(inspectionId);
+  } catch (err) {
+    console.error('PDF export failed', err);
+    toast('Export failed: ' + (err && err.message ? err.message : 'unknown error'));
+  }
+}
 
+async function buildAndSaveInspectionPDF(inspectionId) {
   const insp = await DB.get('inspections', inspectionId);
   const sections = await DB.listSections(inspectionId);
   const coverPhoto = await DB.getCoverPhoto(inspectionId);
@@ -102,16 +110,11 @@ async function exportInspectionPDF(inspectionId) {
   doc.setFillColor(255, 255, 255);
   doc.rect(0, 0, pageW, pageH, 'F');
 
-  // Red curved swoosh (bezier path), bleeding off the right/bottom edge
+  // Red curved swoosh, bleeding off the bottom-right — built from overlapping filled
+  // ellipses (avoids relying on jsPDF's less consistent low-level path API).
   doc.setFillColor(200, 30, 30);
-  doc.path([
-    { op: 'm', c: [pageW * 0.15, pageH * 0.62] },
-    { op: 'c', c: [pageW * 0.55, pageH * 0.40, pageW * 0.78, pageH * 0.78, pageW * 1.05, pageH * 0.70] },
-    { op: 'l', c: [pageW * 1.05, pageH * 1.05] },
-    { op: 'l', c: [-10, pageH * 1.05] },
-    { op: 'c', c: [pageW * 0.05, pageH * 0.85, pageW * 0.02, pageH * 0.70, pageW * 0.15, pageH * 0.62] },
-    { op: 'h' }
-  ]).fill();
+  const swooshR = pageW * 0.85;
+  doc.ellipse(pageW * 0.78, pageH * 1.02, swooshR, swooshR * 0.62, 'F');
 
   // Logos strip at the top (letterhead-style), if any
   if (logoData.length) {
