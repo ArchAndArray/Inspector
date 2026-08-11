@@ -5,7 +5,7 @@ const SEVERITY_LABELS = { 1: 'As New', 2: 'Minor', 3: 'Moderate', 4: 'Severe', 5
 const EXTENT_LABELS = { A: 'None', B: 'Slight (≤5%)', C: 'Moderate (5–20%)', D: 'Wide (20–50%)', E: 'Extensive (>50%)' };
 const PRIORITY_COLORS = { High: '#c81e1e', Medium: '#e0672e', Low: '#4f9d5c', Monitor: '#1e7dc8' };
 const CURRENCY_SYMBOLS = { USD: '$', GBP: '£', EUR: '€' };
-const APP_VERSION = '1.1';
+const APP_VERSION = '1.2';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -386,6 +386,60 @@ async function forceUpdate() {
   }
 }
 
+// ---------- BACKUP & RESTORE (raw data export/import) ----------
+function openBackupRestoreSheet() {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Backup &amp; restore</h2>
+        <p class="muted" style="font-size:13px; margin-top:-8px;">Export everything on this device — inspections, elements, findings, photos, and risk assessments — to a single file, or restore from a previous backup. Useful before reinstalling the app or moving to a new device.</p>
+        <button class="btn btn-primary btn-block" id="btn-do-export">⬆️ Export all data</button>
+        <button class="btn btn-secondary btn-block" id="btn-do-import" style="margin-top:10px;">⬇️ Import data</button>
+        <input type="file" id="backup-file-input" accept="application/json" style="display:none;">
+        <button class="btn btn-ghost btn-block" id="btn-cancel" style="margin-top:16px;">Close</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+
+  sheet.querySelector('#btn-do-export').addEventListener('click', async () => {
+    toast('Preparing export…');
+    try {
+      const count = await exportRawDataBackup();
+      toast(`Export ready — ${count} records — check your downloads`);
+    } catch (err) {
+      console.error(err);
+      toast('Export failed: ' + err.message);
+    }
+  });
+
+  sheet.querySelector('#btn-do-import').addEventListener('click', () => {
+    sheet.querySelector('#backup-file-input').click();
+  });
+  sheet.querySelector('#backup-file-input').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!confirm('Import this backup? Records with matching IDs will be overwritten; everything else will be added alongside your current data.')) {
+      e.target.value = '';
+      return;
+    }
+    toast('Importing…');
+    try {
+      const count = await importRawDataBackup(file);
+      sheet.remove();
+      toast(`Imported ${count} records`);
+      route();
+    } catch (err) {
+      console.error(err);
+      toast('Import failed: ' + err.message);
+    }
+    e.target.value = '';
+  });
+}
+
 // ---------- HOME ----------
 async function renderHome() {
   const inspections = await DB.listInspections();
@@ -406,6 +460,7 @@ async function renderHome() {
         <span class="sub">by Arch&amp;Array · v${APP_VERSION}</span>
       </div>
       <button class="icon-btn" id="btn-update" title="Check for updates">⟳</button>
+      <button class="icon-btn" id="btn-backup" title="Backup & restore">💾</button>
       <button class="icon-btn" id="btn-templates" title="Element templates">☰</button>
     </div>
     <div class="content">
@@ -424,6 +479,7 @@ async function renderHome() {
   document.getElementById('btn-new-inspection').addEventListener('click', openNewInspectionSheet);
   document.getElementById('btn-templates').addEventListener('click', () => navigate('#/templates'));
   document.getElementById('btn-update').addEventListener('click', forceUpdate);
+  document.getElementById('btn-backup').addEventListener('click', openBackupRestoreSheet);
 }
 
 function openNewInspectionSheet() {
@@ -522,7 +578,7 @@ async function renderInspection(inspectionId) {
         <span class="sub">${esc(insp.inspectionType || 'Inspection')} · ${fmtDate(insp.date)}</span>
       </div>
       <button class="text-btn muted" id="btn-report-info">Report info</button>
-      <button class="text-btn" id="btn-export">Export</button>
+      <button class="text-btn" id="btn-print">Print</button>
     </div>
     <div class="content">
       <div class="card">
@@ -564,7 +620,7 @@ async function renderInspection(inspectionId) {
   `;
 
   document.getElementById('btn-back').addEventListener('click', () => navigate('#/'));
-  document.getElementById('btn-export').addEventListener('click', () => {
+  document.getElementById('btn-print').addEventListener('click', () => {
     try { exportInspectionPDF(inspectionId); } catch (err) { console.error(err); toast('Error: ' + err.message); }
   });
   document.getElementById('btn-report-info').addEventListener('click', () => openReportInfoSheet(inspectionId));
@@ -1248,7 +1304,7 @@ async function renderRiskAssessment(inspectionId) {
         <h1 style="font-size:17px;">Risk Assessment</h1>
         <span class="sub">${esc(insp.structureName)}</span>
       </div>
-      <button class="text-btn" id="btn-export-ra">Export</button>
+      <button class="text-btn" id="btn-print-ra">Print</button>
     </div>
     <div class="content">
       <div class="card" style="margin-top:0;">
@@ -1304,7 +1360,7 @@ async function renderRiskAssessment(inspectionId) {
   `;
 
   document.getElementById('btn-back').addEventListener('click', () => navigate(`#/inspection/${inspectionId}`));
-  document.getElementById('btn-export-ra').addEventListener('click', () => {
+  document.getElementById('btn-print-ra').addEventListener('click', () => {
     try { exportRiskAssessmentPDF(inspectionId); } catch (err) { console.error(err); toast('Error: ' + err.message); }
   });
   document.getElementById('btn-edit-ra-details').addEventListener('click', () => openEditRADetailsSheet(inspectionId, ra));

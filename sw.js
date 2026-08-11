@@ -1,5 +1,5 @@
 // sw.js - offline-first caching for the Site Inspection PWA
-const CACHE_NAME = 'site-inspection-v11';
+const CACHE_NAME = 'site-inspection-v12';
 
 const APP_SHELL = [
   './',
@@ -8,6 +8,7 @@ const APP_SHELL = [
   './css/styles.css',
   './js/db.js',
   './js/geo.js',
+  './js/backup.js',
   './js/app.js',
   './js/annotate.js',
   './js/signature.js',

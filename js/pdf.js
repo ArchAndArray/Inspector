@@ -15,7 +15,10 @@ const PRIORITY_COLORS_RGB = {
   Monitor: [30, 125, 200]
 };
 
-const CURRENCY_SYMBOLS = { USD: '$', GBP: '£', EUR: '€' };
+// CURRENCY_SYMBOLS is defined once, in app.js (which loads before this file) — declaring
+// it again here as well was a real bug: two top-level `const` bindings with the same name
+// sharing the same global scope is a SyntaxError in Safari, and it silently prevented this
+// entire file from loading, which is what broke both Export buttons.
 
 // Loads a blob as an upright, normalized image (corrects EXIF rotation even for photos
 // captured before the in-app fix) and returns a dataURL + pixel dimensions ready for jsPDF.
