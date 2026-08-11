@@ -5,7 +5,8 @@ const SEVERITY_LABELS = { 1: 'As New', 2: 'Minor', 3: 'Moderate', 4: 'Severe', 5
 const EXTENT_LABELS = { A: 'None', B: 'Slight (≤5%)', C: 'Moderate (5–20%)', D: 'Wide (20–50%)', E: 'Extensive (>50%)' };
 const PRIORITY_COLORS = { High: '#c81e1e', Medium: '#e0672e', Low: '#4f9d5c', Monitor: '#1e7dc8' };
 const CURRENCY_SYMBOLS = { USD: '$', GBP: '£', EUR: '€' };
-const APP_VERSION = '1.2';
+const INSPECTION_TYPES = ['Routine', 'Detailed', 'Special', 'Follow-up', 'GI Bridges'];
+const APP_VERSION = '1.3';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -493,10 +494,7 @@ function openNewInspectionSheet() {
         <div class="field">
           <label>Inspection type</label>
           <select id="f-inspectionType">
-            <option value="Routine">Routine</option>
-            <option value="Detailed">Detailed</option>
-            <option value="Special">Special</option>
-            <option value="Follow-up">Follow-up</option>
+            ${INSPECTION_TYPES.map((t) => `<option value="${t}">${t}</option>`).join('')}
           </select>
         </div>
         <div class="field"><label>Date</label><input type="date" id="f-date"></div>
@@ -543,13 +541,15 @@ async function renderInspection(inspectionId) {
   const ungroupedElements = await DB.listElementsBySection(inspectionId, null);
   const coverPhoto = await DB.getCoverPhoto(inspectionId);
   const riskAssessment = await DB.getRiskAssessment(inspectionId);
+  const isGiBridges = insp.inspectionType === 'GI Bridges';
+  const bciSummary = isGiBridges ? await computeBciSummary(inspectionId) : null;
 
   async function elementRowHtml(elmt) {
     const s = await DB.getElementConditionSummary(elmt.id);
     const badge = s.worstSeverity
       ? `<span class="badge badge-sev-${s.worstSeverity}">S${s.worstSeverity}</span> <span class="badge badge-extent">${s.worstExtent || '—'}</span>`
       : `<span class="badge badge-none">No findings</span>`;
-    const subline = [elmt.materialType, elmt.location].filter(Boolean).join(' · ') || `${s.findingCount} finding${s.findingCount === 1 ? '' : 's'}`;
+    const subline = elementSublineParts(elmt, isGiBridges).join(' · ') || `${s.findingCount} finding${s.findingCount === 1 ? '' : 's'}`;
     return `
       <div class="list-item" data-el="${elmt.id}">
         <div class="meta"><h3>${esc(elmt.name)}</h3><p>${esc(subline)}</p></div>
@@ -588,6 +588,24 @@ async function renderInspection(inspectionId) {
         <p class="muted" style="margin:4px 0; font-size:14px;">Weather: ${esc(insp.weather || '—')}</p>
         <p class="muted" style="margin:4px 0; font-size:14px;">Location: ${esc(insp.location && insp.location.manual || '—')}</p>
       </div>
+
+      ${isGiBridges ? `
+      <div class="card" style="border: 1.5px solid var(--ink);">
+        <strong style="font-size:15px; display:block; margin-bottom:12px;">BCI / MDCI Condition Scores</strong>
+        <div style="display:flex; justify-content:space-between; align-items:baseline;">
+          <span style="font-size:13px; font-weight:600; color:var(--ink-soft);">Official BCI</span>
+          <span style="font-size:14px;">Ave: <b>${bciSummary.vanilla.bciAv != null ? Math.round(bciSummary.vanilla.bciAv) : '—'}</b>&nbsp;&nbsp;Crit: <b>${bciSummary.vanilla.bciCrit != null ? Math.round(bciSummary.vanilla.bciCrit) : '—'}</b></span>
+        </div>
+        <p class="muted" style="font-size:11px; margin:2px 0 10px; text-align:right;">BCS Ave: ${bciSummary.vanilla.bcsAv != null ? bciSummary.vanilla.bcsAv.toFixed(2) : '—'} · BCS Crit: ${bciSummary.vanilla.bcsCrit != null ? bciSummary.vanilla.bcsCrit.toFixed(2) : '—'}</p>
+        <div style="display:flex; justify-content:space-between; align-items:baseline;">
+          <span style="font-size:13px; font-weight:600; color:var(--ink-soft);">House MDCI</span>
+          <span style="font-size:14px;">Ave: <b>${bciSummary.mdci.bciAv != null ? Math.round(bciSummary.mdci.bciAv) : '—'}</b>&nbsp;&nbsp;Crit: <b>${bciSummary.mdci.bciCrit != null ? Math.round(bciSummary.mdci.bciCrit) : '—'}</b></span>
+        </div>
+        <p class="muted" style="font-size:11px; margin:2px 0 10px; text-align:right;">BCS Ave: ${bciSummary.mdci.bcsAv != null ? bciSummary.mdci.bcsAv.toFixed(2) : '—'} · BCS Crit: ${bciSummary.mdci.bcsCrit != null ? bciSummary.mdci.bcsCrit.toFixed(2) : '—'}</p>
+        <p class="muted" style="font-size:11.5px; margin:10px 0 0; line-height:1.4;">MDCI is a house-developed condition index that blends multiple defects per element more granularly than the official method. It is not directly comparable to another authority's BCI figures.</p>
+        <p class="muted" style="font-size:11px; margin:6px 0 0; line-height:1.4;">Official BCI's multi-defect interaction rule is an algorithmic approximation — engineer judgement should override where defects genuinely compound in severity. ${bciSummary.excludedCount ? `${bciSummary.excludedCount} element${bciSummary.excludedCount === 1 ? '' : 's'} excluded (no Element Type set, or marked Not Inspected).` : ''}</p>
+      </div>
+      ` : ''}
 
       <div class="card">
         <div class="link-row" style="margin-bottom:10px;"><strong style="font-size:15px;">Cover photo</strong>${!coverPhoto ? '<button class="small-btn" id="btn-add-cover">＋ Add</button>' : ''}</div>
@@ -663,7 +681,7 @@ function openEditHeaderSheet(insp) {
         <div class="field"><label>Structure ID</label><input type="text" id="f-structureId" value="${esc(insp.structureId)}"></div>
         <div class="field">
           <label>Inspection type</label>
-          <select id="f-inspectionType">${['Routine', 'Detailed', 'Special', 'Follow-up'].map((t) => `<option value="${t}" ${insp.inspectionType === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
+          <select id="f-inspectionType">${INSPECTION_TYPES.map((t) => `<option value="${t}" ${insp.inspectionType === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
         </div>
         <div class="field"><label>Date</label><input type="date" id="f-date" value="${(insp.date || '').slice(0, 10)}"></div>
         <div class="field"><label>Inspector</label><input type="text" id="f-inspector" value="${esc(insp.inspector)}"></div>
@@ -977,6 +995,7 @@ async function renderSection(inspectionId, sectionId) {
   const section = await DB.get('sections', sectionId);
   if (!insp || !section) { navigate(`#/inspection/${inspectionId}`); return; }
   const elements = await DB.listElementsBySection(inspectionId, sectionId);
+  const isGiBridges = insp.inspectionType === 'GI Bridges';
 
   const rows = [];
   for (const elmt of elements) {
@@ -984,7 +1003,7 @@ async function renderSection(inspectionId, sectionId) {
     const badge = s.worstSeverity
       ? `<span class="badge badge-sev-${s.worstSeverity}">S${s.worstSeverity}</span> <span class="badge badge-extent">${s.worstExtent || '—'}</span>`
       : `<span class="badge badge-none">No findings</span>`;
-    const subline = [elmt.materialType, elmt.location].filter(Boolean).join(' · ') || `${s.findingCount} finding${s.findingCount === 1 ? '' : 's'}`;
+    const subline = elementSublineParts(elmt, isGiBridges).join(' · ') || `${s.findingCount} finding${s.findingCount === 1 ? '' : 's'}`;
     rows.push(`
       <div class="list-item" data-el="${elmt.id}">
         <div class="meta"><h3>${esc(elmt.name)}</h3><p>${esc(subline)}</p></div>
@@ -1055,18 +1074,81 @@ function openEditSectionSheet(inspectionId, section) {
 }
 
 // ---------- ADD ELEMENT ----------
+
+// Shared HTML for the GI Bridges Element Type / Importance / Not Inspected fields, used by
+// both the add and edit element sheets. Only shown when the inspection type is 'GI Bridges'.
+function bciElementFieldsHTML(elmt) {
+  const currentType = (elmt && elmt.elementType) || '';
+  const currentImportance = (elmt && elmt.importance) || '';
+  const notInspected = !!(elmt && elmt.notInspected);
+  return `
+    <div class="field">
+      <label>Element type</label>
+      <select id="f-elementType">
+        <option value="">Select…</option>
+        ${BCI_ELEMENT_TYPES.map((t) => `<option value="${t.key}" ${currentType === t.key ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="field">
+      <label>Importance</label>
+      <div class="severity-picker" id="bci-importance-picker">
+        ${BCI_IMPORTANCE_LEVELS.map((lvl) => `<button class="chip ${currentImportance === lvl ? 'selected' : ''}" data-imp="${lvl}" style="${currentImportance === lvl ? 'background:var(--ink);' : ''}">${lvl}</button>`).join('')}
+      </div>
+      <p class="hint">Defaults from Element Type, but can be overridden here.</p>
+    </div>
+    <div class="checkbox-row">
+      <input type="checkbox" id="f-notInspected" ${notInspected ? 'checked' : ''}>
+      <label for="f-notInspected">Not inspected (excluded from BCI/MDCI scoring)</label>
+    </div>
+  `;
+}
+
+function wireBciElementFields(sheet) {
+  const typeSelect = sheet.querySelector('#f-elementType');
+  typeSelect.addEventListener('change', () => {
+    const info = bciElementTypeInfo(typeSelect.value);
+    if (info && info.importance) {
+      sheet.querySelectorAll('#bci-importance-picker .chip').forEach((c) => {
+        const match = c.dataset.imp === info.importance;
+        c.classList.toggle('selected', match);
+        c.style.background = match ? 'var(--ink)' : '';
+      });
+    }
+  });
+  sheet.querySelectorAll('#bci-importance-picker .chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      sheet.querySelectorAll('#bci-importance-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
+      chip.classList.add('selected');
+      chip.style.background = 'var(--ink)';
+    });
+  });
+  return {
+    getValues: () => {
+      const impBtn = sheet.querySelector('#bci-importance-picker .chip.selected');
+      return {
+        elementType: typeSelect.value,
+        importance: impBtn ? impBtn.dataset.imp : '',
+        notInspected: sheet.querySelector('#f-notInspected').checked
+      };
+    }
+  };
+}
+
 async function openAddElementSheet(inspectionId, sectionId) {
   const templates = await DB.listTemplates();
+  const insp = await DB.get('inspections', inspectionId);
+  const isGiBridges = insp && insp.inspectionType === 'GI Bridges';
   const sheet = el(`
     <div class="sheet-backdrop">
       <div class="sheet">
         <div class="sheet-handle"></div>
         <h2>Add element</h2>
         <div class="field"><label>Element name</label><input type="text" id="f-name" placeholder="e.g. Pier 2, Bearing SE"></div>
+        ${isGiBridges ? bciElementFieldsHTML(null) : `
         <div class="row-2">
           <div class="field"><label>Material type</label><input type="text" id="f-material" placeholder="e.g. Reinforced concrete"></div>
           <div class="field"><label>Location</label><input type="text" id="f-location" placeholder="e.g. Chainage 12+400"></div>
-        </div>
+        </div>`}
         <button class="btn btn-primary btn-block" id="btn-add-single">Add element</button>
         ${templates.length ? `
           <div class="section-header" style="margin-top:22px;"><h2>Apply a template</h2></div>
@@ -1086,17 +1168,20 @@ async function openAddElementSheet(inspectionId, sectionId) {
   presentOverlay(sheet);
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  const bciFields = isGiBridges ? wireBciElementFields(sheet) : null;
 
   sheet.querySelector('#btn-add-single').addEventListener('click', async () => {
     const name = sheet.querySelector('#f-name').value.trim();
     if (!name) { toast('Enter an element name'); return; }
     const existing = await DB.listElements(inspectionId);
+    const extra = isGiBridges
+      ? bciFields.getValues()
+      : { materialType: sheet.querySelector('#f-material').value.trim(), location: sheet.querySelector('#f-location').value.trim() };
     const elmt = await DB.createElement(inspectionId, {
       name,
       sectionId: sectionId || null,
-      materialType: sheet.querySelector('#f-material').value.trim(),
-      location: sheet.querySelector('#f-location').value.trim(),
-      order: existing.length
+      order: existing.length,
+      ...extra
     });
     sheet.remove();
     if (sectionId) renderSection(inspectionId, sectionId); else renderInspection(inspectionId);
@@ -1116,6 +1201,8 @@ async function openAddElementSheet(inspectionId, sectionId) {
 async function renderElement(inspectionId, elementId) {
   const elmt = await DB.get('elements', elementId);
   if (!elmt) { navigate(`#/inspection/${inspectionId}`); return; }
+  const insp = await DB.get('inspections', inspectionId);
+  const isGiBridges = insp && insp.inspectionType === 'GI Bridges';
   const backHash = elmt.sectionId ? `#/inspection/${inspectionId}/section/${elmt.sectionId}` : `#/inspection/${inspectionId}`;
   const findings = await DB.listFindings(elementId);
   let elementPhotos = await DB.listPhotosForElement(elementId);
@@ -1141,7 +1228,7 @@ async function renderElement(inspectionId, elementId) {
     `);
   }
 
-  const subline = [elmt.materialType, elmt.location].filter(Boolean).join(' · ');
+  const subline = elementSublineParts(elmt, isGiBridges).join(' · ');
 
   appEl.innerHTML = `
     <div class="topbar">
@@ -1207,17 +1294,20 @@ async function renderElement(inspectionId, elementId) {
   appEl.querySelectorAll('.list-item[data-id]').forEach((row) => row.addEventListener('click', () => openFindingEditor(inspectionId, elementId, row.dataset.id)));
 }
 
-function openEditElementSheet(inspectionId, elmt, backHash) {
+async function openEditElementSheet(inspectionId, elmt, backHash) {
+  const insp = await DB.get('inspections', inspectionId);
+  const isGiBridges = insp && insp.inspectionType === 'GI Bridges';
   const sheet = el(`
     <div class="sheet-backdrop">
       <div class="sheet">
         <div class="sheet-handle"></div>
         <h2>Edit element</h2>
         <div class="field"><label>Name</label><input type="text" id="f-name" value="${esc(elmt.name)}"></div>
+        ${isGiBridges ? bciElementFieldsHTML(elmt) : `
         <div class="row-2">
           <div class="field"><label>Material type</label><input type="text" id="f-material" value="${esc(elmt.materialType)}"></div>
           <div class="field"><label>Location</label><input type="text" id="f-location" value="${esc(elmt.location)}"></div>
-        </div>
+        </div>`}
         <button class="btn btn-primary btn-block" id="btn-save">Save</button>
         <button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:8px;">Delete element</button>
         <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
@@ -1227,14 +1317,15 @@ function openEditElementSheet(inspectionId, elmt, backHash) {
   presentOverlay(sheet);
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  const bciFields = isGiBridges ? wireBciElementFields(sheet) : null;
+
   sheet.querySelector('#btn-save').addEventListener('click', async () => {
     const name = sheet.querySelector('#f-name').value.trim();
     if (!name) { toast('Enter a name'); return; }
-    await DB.updateElement(elmt.id, {
-      name,
-      materialType: sheet.querySelector('#f-material').value.trim(),
-      location: sheet.querySelector('#f-location').value.trim()
-    });
+    const extra = isGiBridges
+      ? bciFields.getValues()
+      : { materialType: sheet.querySelector('#f-material').value.trim(), location: sheet.querySelector('#f-location').value.trim() };
+    await DB.updateElement(elmt.id, { name, ...extra });
     sheet.remove();
     renderElement(inspectionId, elmt.id);
   });
@@ -1750,7 +1841,8 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
     findingId = finding.id;
   }
   let photos = await DB.listPhotosForFinding(findingId);
-  const elMeta = [elmt.materialType, elmt.location].filter(Boolean).join('   ·   ');
+  const isGiBridges = insp && insp.inspectionType === 'GI Bridges';
+  const elMeta = elementSublineParts(elmt, isGiBridges).join('   ·   ');
 
   const view = el(`
     <div class="fullscreen">
@@ -1917,13 +2009,27 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
     chip.addEventListener('click', () => {
       const wasSelected = chip.classList.contains('selected');
       view.querySelectorAll('#severity-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
-      if (!wasSelected) { chip.classList.add('selected'); chip.style.background = `var(--sev-${chip.dataset.sev})`; }
+      if (!wasSelected) {
+        chip.classList.add('selected'); chip.style.background = `var(--sev-${chip.dataset.sev})`;
+        const newSev = Number(chip.dataset.sev);
+        const extBtn = view.querySelector('#extent-picker .chip.selected');
+        if (extBtn && !bciIsValidSeverityExtent(newSev, extBtn.dataset.ext)) {
+          extBtn.classList.remove('selected'); extBtn.style.background = '';
+          toast('Extent A only applies with Severity 1 — extent cleared');
+        }
+      }
       persistFields(false);
     });
   });
   view.querySelectorAll('#extent-picker .chip').forEach((chip) => {
     chip.addEventListener('click', () => {
       const wasSelected = chip.classList.contains('selected');
+      const sevBtn = view.querySelector('#severity-picker .chip.selected');
+      const currentSev = sevBtn ? Number(sevBtn.dataset.sev) : null;
+      if (!wasSelected && !bciIsValidSeverityExtent(currentSev, chip.dataset.ext)) {
+        toast('Extent A only applies with Severity 1');
+        return;
+      }
       view.querySelectorAll('#extent-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
       if (!wasSelected) { chip.classList.add('selected'); chip.style.background = 'var(--ink)'; }
       persistFields(false);

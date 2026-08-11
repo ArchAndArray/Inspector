@@ -176,8 +176,65 @@ async function buildAndSaveInspectionPDF(inspectionId) {
     y += lines.length * 14;
   }
 
+  // ---- BCI / MDCI summary (GI Bridges inspections only) ----
+  if (insp.inspectionType === 'GI Bridges') {
+    const bci = await computeBciSummary(inspectionId);
+    y += 26;
+    if (y + 150 > pageH - margin) { doc.addPage(); y = margin; }
+    y = pageHeading(doc, 'BCI / MDCI Condition Scores', y);
+
+    doc.setDrawColor(28, 31, 38);
+    doc.setLineWidth(1);
+    const boxTop = y;
+    const boxH = 108;
+    doc.rect(margin, boxTop, contentW, boxH);
+
+    function scoreLine(label, track, ly) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10.5);
+      doc.setTextColor(74, 79, 90);
+      doc.text(label, margin + 12, ly);
+      doc.setTextColor(28, 31, 38);
+      doc.setFontSize(11);
+      const aveTxt = track.bciAv != null ? String(Math.round(track.bciAv)) : '—';
+      const critTxt = track.bciCrit != null ? String(Math.round(track.bciCrit)) : '—';
+      doc.text(`Ave: ${aveTxt}     Crit: ${critTxt}`, pageW - margin - 12, ly, { align: 'right' });
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.setTextColor(120, 124, 132);
+      const bcsAveTxt = track.bcsAv != null ? track.bcsAv.toFixed(2) : '—';
+      const bcsCritTxt = track.bcsCrit != null ? track.bcsCrit.toFixed(2) : '—';
+      doc.text(`BCS Ave: ${bcsAveTxt}   ·   BCS Crit: ${bcsCritTxt}`, pageW - margin - 12, ly + 12, { align: 'right' });
+    }
+    scoreLine('Official BCI', bci.vanilla, boxTop + 22);
+    doc.setDrawColor(220, 223, 228);
+    doc.line(margin + 8, boxTop + 42, pageW - margin - 8, boxTop + 42);
+    scoreLine('House MDCI', bci.mdci, boxTop + 64);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(120, 124, 132);
+    const noteLines = doc.splitTextToSize(
+      "MDCI is a house-developed condition index that blends multiple defects per element more granularly than the official method. It is not directly comparable to another authority's BCI figures.",
+      contentW - 24
+    );
+    doc.text(noteLines, margin + 12, boxTop + 88);
+
+    y = boxTop + boxH + 14;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(120, 124, 132);
+    const approxLines = doc.splitTextToSize(
+      "Official BCI's multi-defect interaction rule is an algorithmic approximation — engineer judgement should override where defects genuinely compound in severity." +
+      (bci.excludedCount ? ` ${bci.excludedCount} element${bci.excludedCount === 1 ? '' : 's'} excluded from scoring (no Element Type set, or marked Not Inspected).` : ''),
+      contentW
+    );
+    doc.text(approxLines, margin, y);
+    y += approxLines.length * 11 + 10;
+  }
+
   // Element summary table (grouped by section)
-  y += 30;
+  y += 20;
   if (y > pageH - 150) { doc.addPage(); y = margin; }
   y = pageHeading(doc, 'Element Summary', y);
 

@@ -196,6 +196,9 @@ const DB = {
       category: data.category || '',
       materialType: data.materialType || '',
       location: data.location || '',
+      elementType: data.elementType || '',
+      importance: data.importance || '',
+      notInspected: !!data.notInspected,
       order: data.order || 0,
       createdAt: new Date().toISOString()
     };
