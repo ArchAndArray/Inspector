@@ -493,6 +493,30 @@ async function buildAndSaveInspectionPDF(inspectionId) {
     }
   }
 
+  // ---------- Drawings appendix (only those marked "include in report") ----------
+  const drawingsToInclude = (await DB.listDrawings(inspectionId)).filter((d) => d.includeInReport);
+  if (drawingsToInclude.length) {
+    doc.addPage();
+    let dy = margin;
+    dy = pageHeading(doc, 'Drawings', dy);
+    for (const d of drawingsToInclude) {
+      const data = await loadNormalizedImage(d.annotatedBlob || d.originalBlob);
+      const maxW = contentW;
+      const maxH = pageH - margin - dy - 20;
+      let w = maxW, h = (data.h / data.w) * w;
+      if (h > maxH) { h = maxH; w = (data.w / data.h) * h; }
+      if (dy + 20 + h > pageH - margin) { doc.addPage(); dy = margin; }
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10.5);
+      doc.setTextColor(28, 31, 38);
+      doc.text(d.title || 'Untitled sheet', margin, dy);
+      dy += 14;
+      doc.addImage(data.url, 'JPEG', margin, dy, w, h, undefined, 'FAST');
+      dy += h + 24;
+      if (dy > pageH - margin - 40 && d !== drawingsToInclude[drawingsToInclude.length - 1]) { doc.addPage(); dy = margin; }
+    }
+  }
+
   const filename = `${(insp.structureName || 'inspection').replace(/[^a-z0-9]+/gi, '_')}_${(insp.date || '').slice(0, 10)}.pdf`;
   doc.save(filename);
   toast('Report saved');
@@ -734,15 +758,22 @@ async function buildAndSaveRiskAssessmentPDF(inspectionId) {
   const ra = await DB.getRiskAssessment(inspectionId);
   if (!ra) { toast('No risk assessment to export yet'); return; }
 
-  const operativeSigPhoto = await DB.getSignature(ra.id, 'operative');
-  const managerSigPhoto = await DB.getSignature(ra.id, 'manager');
-  const operativeSigData = operativeSigPhoto ? await loadNormalizedImage(operativeSigPhoto.originalBlob) : null;
-  const managerSigData = managerSigPhoto ? await loadNormalizedImage(managerSigPhoto.originalBlob) : null;
+  const inspectorSigPhoto = await DB.getSignature(ra.id, 'inspector');
+  const inspectorSigData = inspectorSigPhoto ? await loadNormalizedImage(inspectorSigPhoto.originalBlob) : null;
 
-  const controlSigMap = {};
-  for (const c of (ra.controlActions || [])) {
-    const sigPhoto = await DB.getSignature(ra.id, `control:${c.id}`);
-    if (sigPhoto) controlSigMap[c.id] = await loadNormalizedImage(sigPhoto.originalBlob);
+  const staffSigData = [];
+  for (const s of (ra.additionalStaff || [])) {
+    const sigPhoto = await DB.getSignature(ra.id, `staff:${s.id}`);
+    staffSigData.push({
+      initials: s.initials,
+      sig: sigPhoto ? await loadNormalizedImage(sigPhoto.originalBlob) : null
+    });
+  }
+
+  const riskSigMap = {};
+  for (const r of (ra.risks || [])) {
+    const sigPhoto = await DB.getSignature(ra.id, `risk:${r.id}`);
+    if (sigPhoto) riskSigMap[r.id] = await loadNormalizedImage(sigPhoto.originalBlob);
   }
 
   const { jsPDF } = window.jspdf;
@@ -838,10 +869,10 @@ async function buildAndSaveRiskAssessmentPDF(inspectionId) {
   doc.text('Risk Rating (R) = L × S    (1–3 Low   4–6 Medium   7–9 High)', margin + 8, y + 50);
   y += 62 + 18;
 
-  // ---- Hazard Identification table ----
+  // ---- Hazard Identification table (sourced from combined Risk entries) ----
   if (y + 60 > pageH - margin) { doc.addPage(); y = margin; }
   y = blackBar('Hazard Identification & Initial Risk Rating', y);
-  const hazardRows = (ra.hazards || []).map((h) => {
+  const hazardRows = (ra.risks || []).map((h) => {
     const band = riskBandPdf(h.likelihood, h.severity);
     return [h.hazardType || '', h.description || '', h.whoMightBeHarmed || '', h.existingControls || '', h.likelihood || '', h.severity || '', band.r || ''];
   });
@@ -870,14 +901,14 @@ async function buildAndSaveRiskAssessmentPDF(inspectionId) {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(10);
     doc.setTextColor(120, 124, 132);
-    doc.text('No hazards logged.', margin, y);
+    doc.text('No risks logged.', margin, y);
     y += 20;
   }
 
-  // ---- Control Actions table ----
+  // ---- Control Actions table (same Risk entries, control-action half) ----
   if (y + 60 > pageH - margin) { doc.addPage(); y = margin; }
   y = blackBar('Control Actions & Residual Risk Rating', y);
-  const controlRows = (ra.controlActions || []).map((c) => [
+  const controlRows = (ra.risks || []).map((c) => [
     c.controlRequired || '', c.actionBy || '',
     c.targetDate ? fmtDate(c.targetDate) : '', c.completionDate ? fmtDate(c.completionDate) : '',
     c.signedOffByName || ''
@@ -892,8 +923,8 @@ async function buildAndSaveRiskAssessmentPDF(inspectionId) {
       headStyles: { fillColor: [20, 20, 20], textColor: 255 },
       didDrawCell: (data) => {
         if (data.section === 'body' && data.column.index === 4) {
-          const rowRecord = (ra.controlActions || [])[data.row.index];
-          const sigData = rowRecord && controlSigMap[rowRecord.id];
+          const rowRecord = (ra.risks || [])[data.row.index];
+          const sigData = rowRecord && riskSigMap[rowRecord.id];
           if (sigData) {
             const h = Math.min(data.cell.height - 6, 18);
             const w = (sigData.w / sigData.h) * h;
@@ -907,7 +938,7 @@ async function buildAndSaveRiskAssessmentPDF(inspectionId) {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(10);
     doc.setTextColor(120, 124, 132);
-    doc.text('No control actions logged.', margin, y);
+    doc.text('No risks logged.', margin, y);
     y += 20;
   }
 
@@ -944,25 +975,55 @@ async function buildAndSaveRiskAssessmentPDF(inspectionId) {
   doc.text('— Further controls required before work proceeds', margin + 46, y);
   y += 30;
 
-  // ---- Sign-off ----
+  // ---- Sign-off: Inspector/Engineer (primary), plus any additional inspection staff ----
   if (y + 90 > pageH - margin) { doc.addPage(); y = margin; }
-  const colW = contentW / 2 - 10;
-  function signBlock(x, label, name, sigData, date, time) {
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10);
-    doc.setTextColor(28, 31, 38);
-    doc.text(label, x, y);
-    doc.setFont('helvetica', 'normal');
-    doc.text(`Name: ${name || '—'}`, x, y + 16);
-    if (sigData) {
-      const h = 30;
-      const w = Math.min((sigData.w / sigData.h) * h, colW);
-      doc.addImage(sigData.url, 'PNG', x, y + 22, w, h, undefined, 'FAST');
-    }
-    doc.text(`Date: ${date ? fmtDate(date) : '—'}   Time: ${time || '—'}`, x, y + 62);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10);
+  doc.setTextColor(28, 31, 38);
+  doc.text('Inspector / Engineer', margin, y);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`Name: ${ra.inspectorName || '—'}`, margin, y + 16);
+  if (inspectorSigData) {
+    const h = 30;
+    const w = Math.min((inspectorSigData.w / inspectorSigData.h) * h, 160);
+    doc.addImage(inspectorSigData.url, 'PNG', margin, y + 22, w, h, undefined, 'FAST');
   }
-  signBlock(margin, 'Operative / Assessor', ra.operativeName, operativeSigData, ra.operativeDate, ra.operativeTime);
-  signBlock(margin + colW + 20, 'Manager / Supervisor', ra.managerName, managerSigData, ra.managerDate, ra.managerTime);
+  doc.text(`Date: ${ra.inspectorDate ? fmtDate(ra.inspectorDate) : '—'}   Time: ${ra.inspectorTime || '—'}`, margin, y + 62);
+  y += 78;
+
+  if (staffSigData.length) {
+    if (y + 30 > pageH - margin) { doc.addPage(); y = margin; }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    doc.setTextColor(74, 79, 90);
+    doc.text('Additional Inspection Staff', margin, y);
+    y += 16;
+    const staffColW = contentW / 3;
+    let col = 0, rowStartY = y, rowMaxH = 0;
+    for (const s of staffSigData) {
+      if (col === 0 && y + 40 > pageH - margin) { doc.addPage(); y = margin; rowStartY = y; }
+      const x = margin + col * staffColW;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.setTextColor(28, 31, 38);
+      doc.text(s.initials || '—', x, y);
+      if (s.sig) {
+        const h = 22;
+        const w = Math.min((s.sig.w / s.sig.h) * h, staffColW - 10);
+        doc.addImage(s.sig.url, 'PNG', x, y + 6, w, h, undefined, 'FAST');
+        rowMaxH = Math.max(rowMaxH, h + 10);
+      } else {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+        doc.setTextColor(120, 124, 132);
+        doc.text('Not signed', x, y + 16);
+        rowMaxH = Math.max(rowMaxH, 20);
+      }
+      col++;
+      if (col === 3) { col = 0; y = rowStartY + rowMaxH + 14; rowStartY = y; rowMaxH = 0; }
+    }
+    if (col !== 0) y = rowStartY + rowMaxH + 14;
+  }
 
   const filename = `${(insp.structureName || 'inspection').replace(/[^a-z0-9]+/gi, '_')}_RiskAssessment_${(ra.assessmentDate || '').slice(0, 10)}.pdf`;
   doc.save(filename);

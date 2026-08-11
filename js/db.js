@@ -348,8 +348,38 @@ const DB = {
     if (existing) await this.delete('photos', existing.id);
   },
 
-  // --- Signatures (used by Risk Assessment sign-off and control-action rows) ---
-  // role is 'operative' | 'manager' | `control:<rowId>`
+  // --- Drawings (imported PDF pages, annotatable like photos) ---
+  async listDrawings(inspectionId) {
+    const all = await this.getAllByIndex('photos', 'inspectionId', inspectionId);
+    return all.filter((p) => p.kind === 'drawing').sort((a, b) => a.order - b.order);
+  },
+  async addDrawing(inspectionId, blob, title) {
+    const existing = await this.listDrawings(inspectionId);
+    const photo = {
+      id: uid(),
+      kind: 'drawing',
+      findingId: null,
+      elementId: null,
+      inspectionId,
+      riskAssessmentId: null,
+      role: null,
+      originalBlob: blob,
+      annotatedBlob: null,
+      order: existing.length,
+      title: title || '',
+      includeInReport: true,
+      createdAt: new Date().toISOString()
+    };
+    return this.put('photos', photo);
+  },
+  async updateDrawing(id, patch) {
+    const existing = await this.get('photos', id);
+    if (!existing) throw new Error('Drawing not found');
+    return this.put('photos', { ...existing, ...patch });
+  },
+
+  // --- Signatures (used by Risk Assessment sign-off and per-risk rows) ---
+  // role is 'inspector' | `staff:<staffId>` | `risk:<riskId>`
   async getSignature(riskAssessmentId, role) {
     const all = await this.getAllByIndex('photos', 'riskAssessmentId', riskAssessmentId);
     return all.find((p) => p.kind === 'signature' && p.role === role) || null;
@@ -387,16 +417,13 @@ const DB = {
       assessmentDate: (insp && insp.date) || '',
       locationSiteAddress: (insp && insp.location && insp.location.manual) || '',
       taskDescription: '',
-      hazards: [],
-      controlActions: [],
+      risks: [],
       responsiblePersons: '',
       residualRiskAcceptable: null,
-      operativeName: '',
-      operativeDate: '',
-      operativeTime: '',
-      managerName: '',
-      managerDate: '',
-      managerTime: '',
+      inspectorName: (insp && insp.inspector) || '',
+      inspectorDate: '',
+      inspectorTime: '',
+      additionalStaff: [],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
