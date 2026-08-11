@@ -377,6 +377,37 @@ const DB = {
     if (!existing) throw new Error('Drawing not found');
     return this.put('photos', { ...existing, ...patch });
   },
+  // Generic photo update — used for calibration data, which can apply to any photo kind
+  // (element/finding photos, cover photo, drawings), not just drawings specifically.
+  async updatePhoto(id, patch) {
+    const existing = await this.get('photos', id);
+    if (!existing) throw new Error('Photo not found');
+    return this.put('photos', { ...existing, ...patch });
+  },
+
+  // --- Standalone Scale/Annotate sessions (not tied to any inspection) ---
+  async listStandaloneAnnotations() {
+    const all = await this.getAll('photos');
+    return all.filter((p) => p.kind === 'standalone').sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  },
+  async addStandaloneAnnotation(blob, title, sourceType) {
+    const photo = {
+      id: uid(),
+      kind: 'standalone',
+      findingId: null,
+      elementId: null,
+      inspectionId: null,
+      riskAssessmentId: null,
+      role: null,
+      originalBlob: blob,
+      annotatedBlob: null,
+      order: 0,
+      title: title || '',
+      sourceType: sourceType || 'image', // 'image' | 'pdf' — determines Save-to-file options
+      createdAt: new Date().toISOString()
+    };
+    return this.put('photos', photo);
+  },
 
   // --- Signatures (used by Risk Assessment sign-off and per-risk rows) ---
   // role is 'inspector' | `staff:<staffId>` | `risk:<riskId>`

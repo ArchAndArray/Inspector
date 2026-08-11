@@ -6,7 +6,7 @@ const EXTENT_LABELS = { A: 'None', B: 'Slight (≤5%)', C: 'Moderate (5–20%)',
 const PRIORITY_COLORS = { High: '#c81e1e', Medium: '#e0672e', Low: '#4f9d5c', Monitor: '#1e7dc8' };
 const CURRENCY_SYMBOLS = { USD: '$', GBP: '£', EUR: '€' };
 const INSPECTION_TYPES = ['Routine', 'Detailed', 'Special', 'Follow-up', 'GI Bridges'];
-const APP_VERSION = '1.5';
+const APP_VERSION = '1.7';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -331,6 +331,7 @@ async function route() {
     else if (p[0] === 'inspection' && p[1] && p[2] === 'drawings') await renderDrawings(p[1]);
     else if (p[0] === 'inspection' && p[1] && !p[2]) await renderInspection(p[1]);
     else if (p[0] === 'templates') await renderTemplates();
+    else if (p[0] === 'scale-annotate') await renderScaleAnnotate();
     else await renderHome();
   } catch (err) {
     console.error(err);
@@ -482,6 +483,7 @@ async function renderHome() {
       </div>
       <button class="icon-btn" id="btn-update" title="Check for updates">⟳</button>
       <button class="icon-btn" id="btn-backup" title="Backup & restore">💾</button>
+      <button class="icon-btn" id="btn-scale-annotate" title="Scale / Annotate">📐</button>
       <button class="icon-btn" id="btn-templates" title="Element templates">☰</button>
     </div>
     <div class="content">
@@ -501,6 +503,7 @@ async function renderHome() {
   document.getElementById('btn-templates').addEventListener('click', () => navigate('#/templates'));
   document.getElementById('btn-update').addEventListener('click', forceUpdate);
   document.getElementById('btn-backup').addEventListener('click', openBackupRestoreSheet);
+  document.getElementById('btn-scale-annotate').addEventListener('click', () => navigate('#/scale-annotate'));
 }
 
 function openNewInspectionSheet() {
@@ -1963,7 +1966,9 @@ function openDrawingDetailSheet(drawing, { onChanged }) {
   });
 }
 
-async function openDrawingImportSheet(inspectionId, onImported) {
+// Generic PDF import: picks a file, loads it, and hands each selected page's rendered blob
+// to `onImportPage(blob, title)` — used by both Drawings and standalone Scale/Annotate.
+async function openPdfImportFlow(onImportPage, onAllImported) {
   const fileInput = document.createElement('input');
   fileInput.type = 'file';
   fileInput.accept = 'application/pdf';
@@ -1979,7 +1984,7 @@ async function openDrawingImportSheet(inspectionId, onImported) {
       await loadPdfJs();
       const arrayBuffer = await file.arrayBuffer();
       const pdfDoc = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-      await openPdfPagePickerSheet(inspectionId, pdfDoc, file.name, onImported);
+      await openPdfPagePickerSheet(pdfDoc, file.name, onImportPage, onAllImported);
     } catch (err) {
       console.error(err);
       toast('Could not load that PDF — check your internet connection and try again');
@@ -1988,7 +1993,14 @@ async function openDrawingImportSheet(inspectionId, onImported) {
   fileInput.click();
 }
 
-async function openPdfPagePickerSheet(inspectionId, pdfDoc, filename, onImported) {
+async function openDrawingImportSheet(inspectionId, onImported) {
+  await openPdfImportFlow(
+    (blob, title) => DB.addDrawing(inspectionId, blob, title),
+    onImported
+  );
+}
+
+async function openPdfPagePickerSheet(pdfDoc, filename, onImportPage, onAllImported) {
   const numPages = pdfDoc.numPages;
   const sheet = el(`
     <div class="sheet-backdrop">
@@ -2058,10 +2070,228 @@ async function openPdfPagePickerSheet(inspectionId, pdfDoc, filename, onImported
       await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
       const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
       const title = numPages > 1 ? `${baseName} — Page ${pageNum}` : baseName;
-      await DB.addDrawing(inspectionId, blob, title);
+      await onImportPage(blob, title);
     }
     toast('Import complete');
-    onImported();
+    onAllImported();
+  });
+}
+
+// ---------- SCALE / ANNOTATE (standalone tool, not tied to any inspection) ----------
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+async function blobToFormat(blob, mime) {
+  const bitmap = await createImageBitmap(blob);
+  const canvas = document.createElement('canvas');
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  canvas.getContext('2d').drawImage(bitmap, 0, 0);
+  if (bitmap.close) bitmap.close();
+  return new Promise((resolve) => canvas.toBlob(resolve, mime, mime === 'image/jpeg' ? 0.92 : undefined));
+}
+
+async function saveImageAsPDF(blob, baseName) {
+  if (!window.jspdf) { toast('PDF library not loaded — connect to the internet once, then try again'); return; }
+  const bitmap = await createImageBitmap(blob);
+  const canvas = document.createElement('canvas');
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  canvas.getContext('2d').drawImage(bitmap, 0, 0);
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+  if (bitmap.close) bitmap.close();
+  const { jsPDF } = window.jspdf;
+  const wPt = bitmap.width * 0.75; // approx px->pt at 96dpi source -> 72pt page
+  const hPt = bitmap.height * 0.75;
+  const doc = new jsPDF({ unit: 'pt', format: [wPt, hPt] });
+  doc.addImage(dataUrl, 'JPEG', 0, 0, wPt, hPt, undefined, 'FAST');
+  doc.save(`${baseName}.pdf`);
+}
+
+function openSaveFormatSheet(formats, onPick) {
+  const labels = { png: 'PNG (lossless)', jpeg: 'JPEG (smaller file)', pdf: 'PDF' };
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Save to file</h2>
+        ${formats.map((f) => `<button class="btn btn-secondary btn-block" data-format="${f}" style="margin-bottom:10px;">${labels[f]}</button>`).join('')}
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelectorAll('[data-format]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      sheet.remove();
+      onPick(btn.dataset.format);
+    });
+  });
+}
+
+async function renderScaleAnnotate() {
+  let items = await DB.listStandaloneAnnotations();
+
+  appEl.innerHTML = `
+    <div class="topbar">
+      <button class="icon-btn" id="btn-back">‹</button>
+      <div style="flex:1; min-width:0;">
+        <h1 style="font-size:17px;">Scale / Annotate</h1>
+        <span class="sub">Draw, measure, and export — not saved to any inspection</span>
+      </div>
+    </div>
+    <div class="content" id="sa-list"></div>
+    <button class="fab" id="btn-sa-new">＋</button>
+  `;
+  document.getElementById('btn-back').addEventListener('click', () => navigate('#/'));
+  document.getElementById('btn-sa-new').addEventListener('click', openNewScaleAnnotateSheet);
+
+  function renderList() {
+    const list = document.getElementById('sa-list');
+    if (!items.length) {
+      list.innerHTML = `
+        <div class="empty-state">
+          <div class="glyph">📐</div>
+          <h3>Nothing here yet</h3>
+          <p>Take a photo, choose one from your library, or import a PDF to draw, measure, and export.</p>
+        </div>`;
+      return;
+    }
+    list.innerHTML = items.map((it) => `
+      <div class="list-item" data-item="${it.id}">
+        <div class="photo-thumb" style="width:56px; height:56px; flex-shrink:0; margin-right:12px;">
+          <img src="${blobUrl(it.annotatedBlob || it.originalBlob)}">
+          ${it.annotatedBlob ? '<div class="annotated-dot"></div>' : ''}
+        </div>
+        <div class="meta">
+          <h3>${esc(it.title) || 'Untitled'}</h3>
+          <p>${it.calibration ? `Calibrated · ${esc(it.calibration.unit)}` : 'Not calibrated'}${it.sourceType === 'pdf' ? ' · from PDF' : ''}</p>
+        </div>
+        <span class="chevron">›</span>
+      </div>
+    `).join('');
+    list.querySelectorAll('[data-item]').forEach((row) => {
+      row.addEventListener('click', () => {
+        const it = items.find((x) => x.id === row.dataset.item);
+        openScaleAnnotateDetailSheet(it, {
+          onChanged: async () => { items = await DB.listStandaloneAnnotations(); renderList(); }
+        });
+      });
+    });
+  }
+  renderList();
+}
+
+function openNewScaleAnnotateSheet() {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>New Scale / Annotate</h2>
+        <button class="btn btn-primary btn-block" id="btn-camera">📷 Take photo</button>
+        <button class="btn btn-secondary btn-block" id="btn-library" style="margin-top:10px;">🖼 Choose from library</button>
+        <button class="btn btn-secondary btn-block" id="btn-pdf" style="margin-top:10px;">📄 Import PDF</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel" style="margin-top:16px;">Cancel</button>
+        <input type="file" id="sa-camera-input" accept="image/*" capture="environment" style="display:none;">
+        <input type="file" id="sa-library-input" accept="image/*" style="display:none;">
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+
+  async function handleImageFile(file) {
+    sheet.remove();
+    const normalized = await normalizeImageFile(file);
+    const rec = await DB.addStandaloneAnnotation(normalized, file.name.replace(/\.[a-z0-9]+$/i, ''), 'image');
+    navigate('#/scale-annotate');
+    await openAnnotator(rec.id, () => renderScaleAnnotate());
+  }
+
+  sheet.querySelector('#btn-camera').addEventListener('click', () => sheet.querySelector('#sa-camera-input').click());
+  sheet.querySelector('#btn-library').addEventListener('click', () => sheet.querySelector('#sa-library-input').click());
+  sheet.querySelector('#sa-camera-input').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) handleImageFile(f); });
+  sheet.querySelector('#sa-library-input').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) handleImageFile(f); });
+
+  sheet.querySelector('#btn-pdf').addEventListener('click', () => {
+    sheet.remove();
+    openPdfImportFlow(
+      (blob, title) => DB.addStandaloneAnnotation(blob, title, 'pdf'),
+      () => { toast('Import complete'); renderScaleAnnotate(); }
+    );
+  });
+}
+
+function openScaleAnnotateDetailSheet(item, { onChanged }) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>${esc(item.title) || 'Untitled'}</h2>
+        <div class="photo-thumb" style="width:100%; height:220px; margin-bottom:16px;">
+          <img src="${blobUrl(item.annotatedBlob || item.originalBlob)}" style="object-fit:contain; background:#fafafa;">
+        </div>
+        <div class="field"><label>Title</label><input type="text" id="f-title" value="${esc(item.title)}"></div>
+        <p class="muted" style="font-size:13px; margin-top:-8px;">${item.calibration ? `Calibrated: 1 unit = ${(1 / item.calibration.pixelsPerUnit).toFixed(3)} px⁻¹ (${esc(item.calibration.unit)})` : 'Not yet calibrated — open Edit and use Calibrate.'}</p>
+        <button class="btn btn-primary btn-block" id="btn-annotate">✏️ Edit — draw, ruler, measure</button>
+        <button class="btn btn-secondary btn-block" id="btn-save-title" style="margin-top:10px;">Save title</button>
+        <button class="btn btn-secondary btn-block" id="btn-save-file" style="margin-top:10px;">⬇️ Save to file</button>
+        <button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:10px;">Delete</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Close</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+
+  sheet.querySelector('#btn-annotate').addEventListener('click', async () => {
+    sheet.remove();
+    await openAnnotator(item.id, () => onChanged());
+  });
+  sheet.querySelector('#btn-save-title').addEventListener('click', async () => {
+    await DB.updatePhoto(item.id, { title: sheet.querySelector('#f-title').value.trim() });
+    sheet.remove();
+    onChanged();
+  });
+  sheet.querySelector('#btn-save-file').addEventListener('click', () => {
+    const formats = item.sourceType === 'pdf' ? ['pdf', 'png', 'jpeg'] : ['png', 'jpeg'];
+    openSaveFormatSheet(formats, async (format) => {
+      const blob = item.annotatedBlob || item.originalBlob;
+      const baseName = (item.title || 'scale-annotate').replace(/[^a-z0-9]+/gi, '_');
+      toast('Preparing file…');
+      try {
+        if (format === 'pdf') {
+          await saveImageAsPDF(blob, baseName);
+        } else {
+          const mime = format === 'png' ? 'image/png' : 'image/jpeg';
+          const converted = await blobToFormat(blob, mime);
+          downloadBlob(converted, `${baseName}.${format === 'jpeg' ? 'jpg' : format}`);
+        }
+        toast('Saved — check your downloads');
+      } catch (err) {
+        console.error(err);
+        toast('Save failed: ' + err.message);
+      }
+    });
+  });
+  sheet.querySelector('#btn-delete').addEventListener('click', async () => {
+    if (!confirm('Delete this item?')) return;
+    await DB.delete('photos', item.id);
+    sheet.remove();
+    onChanged();
   });
 }
 

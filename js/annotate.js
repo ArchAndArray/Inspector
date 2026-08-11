@@ -1,26 +1,25 @@
 // annotate.js - fullscreen photo markup using Canvas + Pointer Events (Apple Pencil Pro support)
 //
-// Uses two stacked canvases: a base layer holding the photo (drawn once, never touched
-// again except on rotate) and a transparent overlay layer where all pencil strokes and
-// erasing happen. The eraser uses 'destination-out' compositing on the overlay only, so it
-// can never punch through to the photo underneath. The two layers are flattened into one
-// image only at save time.
+// Two stacked canvases: a base photo layer (drawn once, only re-drawn on rotate) and a
+// transparent overlay layer where all pencil strokes and erasing happen — keeping them
+// separate is what lets the eraser remove marks without ever touching the photo. Flattened
+// into one image only at save time.
 //
-// Touch handling has three mutually-exclusive modes, tracked via a single `touches` map:
-//   - One finger (ruler off): draws, owned by that finger's pointerId specifically — a
-//     second finger touching down never contributes to that stroke (this was the bug: the
-//     old code only checked "is a stroke in progress", not "is this the same finger").
-//   - Two fingers (ruler off): pinch-to-zoom / two-finger pan, not drawing.
-//   - Two fingers (ruler on): positions and rotates the ruler, as before.
-// An Apple Pencil always draws, constrained to the ruler when it's active.
+// Touch has three mutually exclusive modes via a single `touches` map:
+//   - One finger (ruler off, not calibrating): draws, owned by that finger's pointerId only.
+//   - Two fingers (ruler off): pinch-to-zoom / pan.
+//   - Two fingers (ruler on): positions and rotates the ruler.
+// A Pencil always draws, constrained to the ruler when it's active. While calibrating,
+// single-finger/pen taps place a point instead of drawing; two fingers still pan/zoom so you
+// can navigate to a second point that isn't currently on screen.
 //
-// Rotate bakes the rotation directly into both canvas layers' pixels (not stored as
-// separate metadata), so saving afterwards persists the rotated result permanently — the
-// same flatten-on-save mechanism that already merges the photo and annotation layers.
+// Calibration stores {pixelsPerUnit, unit} on the photo record. Distances are computed in
+// canvas-pixel space, which stays valid across rotation (a rigid transform preserves
+// distances) and across save/reload (the working canvas size is stable).
 
 const ANNOTATE_COLORS = ['#c81e1e', '#f2b705', '#1c1f26', '#ffffff', '#1e7dc8'];
 const ANNOTATE_WIDTHS = { thin: 3, medium: 7, thick: 14 };
-const MAX_CANVAS_DIM = 2400; // cap resolution to keep memory/perf sane on large photos
+const MAX_CANVAS_DIM = 2400;
 const RULER_SNAP_DEGREES = [0, 45, 90, 135, 180, 225, 270, 315, 360];
 const RULER_SNAP_THRESHOLD_DEG = 7;
 const MAX_ZOOM = 4;
@@ -41,6 +40,19 @@ async function loadBitmapCorrected(blob) {
   }
 }
 
+// "Nice" round step for tick spacing (1/2/5 × a power of ten), given a raw target step.
+function niceRulerStep(raw) {
+  if (!(raw > 0)) return 1;
+  const pow10 = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / pow10;
+  let niceNorm;
+  if (norm < 1.5) niceNorm = 1;
+  else if (norm < 3.5) niceNorm = 2;
+  else if (norm < 7.5) niceNorm = 5;
+  else niceNorm = 10;
+  return niceNorm * pow10;
+}
+
 async function openAnnotator(photoId, onDone) {
   const photo = await DB.get('photos', photoId);
   if (!photo) return;
@@ -57,9 +69,11 @@ async function openAnnotator(photoId, onDone) {
     ch = Math.round(ch * scale);
   }
 
+  let calibration = photo.calibration || null; // {pixelsPerUnit, unit}
+
   const view = el(`
     <div class="fullscreen" id="annotate-view">
-      <div class="annotate-toolbar">
+      <div class="annotate-toolbar" id="main-toolbar">
         <button class="tool-btn" id="btn-undo" title="Undo">↺</button>
         <button class="tool-btn" id="btn-rotate" title="Rotate">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -83,15 +97,30 @@ async function openAnnotator(photoId, onDone) {
       <div class="annotate-toolbar" id="ruler-toolbar" style="padding-top:0; padding-bottom:8px;">
         <button class="tool-btn" id="btn-ruler" title="Ruler">📏</button>
         <button class="tool-btn" id="btn-ruler-snap" title="Snap / Free rotation" style="display:none; width:auto; padding:0 12px; font-size:12px; font-weight:700;">Snap</button>
+        <button class="tool-btn" id="btn-measure" title="Measure">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <line x1="3" y1="12" x2="21" y2="12" stroke="currentColor" stroke-width="2"/>
+            <path d="M3 12 L8 8 M3 12 L8 16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M21 12 L16 8 M21 12 L16 16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <button class="tool-btn" id="btn-calibrate" title="Calibrate" style="width:auto; padding:0 12px; font-size:12px; font-weight:700;">Calibrate</button>
         <div class="spacer"></div>
         <span class="muted" id="ruler-hint" style="display:none; font-size:11.5px; color:#b8bcc4;">Two fingers: move &amp; rotate the ruler</span>
         <span class="muted" id="zoom-hint" style="font-size:11.5px; color:#b8bcc4;">Pinch to zoom</span>
+      </div>
+      <div class="annotate-toolbar" id="cal-toolbar" style="display:none; padding-top:0; padding-bottom:8px;">
+        <span id="cal-instruction" style="color:#fff; font-size:13px; font-weight:600; flex:1;"></span>
+        <button class="tool-btn" id="btn-cal-reset" title="Reset">↺</button>
+        <button class="tool-btn" id="btn-cal-accept" title="Accept" style="display:none; background:var(--sev-1);">✓</button>
+        <button class="tool-btn" id="btn-cal-cancel" title="Cancel calibration">✕</button>
       </div>
       <div class="annotate-canvas-wrap" id="canvas-wrap">
         <div id="canvas-stack" style="position:relative;">
           <canvas id="photo-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%;"></canvas>
           <canvas id="mark-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%; position:absolute; top:0; left:0;"></canvas>
-          <div id="ruler-visual" style="display:none; position:absolute; width:72%; max-width:560px; height:5px; background:rgba(200,30,30,0.6); border-radius:3px; box-shadow:0 0 0 1.5px rgba(255,255,255,0.85); pointer-events:none;"></div>
+          <canvas id="preview-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%; position:absolute; top:0; left:0; pointer-events:none;"></canvas>
+          <div id="ruler-visual" style="display:none; position:absolute; opacity:0.5; pointer-events:none;"></div>
         </div>
       </div>
       <div class="annotate-toolbar">
@@ -103,13 +132,15 @@ async function openAnnotator(photoId, onDone) {
   `);
   presentOverlay(view);
 
-  let photoCanvas = view.querySelector('#photo-canvas');
-  let markCanvas = view.querySelector('#mark-canvas');
+  const photoCanvas = view.querySelector('#photo-canvas');
+  const markCanvas = view.querySelector('#mark-canvas');
+  const previewCanvas = view.querySelector('#preview-canvas');
+  const previewCtx = previewCanvas.getContext('2d');
   const rulerVisual = view.querySelector('#ruler-visual');
   const stackEl = view.querySelector('#canvas-stack');
   markCanvas.style.touchAction = 'none';
-  let photoCtx = photoCanvas.getContext('2d');
-  let ctx = markCanvas.getContext('2d'); // all drawing/erasing happens here only
+  const photoCtx = photoCanvas.getContext('2d');
+  const ctx = markCanvas.getContext('2d');
 
   photoCtx.drawImage(img, 0, 0, cw, ch);
   if (img.close) img.close();
@@ -125,7 +156,6 @@ async function openAnnotator(photoId, onDone) {
     applyViewTransform();
   }
 
-  // Fit the canvas stack to available space via CSS while preserving pixel resolution
   function fitCanvas() {
     const wrap = view.querySelector('#canvas-wrap');
     const availW = wrap.clientWidth - 16;
@@ -137,8 +167,6 @@ async function openAnnotator(photoId, onDone) {
   fitCanvas();
   window.addEventListener('resize', fitCanvas);
 
-  // Undo stack: snapshot of the annotation layer only, before each stroke. Cleared on
-  // rotate since a rotation changes the canvas dimensions and old snapshots no longer fit.
   let undoStack = [];
   function pushUndo() {
     undoStack.push(ctx.getImageData(0, 0, cw, ch));
@@ -181,7 +209,6 @@ async function openAnnotator(photoId, onDone) {
   // ---- Rotate (bakes 90° rotation into both layers' actual pixels) ----
   view.querySelector('#btn-rotate').addEventListener('click', () => {
     const newCw = ch, newCh = cw;
-
     const rotatedPhoto = document.createElement('canvas');
     rotatedPhoto.width = newCw; rotatedPhoto.height = newCh;
     const rpCtx = rotatedPhoto.getContext('2d');
@@ -199,6 +226,7 @@ async function openAnnotator(photoId, onDone) {
     cw = newCw; ch = newCh;
     photoCanvas.width = cw; photoCanvas.height = ch;
     markCanvas.width = cw; markCanvas.height = ch;
+    previewCanvas.width = cw; previewCanvas.height = ch;
     photoCtx.drawImage(rotatedPhoto, 0, 0);
     ctx.drawImage(rotatedMark, 0, 0);
 
@@ -209,10 +237,14 @@ async function openAnnotator(photoId, onDone) {
     updateRulerVisual();
   });
 
-  // ---- Ruler ----
+  // ---- Ruler: looks like a real ruler (ticks + numbers), the pen/eraser are constrained
+  // to its top edge (not its centerline), shown at 50% opacity, and its numbers reflect
+  // real-world units once this photo has been calibrated. ----
   let rulerEnabled = false;
   let rulerSnap = true;
   const ruler = { cx: cw / 2, cy: ch / 2, angle: 0 };
+  const RULER_LENGTH_PX = Math.min(cw, ch) * 0.55;
+  const RULER_THICKNESS_PX = RULER_LENGTH_PX * 0.11;
 
   function snapAngleIfNeeded(angle) {
     if (!rulerSnap) return angle;
@@ -225,15 +257,58 @@ async function openAnnotator(photoId, onDone) {
     return minDiff <= RULER_SNAP_THRESHOLD_DEG ? (closest * Math.PI) / 180 : angle;
   }
 
+  function rulerTicks() {
+    const ticks = [];
+    if (calibration && calibration.pixelsPerUnit > 0) {
+      const totalUnits = RULER_LENGTH_PX / calibration.pixelsPerUnit;
+      const step = niceRulerStep(totalUnits / 8);
+      for (let v = 0; v <= totalUnits + 1e-6; v += step) {
+        ticks.push({ frac: (v * calibration.pixelsPerUnit) / RULER_LENGTH_PX, label: String(Math.round(v * 100) / 100) });
+      }
+    } else {
+      const step = niceRulerStep(RULER_LENGTH_PX / 8);
+      for (let v = 0; v <= RULER_LENGTH_PX + 1e-6; v += step) {
+        ticks.push({ frac: v / RULER_LENGTH_PX, label: String(Math.round(v)) });
+      }
+    }
+    return ticks;
+  }
+
+  function buildRulerSVG() {
+    const W = 600, H = 70, edgeY = 6, tickLen = 18;
+    const ticks = rulerTicks();
+    let svg = `<svg width="100%" height="100%" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="display:block; overflow:visible;">`;
+    svg += `<rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff" stroke="#1c1f26" stroke-width="1"/>`;
+    svg += `<line x1="0" y1="${edgeY}" x2="${W}" y2="${edgeY}" stroke="#c81e1e" stroke-width="2.5"/>`;
+    ticks.forEach((t) => {
+      const x = Math.max(1, Math.min(W - 1, t.frac * W));
+      svg += `<line x1="${x}" y1="${edgeY}" x2="${x}" y2="${edgeY + tickLen}" stroke="#1c1f26" stroke-width="1.5"/>`;
+      svg += `<text x="${x}" y="${edgeY + tickLen + 15}" font-size="13" fill="#1c1f26" text-anchor="middle" font-family="-apple-system,sans-serif">${t.label}</text>`;
+    });
+    if (calibration) {
+      svg += `<text x="${W - 6}" y="${H - 6}" font-size="11" fill="#4a4f5a" text-anchor="end" font-family="-apple-system,sans-serif">${calibration.unit}</text>`;
+    }
+    svg += `</svg>`;
+    return svg;
+  }
+
   function updateRulerVisual() {
     rulerVisual.style.display = rulerEnabled ? 'block' : 'none';
     if (!rulerEnabled) return;
     const leftPct = (ruler.cx / cw) * 100;
     const topPct = (ruler.cy / ch) * 100;
     const deg = (ruler.angle * 180) / Math.PI;
+    const widthPct = (RULER_LENGTH_PX / cw) * 100;
+    const heightPct = (RULER_THICKNESS_PX / ch) * 100;
     rulerVisual.style.left = leftPct + '%';
     rulerVisual.style.top = topPct + '%';
-    rulerVisual.style.transform = `translate(-50%, -50%) rotate(${deg}deg)`;
+    rulerVisual.style.width = widthPct + '%';
+    rulerVisual.style.height = heightPct + '%';
+    // Top edge (not center) sits on the ruler's actual position, so the drawing edge and
+    // the pivot for rotation both stay on the constraint line at every angle.
+    rulerVisual.style.transformOrigin = '50% 0%';
+    rulerVisual.style.transform = `translate(-50%, 0%) rotate(${deg}deg)`;
+    rulerVisual.innerHTML = buildRulerSVG();
   }
 
   function projectOntoRuler(pt) {
@@ -277,7 +352,7 @@ async function openAnnotator(photoId, onDone) {
     updateRulerVisual();
   }
 
-  // ---- Pinch-to-zoom / two-finger pan (only when the ruler is off) ----
+  // ---- Pinch-to-zoom / two-finger pan (ruler off, or while calibrating) ----
   let pinchState = null;
   function updatePinch() {
     const pts = Array.from(touches.values());
@@ -296,10 +371,201 @@ async function openAnnotator(photoId, onDone) {
     applyViewTransform();
   }
 
-  // ---- Drawing (pen always; a single finger when the ruler is off) ----
-  // `drawingPointerId` fixes the original bug: strokes were continued by ANY active touch's
-  // movement, not just the finger that started them, so a second finger drew a line across
-  // to wherever it landed. Now only the owning pointerId can extend the current stroke.
+  // ---- Calibration: tap a point, Accept or Reset, then (after panning/zooming freely)
+  // tap the second point the same way. Entering a real-world distance finishes it. ----
+  let calibrating = false;
+  let calStep = 0; // 0 = picking point 1, 1 = picking point 2
+  let calPending = null;
+  let calPoint1 = null;
+  let calPoint2 = null;
+
+  function renderCalMarkers() {
+    view.querySelectorAll('.cal-marker').forEach((m) => m.remove());
+    function addMarker(pt, color) {
+      if (!pt) return;
+      const m = document.createElement('div');
+      m.className = 'cal-marker';
+      m.style.cssText = `position:absolute; width:16px; height:16px; border-radius:50%; background:${color}; border:2px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.35); left:${(pt.x / cw) * 100}%; top:${(pt.y / ch) * 100}%; transform:translate(-50%,-50%); pointer-events:none; z-index:6;`;
+      stackEl.appendChild(m);
+    }
+    addMarker(calPoint1, '#4f9d5c');
+    const secondPt = calStep === 0 ? calPending : (calPoint2 || calPending);
+    addMarker(secondPt, calPoint2 ? '#4f9d5c' : '#e0a72e');
+  }
+
+  function updateCalToolbar() {
+    const instr = view.querySelector('#cal-instruction');
+    const acceptBtn = view.querySelector('#btn-cal-accept');
+    if (calStep === 0) instr.textContent = calPending ? 'Tap to fine-tune, then Accept' : 'Tap the first point';
+    else instr.textContent = calPending ? 'Tap to fine-tune, then Accept' : 'Pinch/pan to find it, then tap the second point';
+    acceptBtn.style.display = calPending ? '' : 'none';
+  }
+
+  function enterCalibrationMode() {
+    calibrating = true;
+    calStep = 0; calPending = null; calPoint1 = null; calPoint2 = null;
+    if (measureMode) { measureMode = false; view.querySelector('#btn-measure').classList.remove('active'); measureStart = null; clearPreview(); }
+    view.querySelector('#main-toolbar').style.display = 'none';
+    view.querySelector('#ruler-toolbar').style.display = 'none';
+    view.querySelector('#cal-toolbar').style.display = '';
+    updateCalToolbar();
+    renderCalMarkers();
+  }
+  function exitCalibrationMode() {
+    calibrating = false;
+    calPending = null; calPoint1 = null; calPoint2 = null;
+    view.querySelector('#main-toolbar').style.display = '';
+    view.querySelector('#ruler-toolbar').style.display = '';
+    view.querySelector('#cal-toolbar').style.display = 'none';
+    renderCalMarkers();
+  }
+  view.querySelector('#btn-calibrate').addEventListener('click', () => {
+    if (calibrating) exitCalibrationMode(); else enterCalibrationMode();
+  });
+  view.querySelector('#btn-cal-reset').addEventListener('click', () => {
+    calPending = null;
+    renderCalMarkers();
+    updateCalToolbar();
+  });
+  view.querySelector('#btn-cal-cancel').addEventListener('click', exitCalibrationMode);
+  view.querySelector('#btn-cal-accept').addEventListener('click', () => {
+    if (!calPending) return;
+    if (calStep === 0) {
+      calPoint1 = calPending; calPending = null; calStep = 1;
+      renderCalMarkers();
+      updateCalToolbar();
+    } else {
+      calPoint2 = calPending; calPending = null;
+      openCalibrationDistancePrompt();
+    }
+  });
+
+  function openCalibrationDistancePrompt() {
+    const pixelDist = Math.hypot(calPoint2.x - calPoint1.x, calPoint2.y - calPoint1.y);
+    const sheet = el(`
+      <div class="sheet-backdrop">
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <h2>Set real-world distance</h2>
+          <p class="muted" style="font-size:13px; margin-top:-8px;">Distance between the two points you picked.</p>
+          <div class="row-2">
+            <div class="field"><label>Distance</label><input type="text" id="f-dist" inputmode="decimal" placeholder="e.g. 500"></div>
+            <div class="field">
+              <label>Unit</label>
+              <select id="f-unit">
+                <option value="mm">mm</option>
+                <option value="cm">cm</option>
+                <option value="m">m</option>
+                <option value="in">in</option>
+                <option value="ft">ft</option>
+              </select>
+            </div>
+          </div>
+          <button class="btn btn-primary btn-block" id="btn-save-cal">Save calibration</button>
+          <button class="btn btn-ghost btn-block" id="btn-cancel-cal">Cancel</button>
+        </div>
+      </div>
+    `);
+    presentOverlay(sheet);
+    sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+    sheet.querySelector('#btn-cancel-cal').addEventListener('click', () => { sheet.remove(); exitCalibrationMode(); });
+    sheet.querySelector('#btn-save-cal').addEventListener('click', async () => {
+      const val = parseFloat(sheet.querySelector('#f-dist').value);
+      if (!val || val <= 0) { toast('Enter a valid distance'); return; }
+      const unit = sheet.querySelector('#f-unit').value;
+      calibration = { pixelsPerUnit: pixelDist / val, unit };
+      await DB.updatePhoto(photoId, { calibration });
+      sheet.remove();
+      exitCalibrationMode();
+      updateRulerVisual();
+      toast('Calibration saved');
+    });
+  }
+
+  // ---- Measure: drag to draw a double-ended arrow, labeled with the distance — real-world
+  // units if this photo is calibrated, otherwise raw pixels. Baked into the mark layer like
+  // any other stroke (so Undo removes it) once the drag finishes; a lightweight separate
+  // preview canvas shows it live while dragging without touching the real annotation. ----
+  let measureMode = false;
+  let measureStart = null;
+  let measurePointerId = null;
+
+  function formatDistance(pixelDist) {
+    if (calibration && calibration.pixelsPerUnit > 0) {
+      const val = pixelDist / calibration.pixelsPerUnit;
+      return `${Math.round(val * 100) / 100} ${calibration.unit}`;
+    }
+    return `${Math.round(pixelDist)} px`;
+  }
+
+  function drawArrowheadOn(targetCtx, fromX, fromY, toX, toY, size) {
+    const angle = Math.atan2(toY - fromY, toX - fromX);
+    targetCtx.beginPath();
+    targetCtx.moveTo(toX, toY);
+    targetCtx.lineTo(toX - size * Math.cos(angle - Math.PI / 7), toY - size * Math.sin(angle - Math.PI / 7));
+    targetCtx.lineTo(toX - size * Math.cos(angle + Math.PI / 7), toY - size * Math.sin(angle + Math.PI / 7));
+    targetCtx.closePath();
+    targetCtx.fill();
+  }
+
+  function drawLabelOn(targetCtx, midX, midY, label) {
+    targetCtx.font = '28px -apple-system, sans-serif';
+    targetCtx.textAlign = 'center';
+    targetCtx.textBaseline = 'middle';
+    const textW = targetCtx.measureText(label).width;
+    const padX = 10, padY = 6;
+    targetCtx.fillStyle = 'rgba(255,255,255,0.85)';
+    targetCtx.fillRect(midX - textW / 2 - padX, midY - 16 - padY, textW + padX * 2, 32 + padY * 2);
+    targetCtx.fillStyle = '#1c1f26';
+    targetCtx.fillText(label, midX, midY);
+    targetCtx.textAlign = 'left';
+    targetCtx.textBaseline = 'alphabetic';
+  }
+
+  function drawMeasureArrowOn(targetCtx, x1, y1, x2, y2) {
+    targetCtx.save();
+    targetCtx.globalCompositeOperation = 'source-over';
+    targetCtx.strokeStyle = currentColor;
+    targetCtx.fillStyle = currentColor;
+    targetCtx.lineWidth = Math.max(3, currentWidth);
+    targetCtx.lineCap = 'round';
+    targetCtx.beginPath();
+    targetCtx.moveTo(x1, y1);
+    targetCtx.lineTo(x2, y2);
+    targetCtx.stroke();
+    const headSize = Math.max(14, currentWidth * 2.2);
+    drawArrowheadOn(targetCtx, x2, y2, x1, y1, headSize); // tip at start
+    drawArrowheadOn(targetCtx, x1, y1, x2, y2, headSize); // tip at end
+    targetCtx.restore();
+    drawLabelOn(targetCtx, (x1 + x2) / 2, (y1 + y2) / 2, formatDistance(Math.hypot(x2 - x1, y2 - y1)));
+  }
+
+  function clearPreview() { previewCtx.clearRect(0, 0, cw, ch); }
+
+  function finalizeMeasureArrow(x1, y1, x2, y2) {
+    if (Math.hypot(x2 - x1, y2 - y1) < 4) return; // ignore accidental taps
+    pushUndo();
+    drawMeasureArrowOn(ctx, x1, y1, x2, y2);
+  }
+
+  view.querySelector('#btn-measure').addEventListener('click', (e) => {
+    measureMode = !measureMode;
+    e.currentTarget.classList.toggle('active', measureMode);
+    if (measureMode && rulerEnabled) {
+      rulerEnabled = false;
+      view.querySelector('#btn-ruler').classList.remove('active');
+      view.querySelector('#btn-ruler-snap').style.display = 'none';
+      view.querySelector('#ruler-hint').style.display = 'none';
+      view.querySelector('#zoom-hint').style.display = '';
+      updateRulerVisual();
+    }
+    touches.clear();
+    pinchState = null;
+    measureStart = null;
+    clearPreview();
+  });
+
+  // ---- Drawing (pen always; a single finger when the ruler is off and not calibrating) ----
   let drawing = false;
   let drawingPointerId = null;
   let lastX = 0, lastY = 0;
@@ -345,11 +611,34 @@ async function openAnnotator(photoId, onDone) {
     }
   }
 
-  // pointerId -> {cx, cy, x, y} — cx/cy are raw client coords (for pinch math, unaffected
-  // by our own zoom transform), x/y are canvas-pixel coords (for ruler/drawing math).
-  const touches = new Map();
+  const touches = new Map(); // pointerId -> {cx, cy, x, y}
 
   markCanvas.addEventListener('pointerdown', (e) => {
+    if (calibrating) {
+      if (e.pointerType === 'touch') {
+        const p = canvasPoint(e);
+        touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
+        if (touches.size >= 2) { updatePinch(); e.preventDefault(); return; }
+      }
+      calPending = canvasPoint(e);
+      renderCalMarkers();
+      updateCalToolbar();
+      e.preventDefault();
+      return;
+    }
+
+    if (measureMode) {
+      if (e.pointerType === 'touch') {
+        const p = canvasPoint(e);
+        touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
+        if (touches.size >= 2) { measureStart = null; clearPreview(); updatePinch(); e.preventDefault(); return; }
+      }
+      measureStart = canvasPoint(e);
+      measurePointerId = e.pointerId;
+      e.preventDefault();
+      return;
+    }
+
     if (e.pointerType === 'touch') {
       const p = canvasPoint(e);
       touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
@@ -364,8 +653,7 @@ async function openAnnotator(photoId, onDone) {
         e.preventDefault();
         return;
       }
-      // Exactly one touch so far.
-      if (rulerEnabled) { e.preventDefault(); return; } // waiting for a second finger
+      if (rulerEnabled) { e.preventDefault(); return; }
       startStroke(e);
       e.preventDefault();
       return;
@@ -375,6 +663,35 @@ async function openAnnotator(photoId, onDone) {
   });
 
   markCanvas.addEventListener('pointermove', (e) => {
+    if (calibrating) {
+      if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
+        const p = canvasPoint(e);
+        touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
+        if (touches.size >= 2) { updatePinch(); e.preventDefault(); return; }
+      }
+      if (e.pointerType === 'pen' || e.pointerType === 'mouse' || (e.pointerType === 'touch' && touches.size === 1)) {
+        calPending = canvasPoint(e);
+        renderCalMarkers();
+      }
+      e.preventDefault();
+      return;
+    }
+
+    if (measureMode) {
+      if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
+        const p = canvasPoint(e);
+        touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
+        if (touches.size >= 2) { updatePinch(); e.preventDefault(); return; }
+      }
+      if (measureStart && e.pointerId === measurePointerId) {
+        const p = canvasPoint(e);
+        clearPreview();
+        drawMeasureArrowOn(previewCtx, measureStart.x, measureStart.y, p.x, p.y);
+      }
+      e.preventDefault();
+      return;
+    }
+
     if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
       const p = canvasPoint(e);
       touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
@@ -384,10 +701,7 @@ async function openAnnotator(photoId, onDone) {
         e.preventDefault();
         return;
       }
-      // Single touch: only continue if this exact finger owns the current stroke.
-      if (drawing && e.pointerId === drawingPointerId) {
-        continueStroke(e);
-      }
+      if (drawing && e.pointerId === drawingPointerId) continueStroke(e);
       e.preventDefault();
       return;
     }
@@ -400,6 +714,13 @@ async function openAnnotator(photoId, onDone) {
     if (e.pointerType === 'touch') {
       touches.delete(e.pointerId);
       if (touches.size < 2) pinchState = null;
+    }
+    if (measureMode && measureStart && e.pointerId === measurePointerId) {
+      const p = canvasPoint(e);
+      clearPreview();
+      finalizeMeasureArrow(measureStart.x, measureStart.y, p.x, p.y);
+      measureStart = null;
+      measurePointerId = null;
     }
     if (e.pointerId !== drawingPointerId) return;
     drawing = false;
@@ -416,9 +737,6 @@ async function openAnnotator(photoId, onDone) {
   });
 
   view.querySelector('#btn-save').addEventListener('click', () => {
-    // Flatten photo + annotation layers into a single image for storage/export. Any
-    // rotation applied during this session is already baked into both layers' pixels, so
-    // it's persisted automatically as part of this same save — no separate metadata needed.
     const mergeCanvas = document.createElement('canvas');
     mergeCanvas.width = cw;
     mergeCanvas.height = ch;
