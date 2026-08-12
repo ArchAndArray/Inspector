@@ -6,7 +6,7 @@ const EXTENT_LABELS = { A: 'None', B: 'Slight (≤5%)', C: 'Moderate (5–20%)',
 const PRIORITY_COLORS = { High: '#c81e1e', Medium: '#e0672e', Low: '#4f9d5c', Monitor: '#1e7dc8' };
 const CURRENCY_SYMBOLS = { USD: '$', GBP: '£', EUR: '€' };
 const INSPECTION_TYPES = ['Safety Inspection', 'Detailed', 'Special', 'Follow-up', 'GI Bridges'];
-const APP_VERSION = '2.1';
+const APP_VERSION = '2.2';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -341,13 +341,19 @@ async function route() {
 }
 
 // ---------- Reusable: photo action sheet (used by cover, element photos, finding photos) ----------
-function openPhotoActionSheet(photoId, { onAnnotated, onRemoved } = {}) {
+async function openPhotoActionSheet(photoId, { onAnnotated, onRemoved, onCaptioned } = {}) {
+  const photo = await DB.get('photos', photoId);
   const s = el(`
     <div class="sheet-backdrop">
       <div class="sheet">
         <div class="sheet-handle"></div>
         <h2>Photo</h2>
-        <button class="btn btn-primary btn-block" id="btn-annotate">✏️ Edit — draw with Pencil</button>
+        <div class="field">
+          <label>Description</label>
+          <input type="text" id="f-caption" value="${esc(photo && photo.caption)}" placeholder="Shown under the photo in the report">
+        </div>
+        <button class="btn btn-secondary btn-block" id="btn-save-caption">Save description</button>
+        <button class="btn btn-primary btn-block" id="btn-annotate" style="margin-top:10px;">✏️ Edit — draw with Pencil</button>
         <button class="btn btn-danger btn-block" id="btn-remove" style="margin-top:10px;">Remove photo</button>
         <button class="btn btn-ghost btn-block" id="btn-cancel" style="margin-top:10px;">Cancel</button>
       </div>
@@ -356,6 +362,11 @@ function openPhotoActionSheet(photoId, { onAnnotated, onRemoved } = {}) {
   presentOverlay(s);
   s.addEventListener('click', (e) => { if (e.target === s) s.remove(); });
   s.querySelector('#btn-cancel').addEventListener('click', () => s.remove());
+  s.querySelector('#btn-save-caption').addEventListener('click', async () => {
+    await DB.updatePhoto(photoId, { caption: s.querySelector('#f-caption').value.trim() });
+    s.remove();
+    if (onCaptioned) onCaptioned();
+  });
   s.querySelector('#btn-annotate').addEventListener('click', async () => {
     s.remove();
     await openAnnotator(photoId, onAnnotated);
@@ -367,7 +378,7 @@ function openPhotoActionSheet(photoId, { onAnnotated, onRemoved } = {}) {
   });
 }
 
-function openPhotoSourceSheet({ onFiles, multiple = false }) {
+function openPhotoSourceSheet({ onFiles, multiple = false, onSketch = null }) {
   const s = el(`
     <div class="sheet-backdrop">
       <div class="sheet">
@@ -375,6 +386,7 @@ function openPhotoSourceSheet({ onFiles, multiple = false }) {
         <h2>Add photo</h2>
         <button class="btn btn-primary btn-block" id="btn-camera">📷 Take photo</button>
         <button class="btn btn-secondary btn-block" id="btn-library" style="margin-top:10px;">🖼 Choose from library</button>
+        ${onSketch ? '<button class="btn btn-secondary btn-block" id="btn-sketch" style="margin-top:10px;">✏️ Draw a sketch</button>' : ''}
         <button class="btn btn-ghost btn-block" id="btn-cancel" style="margin-top:10px;">Cancel</button>
         <input type="file" id="src-camera" accept="image/*" capture="environment" style="display:none;">
         <input type="file" id="src-library" accept="image/*" ${multiple ? 'multiple' : ''} style="display:none;">
@@ -388,6 +400,23 @@ function openPhotoSourceSheet({ onFiles, multiple = false }) {
   s.querySelector('#btn-library').addEventListener('click', () => s.querySelector('#src-library').click());
   s.querySelector('#src-camera').addEventListener('change', (e) => { const f = e.target.files; s.remove(); if (f.length) onFiles(f); });
   s.querySelector('#src-library').addEventListener('change', (e) => { const f = e.target.files; s.remove(); if (f.length) onFiles(f); });
+  if (onSketch) {
+    s.querySelector('#btn-sketch').addEventListener('click', () => { s.remove(); onSketch(); });
+  }
+}
+
+// A blank white canvas, used as the starting point for a freehand sketch (rather than an
+// annotated photo) — same resolution ballpark as a normalized camera photo, so it behaves
+// identically once it reaches the annotator.
+function createBlankCanvasBlob(w = 1600, h = 1200) {
+  return new Promise((resolve) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+    canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.95);
+  });
 }
 
 // ---------- Force update / resync from GitHub ----------
@@ -485,6 +514,7 @@ async function renderHome() {
       <button class="icon-btn" id="btn-update" title="Check for updates">⟳</button>
       <button class="icon-btn" id="btn-backup" title="Backup & restore">💾</button>
       <button class="icon-btn" id="btn-scale-annotate" title="Scale / Annotate">📐</button>
+      <button class="icon-btn" id="btn-new-sketch" title="New sketch">✏️</button>
       <button class="icon-btn" id="btn-templates" title="Element templates">☰</button>
     </div>
     <div class="content">
@@ -505,6 +535,12 @@ async function renderHome() {
   document.getElementById('btn-update').addEventListener('click', forceUpdate);
   document.getElementById('btn-backup').addEventListener('click', openBackupRestoreSheet);
   document.getElementById('btn-scale-annotate').addEventListener('click', () => navigate('#/scale-annotate'));
+  document.getElementById('btn-new-sketch').addEventListener('click', async () => {
+    const blank = await createBlankCanvasBlob();
+    const rec = await DB.addStandaloneAnnotation(blank, 'Sketch', 'image');
+    navigate('#/scale-annotate');
+    await openAnnotator(rec.id, () => renderScaleAnnotate());
+  });
 }
 
 function openNewInspectionSheet() {
@@ -810,11 +846,17 @@ async function openReportInfoSheet(inspectionId) {
           <button class="chip ${insp.locationMapMode === 'custom' ? 'selected' : ''}" data-mapmode="custom" style="${insp.locationMapMode === 'custom' ? 'background:var(--ink);' : ''}">Upload image</button>
           <button class="chip ${insp.locationMapMode === 'off' ? 'selected' : ''}" data-mapmode="off" style="${insp.locationMapMode === 'off' ? 'background:var(--ink);' : ''}">Off</button>
         </div>
+        <div class="field" style="margin-top:12px;">
+          <label>Map scale</label>
+          <select id="f-map-scale">
+            ${[500, 1250, 2500, 5000, 10000, 25000].map((s) => `<option value="${s}" ${(insp.locationMapScale || 2500) === s ? 'selected' : ''}>1:${formatWithCommas(s)}</option>`).join('')}
+          </select>
+        </div>
         <div id="custom-map-area" class="${insp.locationMapMode === 'custom' ? '' : 'hidden'}" style="margin-top:10px;">
           <div class="photo-grid" id="custom-map-grid"></div>
         </div>
         <input type="file" id="map-file-input" accept="image/*" style="display:none;">
-        <p class="hint">Placed after the Introduction, sized under half a page. Auto mode needs internet at export time; if the structure has no coordinates set, the map section is skipped with a warning.</p>
+        <p class="hint">Placed after the Introduction. Auto mode needs internet at export time; if the structure has no coordinates set, the map section is skipped with a warning.</p>
 
         <div class="section-header" style="margin-top:22px;"><h2>Appendices</h2><button class="small-btn" id="btn-add-appendix">＋ Add</button></div>
         <div id="appendix-list"></div>
@@ -850,6 +892,7 @@ async function openReportInfoSheet(inspectionId) {
       currency: currencyBtn ? currencyBtn.dataset.currency : 'USD',
       coverStyle: styleBtn ? styleBtn.dataset.style : 'basic',
       locationMapMode: mapModeBtn ? mapModeBtn.dataset.mapmode : 'auto',
+      locationMapScale: Number(sheet.querySelector('#f-map-scale').value) || 2500,
       includeRiskAssessmentAppendix: sheet.querySelector('#f-include-ra-appendix').checked
     });
   }
@@ -1426,7 +1469,8 @@ async function renderElement(inspectionId, elementId) {
       thumb.addEventListener('click', () => {
         openPhotoActionSheet(thumb.dataset.pid, {
           onAnnotated: async () => { elementPhotos = await DB.listPhotosForElement(elementId); renderElementPhotoGrid(); },
-          onRemoved: async () => { elementPhotos = await DB.listPhotosForElement(elementId); renderElementPhotoGrid(); }
+          onRemoved: async () => { elementPhotos = await DB.listPhotosForElement(elementId); renderElementPhotoGrid(); },
+          onCaptioned: async () => { elementPhotos = await DB.listPhotosForElement(elementId); renderElementPhotoGrid(); }
         });
       });
     });
@@ -1985,13 +2029,13 @@ async function renderDrawings(inspectionId) {
         <h1 style="font-size:17px;">Drawings</h1>
         <span class="sub">${esc(insp.structureName)}</span>
       </div>
-      <button class="text-btn" id="btn-import-pdf">Import PDF</button>
     </div>
     <div class="content" id="drawings-list">
     </div>
+    <button class="fab" id="btn-add-drawing">＋</button>
   `;
   document.getElementById('btn-back').addEventListener('click', () => navigate(`#/inspection/${inspectionId}`));
-  document.getElementById('btn-import-pdf').addEventListener('click', () => openDrawingImportSheet(inspectionId, () => renderDrawings(inspectionId)));
+  document.getElementById('btn-add-drawing').addEventListener('click', () => openAddDrawingSheet(inspectionId, () => renderDrawings(inspectionId)));
 
   function renderList() {
     const list = document.getElementById('drawings-list');
@@ -2099,6 +2143,44 @@ async function openPdfImportFlow(onImportPage, onAllImported) {
     }
   });
   fileInput.click();
+}
+
+function openAddDrawingSheet(inspectionId, onAdded) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Add drawing</h2>
+        <button class="btn btn-primary btn-block" id="btn-camera">📷 Take photo</button>
+        <button class="btn btn-secondary btn-block" id="btn-library" style="margin-top:10px;">🖼 Choose from library</button>
+        <button class="btn btn-secondary btn-block" id="btn-pdf" style="margin-top:10px;">📄 Import PDF</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel" style="margin-top:16px;">Cancel</button>
+        <input type="file" id="ad-camera-input" accept="image/*" capture="environment" style="display:none;">
+        <input type="file" id="ad-library-input" accept="image/*" multiple style="display:none;">
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+
+  async function handleImageFiles(fileList) {
+    sheet.remove();
+    for (const file of Array.from(fileList)) {
+      const normalized = await normalizeImageFile(file);
+      await DB.addDrawing(inspectionId, normalized, file.name.replace(/\.[a-z0-9]+$/i, ''));
+    }
+    onAdded();
+  }
+  sheet.querySelector('#btn-camera').addEventListener('click', () => sheet.querySelector('#ad-camera-input').click());
+  sheet.querySelector('#btn-library').addEventListener('click', () => sheet.querySelector('#ad-library-input').click());
+  sheet.querySelector('#ad-camera-input').addEventListener('change', (e) => { if (e.target.files.length) handleImageFiles(e.target.files); });
+  sheet.querySelector('#ad-library-input').addEventListener('change', (e) => { if (e.target.files.length) handleImageFiles(e.target.files); });
+
+  sheet.querySelector('#btn-pdf').addEventListener('click', () => {
+    sheet.remove();
+    openDrawingImportSheet(inspectionId, onAdded);
+  });
 }
 
 async function openDrawingImportSheet(inspectionId, onImported) {
@@ -2583,10 +2665,10 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
   const isGiBridges = insp && insp.inspectionType === 'GI Bridges';
   const isSafetyInspection = insp && insp.inspectionType === 'Safety Inspection';
   const elMeta = elementSublineParts(elmt, isGiBridges).join('   ·   ');
-  // Safety Inspection: severity/extent/works are hidden by default per finding, behind a
-  // toggle — most findings stay simple (notes/priority/photos only), and it's switched on
-  // individually for the rare finding that needs a rating.
+  // Safety Inspection: severity/extent and works-required are each hidden by default per
+  // finding, behind their OWN independent toggle — either can be shown without the other.
   const showDetailFields = !isSafetyInspection || finding.showDetail;
+  const showWorksSection = !isSafetyInspection || finding.showWorks;
 
   const view = el(`
     <div class="fullscreen">
@@ -2606,12 +2688,12 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
         </div>
 
         <div class="section-header" style="margin-top:0;"><h2>Notes</h2></div>
-        <div class="field"><textarea id="f-notes" placeholder="Describe the finding…">${esc(finding.notes)}</textarea></div>
+        <div class="field"><textarea id="f-notes" placeholder="Describe the finding…" style="min-height:270px;">${esc(finding.notes)}</textarea></div>
 
         ${isSafetyInspection ? `
         <div class="checkbox-row">
           <input type="checkbox" id="f-show-detail" ${finding.showDetail ? 'checked' : ''}>
-          <label for="f-show-detail">Add severity, extent &amp; works required</label>
+          <label for="f-show-detail">Add severity &amp; extent</label>
         </div>
         ` : ''}
 
@@ -2644,7 +2726,14 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
           `).join('')}
         </div>
 
-        <div id="works-section" class="${showDetailFields ? '' : 'hidden'}">
+        ${isSafetyInspection ? `
+        <div class="checkbox-row">
+          <input type="checkbox" id="f-show-works" ${finding.showWorks ? 'checked' : ''}>
+          <label for="f-show-works">Add works required</label>
+        </div>
+        ` : ''}
+
+        <div id="works-section" class="${showWorksSection ? '' : 'hidden'}">
           <div class="section-header"><h2>Works</h2></div>
           <div class="checkbox-row">
             <input type="checkbox" id="f-works-required" ${finding.worksRequired ? 'checked' : ''}>
@@ -2686,17 +2775,21 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
     const priBtn = view.querySelector('.chip.selected[data-pri]');
     const worksRequired = view.querySelector('#f-works-required').checked;
     const showDetailCheckbox = view.querySelector('#f-show-detail');
+    const showWorksCheckbox = view.querySelector('#f-show-works');
     const showDetail = showDetailCheckbox ? showDetailCheckbox.checked : true;
+    const showWorks = showWorksCheckbox ? showWorksCheckbox.checked : true;
     const detailVisible = !isSafetyInspection || showDetail;
+    const worksVisible = !isSafetyInspection || showWorks;
     await DB.updateFinding(findingId, {
       severity: detailVisible && sevBtn ? Number(sevBtn.dataset.sev) : null,
       extent: detailVisible && extBtn ? extBtn.dataset.ext : null,
       priority: priBtn ? priBtn.dataset.pri : null,
-      worksRequired: detailVisible ? worksRequired : false,
-      worksDescription: detailVisible && worksRequired ? view.querySelector('#f-works-desc').value.trim() : '',
-      costEstimate: detailVisible && worksRequired ? view.querySelector('#f-cost').value.trim() : '',
+      worksRequired: worksVisible ? worksRequired : false,
+      worksDescription: worksVisible && worksRequired ? view.querySelector('#f-works-desc').value.trim() : '',
+      costEstimate: worksVisible && worksRequired ? view.querySelector('#f-cost').value.trim() : '',
       notes: view.querySelector('#f-notes').value.trim(),
-      showDetail: isSafetyInspection ? showDetail : finding.showDetail
+      showDetail: isSafetyInspection ? showDetail : finding.showDetail,
+      showWorks: isSafetyInspection ? showWorks : finding.showWorks
     });
     if (showStatus) flashSaveStatus('Saved');
   }
@@ -2718,6 +2811,12 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
   if (showDetailCheckbox) {
     showDetailCheckbox.addEventListener('change', (e) => {
       view.querySelector('#detail-fields').classList.toggle('hidden', !e.target.checked);
+      persistFields(false);
+    });
+  }
+  const showWorksCheckbox = view.querySelector('#f-show-works');
+  if (showWorksCheckbox) {
+    showWorksCheckbox.addEventListener('change', (e) => {
       view.querySelector('#works-section').classList.toggle('hidden', !e.target.checked);
       persistFields(false);
     });
@@ -2750,7 +2849,8 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
       thumb.addEventListener('click', () => {
         openPhotoActionSheet(thumb.dataset.pid, {
           onAnnotated: async () => { photos = await DB.listPhotosForFinding(findingId); renderPhotoGrid(); },
-          onRemoved: async () => { photos = await DB.listPhotosForFinding(findingId); renderPhotoGrid(); }
+          onRemoved: async () => { photos = await DB.listPhotosForFinding(findingId); renderPhotoGrid(); },
+          onCaptioned: async () => { photos = await DB.listPhotosForFinding(findingId); renderPhotoGrid(); }
         });
       });
     });
@@ -2767,6 +2867,11 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
           }
           photos = await DB.listPhotosForFinding(findingId);
           renderPhotoGrid();
+        },
+        onSketch: async () => {
+          const blank = await createBlankCanvasBlob();
+          const photo = await DB.addPhoto({ kind: 'finding', findingId, originalBlob: blank, order: photos.length });
+          await openAnnotator(photo.id, async () => { photos = await DB.listPhotosForFinding(findingId); renderPhotoGrid(); });
         }
       });
     });

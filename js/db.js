@@ -126,6 +126,7 @@ const DB = {
       companyAddress: data.companyAddress || '',
       currency: data.currency || 'USD',
       locationMapMode: data.locationMapMode || 'auto', // 'auto' (generated) | 'custom' (uploaded) | 'off'
+      locationMapScale: data.locationMapScale || 2500,
       includeRiskAssessmentAppendix: !!data.includeRiskAssessmentAppendix,
       introduction: data.introduction || '',
       conclusion: data.conclusion || '',
@@ -256,7 +257,10 @@ const DB = {
       // For Safety Inspection: whether severity/extent/works are shown for this finding.
       // Defaults false there (simple mode); irrelevant for other inspection types, which
       // always show the full fields regardless of this flag.
+      // Safety Inspection: severity/extent and works-required are each shown/hidden
+      // independently, per finding, via their own toggle.
       showDetail: data.showDetail != null ? !!data.showDetail : false,
+      showWorks: data.showWorks != null ? !!data.showWorks : false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };

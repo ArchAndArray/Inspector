@@ -74,8 +74,8 @@ function computeZoomForScale(lat, targetScale, placementWidthPt, pxW) {
   return Math.max(1, Math.min(19, Math.round(zoomFloat)));
 }
 
-async function generateLocationMapImage(lat, lng, placementWidthPt, pxW, pxH) {
-  const zoom = computeZoomForScale(lat, 2500, placementWidthPt, pxW);
+async function generateLocationMapImage(lat, lng, placementWidthPt, pxW, pxH, scale) {
+  const zoom = computeZoomForScale(lat, scale || 2500, placementWidthPt, pxW);
   const TILE_SIZE = 256;
   const centerPxX = lonToTileX(lng, zoom) * TILE_SIZE;
   const centerPxY = latToTileY(lat, zoom) * TILE_SIZE;
@@ -135,7 +135,7 @@ async function generateLocationMapImage(lat, lng, placementWidthPt, pxW, pxH) {
 }
 
 async function buildLocationMapForReport(insp, { contentW }) {
-  const MAP_PX_W = 900, MAP_PX_H = 340;
+  const MAP_PX_W = 900, MAP_PX_H = 680; // doubled height per feedback — lands close to true half-page
   const placementW = contentW;
   const placementH = contentW * (MAP_PX_H / MAP_PX_W);
 
@@ -158,7 +158,7 @@ async function buildLocationMapForReport(insp, { contentW }) {
   if (lat == null || lng == null) return null;
 
   try {
-    const url = await generateLocationMapImage(lat, lng, placementW, MAP_PX_W, MAP_PX_H);
+    const url = await generateLocationMapImage(lat, lng, placementW, MAP_PX_W, MAP_PX_H, insp.locationMapScale);
     return { url, w: placementW, h: placementH };
   } catch (err) {
     console.error('Location map generation failed', err);
@@ -196,13 +196,17 @@ async function buildAndSaveInspectionPDF(inspectionId) {
 
   async function loadElementData(elmt) {
     const refPhotos = [];
-    for (const p of await DB.listPhotosForElement(elmt.id)) refPhotos.push(await loadNormalizedImage(p.annotatedBlob || p.originalBlob));
+    for (const p of await DB.listPhotosForElement(elmt.id)) {
+      refPhotos.push({ ...(await loadNormalizedImage(p.annotatedBlob || p.originalBlob)), caption: p.caption || '' });
+    }
 
     const findings = await DB.listFindings(elmt.id);
     const findingsWithPhotos = [];
     for (const f of findings) {
       const photoData = [];
-      for (const p of await DB.listPhotosForFinding(f.id)) photoData.push(await loadNormalizedImage(p.annotatedBlob || p.originalBlob));
+      for (const p of await DB.listPhotosForFinding(f.id)) {
+        photoData.push({ ...(await loadNormalizedImage(p.annotatedBlob || p.originalBlob)), caption: p.caption || '' });
+      }
       findingsWithPhotos.push({ ...f, photos: photoData });
     }
     return { element: elmt, refPhotos, findings: findingsWithPhotos };
@@ -246,9 +250,9 @@ async function buildAndSaveInspectionPDF(inspectionId) {
   // ---------- Introduction / Summary ----------
   if (insp.introduction) {
     doc.addPage();
-    tocEntries.push({ label: 'Introduction / Summary', page: doc.internal.getNumberOfPages() });
+    tocEntries.push({ label: 'Introduction / Summary', page: doc.internal.getNumberOfPages(), group: 'report' });
     let iy = margin;
-    iy = pageHeading(doc, 'Introduction / Summary', iy);
+    iy = drawRefinedPageTitle(doc, 'Introduction / Summary', insp.structureName, iy, { margin, contentW });
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(11);
     doc.setTextColor(28, 31, 38);
@@ -266,7 +270,7 @@ async function buildAndSaveInspectionPDF(inspectionId) {
     const mapResult = await buildLocationMapForReport(insp, { pageW, margin, contentW });
     if (mapResult) {
       doc.addPage();
-      tocEntries.push({ label: 'Location Map', page: doc.internal.getNumberOfPages() });
+      tocEntries.push({ label: 'Location Map', page: doc.internal.getNumberOfPages(), group: 'report' });
       let my = margin;
       my = pageHeading(doc, 'Location Map', my);
       doc.addImage(mapResult.url, 'JPEG', margin, my, mapResult.w, mapResult.h, undefined, 'FAST');
@@ -279,7 +283,7 @@ async function buildAndSaveInspectionPDF(inspectionId) {
 
   // ---------- Details page ----------
   doc.addPage();
-  tocEntries.push({ label: 'Inspection Details', page: doc.internal.getNumberOfPages() });
+  tocEntries.push({ label: 'Inspection Details', page: doc.internal.getNumberOfPages(), group: 'report' });
   let y = margin;
   y = pageHeading(doc, 'Inspection Details', y);
 
@@ -428,7 +432,7 @@ async function buildAndSaveInspectionPDF(inspectionId) {
   let isFirstGroup = true;
   for (const g of groups) {
     doc.addPage();
-    if (isFirstGroup) { tocEntries.push({ label: 'Findings', page: doc.internal.getNumberOfPages() }); isFirstGroup = false; }
+    if (isFirstGroup) { tocEntries.push({ label: 'Findings', page: doc.internal.getNumberOfPages(), group: 'report' }); isFirstGroup = false; }
     y = margin;
     if (g.section) {
       doc.setFont('helvetica', 'bold');
@@ -469,20 +473,9 @@ async function buildAndSaveInspectionPDF(inspectionId) {
 
       // Element reference photos
       if (ed.refPhotos.length) {
-        const gap = 8;
-        const thumbW = (contentW - gap * 3) / 4;
-        let col = 0, rowH = 0;
         for (const p of ed.refPhotos) {
-          const h = Math.min((p.h / p.w) * thumbW, 130);
-          if (col === 0 && y + h > pageH - margin) { doc.addPage(); y = margin; }
-          const x = margin + col * (thumbW + gap);
-          doc.addImage(p.url, 'JPEG', x, y, thumbW, h, undefined, 'FAST');
-          rowH = Math.max(rowH, h);
-          col++;
-          if (col === 4) { col = 0; y += rowH + gap; rowH = 0; }
+          y = drawPhotoBlock(doc, p, p.caption, y, { margin, contentW, pageH });
         }
-        if (col !== 0) y += rowH + gap;
-        y += 6;
       }
 
       doc.setDrawColor(235, 236, 239);
@@ -582,21 +575,11 @@ async function buildAndSaveInspectionPDF(inspectionId) {
         }
 
         if (f.photos.length) {
-          const gap = 10;
-          const thumbW = (contentW - gap) / 2;
-          let col = 0, rowMaxH = 0;
           for (const p of f.photos) {
-            const h = Math.min((p.h / p.w) * thumbW, 260);
-            if (col === 0 && y + h > pageH - margin) { doc.addPage(); y = margin; }
-            const x = margin + col * (thumbW + gap);
-            doc.addImage(p.url, 'JPEG', x, y, thumbW, h, undefined, 'FAST');
-            rowMaxH = Math.max(rowMaxH, h);
-            col++;
-            if (col === 2) { col = 0; y += rowMaxH + gap; rowMaxH = 0; }
+            y = drawPhotoBlock(doc, p, p.caption, y, { margin, contentW, pageH });
           }
-          if (col !== 0) y += rowMaxH + gap;
         }
-        y += 16;
+        y += 8;
         doc.setDrawColor(235, 236, 239);
         doc.line(margin, y - 8, pageW - margin, y - 8);
       }
@@ -607,10 +590,10 @@ async function buildAndSaveInspectionPDF(inspectionId) {
   // ---------- Conclusion & Recommendations ----------
   if (insp.conclusion || (insp.recommendations && insp.recommendations.length)) {
     doc.addPage();
-    tocEntries.push({ label: 'Conclusion & Recommendations', page: doc.internal.getNumberOfPages() });
+    tocEntries.push({ label: 'Conclusion & Recommendations', page: doc.internal.getNumberOfPages(), group: 'report' });
     let cy = margin;
     if (insp.conclusion) {
-      cy = pageHeading(doc, 'Conclusion', cy);
+      cy = drawRefinedPageTitle(doc, 'Conclusion', insp.structureName, cy, { margin, contentW });
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(11);
       doc.setTextColor(28, 31, 38);
@@ -641,7 +624,7 @@ async function buildAndSaveInspectionPDF(inspectionId) {
   const drawingsToInclude = (await DB.listDrawings(inspectionId)).filter((d) => d.includeInReport);
   if (drawingsToInclude.length) {
     doc.addPage();
-    tocEntries.push({ label: 'Drawings', page: doc.internal.getNumberOfPages() });
+    tocEntries.push({ label: 'Drawings', page: doc.internal.getNumberOfPages(), group: 'appendix' });
     let dy = margin;
     dy = pageHeading(doc, 'Drawings', dy);
     for (const d of drawingsToInclude) {
@@ -668,7 +651,7 @@ async function buildAndSaveInspectionPDF(inspectionId) {
     const items = await DB.listAppendixItems(appendix.id);
     if (!items.length) continue;
     doc.addPage();
-    tocEntries.push({ label: appendix.name, page: doc.internal.getNumberOfPages() });
+    tocEntries.push({ label: appendix.name, page: doc.internal.getNumberOfPages(), group: 'appendix' });
     let ay = margin;
     ay = pageHeading(doc, appendix.name, ay);
     for (const item of items) {
@@ -695,7 +678,7 @@ async function buildAndSaveInspectionPDF(inspectionId) {
     if (ra) {
       const sigData = await loadRiskAssessmentSignatures(ra);
       doc.addPage();
-      tocEntries.push({ label: 'Risk Assessment', page: doc.internal.getNumberOfPages() });
+      tocEntries.push({ label: 'Risk Assessment', page: doc.internal.getNumberOfPages(), group: 'appendix' });
       drawRiskAssessmentContent(doc, insp, ra, sigData);
     }
   }
@@ -703,21 +686,73 @@ async function buildAndSaveInspectionPDF(inspectionId) {
   // ---------- Backfill the Table of Contents now that every section's actual page is known ----------
   doc.setPage(tocPageNum);
   let ty = margin;
-  ty = pageHeading(doc, 'Contents', ty);
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(11);
-  doc.setTextColor(28, 31, 38);
-  tocEntries.forEach((entry) => {
-    if (ty > pageH - margin) return;
-    doc.text(entry.label, margin, ty, { maxWidth: contentW - 50 });
-    doc.text(String(entry.page), pageW - margin, ty, { align: 'right' });
+  ty = drawRefinedPageTitle(doc, 'Contents', insp.structureName, ty, { margin, contentW });
+
+  function drawTocGroup(label, entries) {
+    if (!entries.length) return;
+    // No addPage() here deliberately: this runs during the backfill pass with the cursor
+    // pinned to the reserved ToC page via setPage(). Calling addPage() would append a new
+    // page at the very END of the whole document (that's how jsPDF works — it can't insert
+    // mid-document), which would silently corrupt every other section's already-recorded
+    // page number. In the extreme case of far more entries than fit, later ones are simply
+    // not drawn rather than risking that.
+    if (ty > pageH - margin - 40) return;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10.5);
+    doc.setTextColor(200, 30, 30);
+    drawTrackedText(doc, label.toUpperCase(), margin, ty, 1.6);
     ty += 22;
-  });
+    for (const entry of entries) {
+      if (ty > pageH - margin) break;
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(11.5);
+      doc.setTextColor(28, 31, 38);
+      doc.text(entry.label, margin, ty, { maxWidth: contentW - 50 });
+      const pageLabel = String(entry.page);
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(91, 96, 105);
+      doc.text(pageLabel, pageW - margin, ty, { align: 'right' });
+      const labelW = doc.getTextWidth(entry.label);
+      const pageLabelW = doc.getTextWidth(pageLabel);
+      drawDotLeader(doc, margin + labelW + 8, pageW - margin - pageLabelW - 8, ty - 3);
+      ty += 25;
+    }
+    ty += 14;
+  }
+
+  drawTocGroup('Report', tocEntries.filter((e) => e.group === 'report'));
+  drawTocGroup('Appendices', tocEntries.filter((e) => e.group === 'appendix'));
+
   doc.setPage(doc.internal.getNumberOfPages()); // don't leave the cursor on the ToC page
 
   const filename = `${(insp.structureName || 'inspection').replace(/[^a-z0-9]+/gi, '_')}_${(insp.date || '').slice(0, 10)}.pdf`;
   doc.save(filename);
   toast('Report saved');
+}
+
+// Draws a photo properly contained (never distorted — both dimensions recalculated
+// together, unlike the old per-row-grid code which capped height but left width fixed,
+// squashing tall photos) at roughly half-page height with real margins, plus an optional
+// caption underneath. Used for both element reference photos and finding photos.
+function drawPhotoBlock(doc, data, caption, y, { margin, contentW, pageH }) {
+  const maxH = (pageH - margin * 2) * 0.42;
+  let w = contentW, h = (data.h / data.w) * w;
+  if (h > maxH) { h = maxH; w = (data.w / data.h) * h; }
+  const captionLines = caption ? doc.splitTextToSize(caption, contentW) : [];
+  const captionH = captionLines.length ? captionLines.length * 12 + 6 : 0;
+  if (y + h + captionH > pageH - margin) { doc.addPage(); y = margin; }
+  const x = margin + (contentW - w) / 2;
+  doc.addImage(data.url, 'JPEG', x, y, w, h, undefined, 'FAST');
+  y += h + 8;
+  if (captionLines.length) {
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(9.5);
+    doc.setTextColor(91, 96, 105);
+    doc.text(captionLines, margin, y);
+    y += captionLines.length * 12;
+  }
+  y += 18;
+  return y;
 }
 
 function pageHeading(doc, text, y) {
@@ -729,6 +764,39 @@ function pageHeading(doc, text, y) {
   doc.setLineWidth(1.5);
   doc.line(48, y + 6, 48 + 36, y + 6);
   return y + 30;
+}
+
+// A more editorial page-title treatment — Times serif (one of jsPDF's built-in fonts, no
+// embedding needed), an optional italic subtitle, and a short red accent rule. Used for the
+// Table of Contents, Introduction/Summary, and Conclusion & Recommendations pages; other
+// pages keep the compact pageHeading() style above.
+function drawRefinedPageTitle(doc, title, subtitle, y, { margin, contentW }) {
+  doc.setFont('times', 'bold');
+  doc.setFontSize(29);
+  doc.setTextColor(28, 31, 38);
+  doc.text(title, margin, y, { maxWidth: contentW });
+  if (subtitle) {
+    y += 21;
+    doc.setFont('times', 'italic');
+    doc.setFontSize(12.5);
+    doc.setTextColor(91, 96, 105);
+    doc.text(subtitle, margin, y, { maxWidth: contentW });
+  }
+  y += 19;
+  doc.setFillColor(200, 30, 30);
+  doc.rect(margin, y, 50, 4, 'F');
+  return y + 28;
+}
+
+// Dot leader between a ToC label and its page number — small filled circles rather than a
+// dashed line, since doc.circle() is a stable, well-documented jsPDF primitive (unlike the
+// path-drawing APIs that caused problems previously).
+function drawDotLeader(doc, x1, x2, y) {
+  if (x2 <= x1) return;
+  doc.setFillColor(180, 184, 190);
+  for (let x = x1; x < x2; x += 4.5) {
+    doc.circle(x, y, 0.5, 'F');
+  }
 }
 
 // Draws text with manual letter-spacing (jsPDF's core text() has no tracking option).
