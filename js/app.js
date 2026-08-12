@@ -6,7 +6,7 @@ const EXTENT_LABELS = { A: 'None', B: 'Slight (≤5%)', C: 'Moderate (5–20%)',
 const PRIORITY_COLORS = { High: '#c81e1e', Medium: '#e0672e', Low: '#4f9d5c', Monitor: '#1e7dc8' };
 const CURRENCY_SYMBOLS = { USD: '$', GBP: '£', EUR: '€' };
 const INSPECTION_TYPES = ['Routine', 'Detailed', 'Special', 'Follow-up', 'GI Bridges'];
-const APP_VERSION = '1.8';
+const APP_VERSION = '2.0';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {

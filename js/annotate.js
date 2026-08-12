@@ -307,11 +307,28 @@ async function openAnnotator(photoId, onDone) {
   }
 
   function buildRulerSVG() {
-    const W = 600, H = 70, edgeY = 6, tickLen = 18;
+    const W = 600, H = 70, edgeY = 6, tickLen = 18, minorTickLen = 10, midTickLen = 14;
     const ticks = rulerTicks();
     let svg = `<svg width="100%" height="100%" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="display:block; overflow:visible;">`;
     svg += `<rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff" stroke="#1c1f26" stroke-width="1"/>`;
     svg += `<line x1="0" y1="${edgeY}" x2="${W}" y2="${edgeY}" stroke="#c81e1e" stroke-width="2.5"/>`;
+
+    // Intermediate (unlabeled) tick marks between each pair of major ticks — quarter marks,
+    // with the halfway mark drawn a little longer, so the ruler reads like a real one for
+    // fine measurement/alignment rather than only showing the widely-spaced major values.
+    if (ticks.length > 1) {
+      const stepFrac = ticks[1].frac - ticks[0].frac;
+      for (let i = 0; i < ticks.length - 1; i++) {
+        for (let s = 1; s <= 3; s++) {
+          const frac = ticks[i].frac + (stepFrac * s) / 4;
+          const x = frac * W;
+          if (x < 1 || x > W - 1) continue;
+          const len = s === 2 ? midTickLen : minorTickLen;
+          svg += `<line x1="${x}" y1="${edgeY}" x2="${x}" y2="${edgeY + len}" stroke="#1c1f26" stroke-width="1" opacity="0.55"/>`;
+        }
+      }
+    }
+
     ticks.forEach((t) => {
       const x = Math.max(1, Math.min(W - 1, t.frac * W));
       svg += `<line x1="${x}" y1="${edgeY}" x2="${x}" y2="${edgeY + tickLen}" stroke="#1c1f26" stroke-width="1.5"/>`;
@@ -340,7 +357,10 @@ async function openAnnotator(photoId, onDone) {
     rulerVisual.style.transformOrigin = '50% 0%';
     rulerVisual.style.transform = `translate(-50%, 0%) rotate(${deg}deg)`;
     rulerVisual.innerHTML = buildRulerSVG();
-    view.querySelector('#ruler-angle-readout').textContent = Math.round(deg) + '°';
+    // Displayed with the sign flipped from the raw screen-coordinate angle: on screen, Y
+    // increases downward, so tilting the ruler's right side up is naturally a negative
+    // angle — but the intuitive reading (up = positive) is the opposite of that.
+    view.querySelector('#ruler-angle-readout').textContent = Math.round(-deg) + '°';
   }
 
   function rulerEndPoint() {
@@ -502,6 +522,9 @@ async function openAnnotator(photoId, onDone) {
       m.innerHTML = targetMarkerSVG(color, size);
       stackEl.appendChild(m);
     }
+    // Point 1's pending position (before Accept) was previously never shown here — only
+    // point 2's was, so the first crosshair stayed invisible until you tapped ✓.
+    const p1 = calPoint1 || (calStep === 0 ? calPending : null);
     const p2 = calPoint2 || (calStep === 1 ? calPending : null);
 
     const lineSvg = view.querySelector('#cal-line-svg');
@@ -514,7 +537,7 @@ async function openAnnotator(photoId, onDone) {
       lineSvg.style.display = 'none';
     }
 
-    addTarget(calPoint1, '#4f9d5c');
+    addTarget(p1, calPoint1 ? '#4f9d5c' : '#e0a72e');
     addTarget(p2, calPoint2 ? '#4f9d5c' : '#e0a72e');
   }
 
@@ -627,6 +650,73 @@ async function openAnnotator(photoId, onDone) {
 
   function clearPreview() { previewCtx.clearRect(0, 0, cw, ch); }
 
+  // ---- Magnifier loupe: shown while a finger is actively placing a point (calibration,
+  // Measure, or Text tool) so the exact spot isn't hidden under the fingertip. Reads
+  // straight from the canvases' raw pixel buffers, so it's unaffected by any pinch-zoom
+  // CSS transform currently applied to the view — always a true fixed zoom of the image
+  // itself. Positioned in fixed screen coordinates, offset above or below the touch point
+  // (whichever keeps it clear of the hand), never as a child of the transformed stack. ----
+  let magnifierEl = null, magnifierCanvas = null, magnifierCtx = null;
+  const MAGNIFIER_SIZE = 150; // CSS px diameter on screen
+  const MAGNIFIER_ZOOM = 4;
+
+  function ensureMagnifier() {
+    if (magnifierEl) return;
+    magnifierEl = document.createElement('div');
+    magnifierEl.style.cssText = `position:fixed; width:${MAGNIFIER_SIZE}px; height:${MAGNIFIER_SIZE}px; border-radius:50%; border:3px solid #fff; box-shadow:0 4px 16px rgba(0,0,0,0.4); overflow:hidden; pointer-events:none; z-index:80; display:none;`;
+    magnifierCanvas = document.createElement('canvas');
+    magnifierCanvas.width = MAGNIFIER_SIZE * 2;
+    magnifierCanvas.height = MAGNIFIER_SIZE * 2;
+    magnifierCanvas.style.cssText = 'width:100%; height:100%;';
+    magnifierEl.appendChild(magnifierCanvas);
+    magnifierCtx = magnifierCanvas.getContext('2d');
+    document.body.appendChild(magnifierEl);
+  }
+
+  function showMagnifier(canvasPt, clientX, clientY) {
+    ensureMagnifier();
+    magnifierEl.style.display = 'block';
+
+    const offset = 90;
+    const showAbove = clientY > window.innerHeight * 0.5;
+    const top = showAbove ? clientY - offset - MAGNIFIER_SIZE : clientY + offset;
+    const left = clientX - MAGNIFIER_SIZE / 2;
+    magnifierEl.style.top = Math.max(8, top) + 'px';
+    magnifierEl.style.left = Math.max(8, Math.min(window.innerWidth - MAGNIFIER_SIZE - 8, left)) + 'px';
+
+    const outSize = magnifierCanvas.width;
+    const srcSize = outSize / MAGNIFIER_ZOOM;
+    const sx = canvasPt.x - srcSize / 2;
+    const sy = canvasPt.y - srcSize / 2;
+
+    magnifierCtx.fillStyle = '#f2f3f5';
+    magnifierCtx.fillRect(0, 0, outSize, outSize);
+    magnifierCtx.drawImage(photoCanvas, sx, sy, srcSize, srcSize, 0, 0, outSize, outSize);
+    magnifierCtx.drawImage(markCanvas, sx, sy, srcSize, srcSize, 0, 0, outSize, outSize);
+
+    const c = outSize / 2;
+    magnifierCtx.strokeStyle = '#c81e1e';
+    magnifierCtx.lineWidth = 2;
+    magnifierCtx.beginPath();
+    magnifierCtx.moveTo(c - 18, c); magnifierCtx.lineTo(c + 18, c);
+    magnifierCtx.moveTo(c, c - 18); magnifierCtx.lineTo(c, c + 18);
+    magnifierCtx.stroke();
+    magnifierCtx.beginPath();
+    magnifierCtx.arc(c, c, 9, 0, Math.PI * 2);
+    magnifierCtx.strokeStyle = '#ffffff';
+    magnifierCtx.lineWidth = 3;
+    magnifierCtx.stroke();
+    magnifierCtx.beginPath();
+    magnifierCtx.arc(c, c, 9, 0, Math.PI * 2);
+    magnifierCtx.strokeStyle = '#c81e1e';
+    magnifierCtx.lineWidth = 1.5;
+    magnifierCtx.stroke();
+  }
+
+  function hideMagnifier() {
+    if (magnifierEl) magnifierEl.style.display = 'none';
+  }
+
   function measureArrowSizing() {
     // Scale relative to the image's own resolution so arrowheads stay clearly visible
     // regardless of how large the source photo is, instead of a fixed small pixel count.
@@ -715,9 +805,11 @@ async function openAnnotator(photoId, onDone) {
     let tMin = Infinity;
     if (dx !== 0) tMin = Math.min(tMin, halfW / Math.abs(dx));
     if (dy !== 0) tMin = Math.min(tMin, halfH / Math.abs(dy));
-    const len = Math.hypot(dx, dy);
-    const ux = dx / len, uy = dy / len;
-    return { x: centerX + ux * tMin, y: centerY + uy * tMin };
+    // tMin scales the RAW (dx,dy) vector to reach the box edge — scaling the NORMALIZED
+    // direction by the same factor (as before) landed almost exactly back at the center,
+    // which is why the leader line was disappearing behind the text instead of stopping
+    // at the box boundary.
+    return { x: centerX + dx * tMin, y: centerY + dy * tMin };
   }
 
   function drawTextBoxOn(targetCtx, x, y, text, opts) {
@@ -764,13 +856,16 @@ async function openAnnotator(photoId, onDone) {
         <div class="sheet">
           <div class="sheet-handle"></div>
           <h2>Add text</h2>
-          <div class="field"><textarea id="f-text" placeholder="Type a label…" style="min-height:90px;"></textarea></div>
-          <div style="display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap; align-items:center;">
-            <button class="tool-btn" id="btn-bold" title="Bold" style="width:auto; padding:0 16px; font-weight:800; ${bold ? 'background:var(--ink);' : ''}">B</button>
-            <button class="tool-btn" id="btn-underline" title="Underline" style="width:auto; padding:0 16px; text-decoration:underline; ${underline ? 'background:var(--ink);' : ''}">U</button>
-            <button class="tool-btn" id="btn-size-down" title="Smaller" style="width:auto; padding:0 14px;">A−</button>
-            <span id="size-readout" class="muted" style="font-size:13px; min-width:26px; text-align:center;">${fontSize}</span>
-            <button class="tool-btn" id="btn-size-up" title="Bigger" style="width:auto; padding:0 14px;">A+</button>
+          <div class="field"><textarea id="f-text" placeholder="Type a label…" style="min-height:140px;"></textarea></div>
+          <div class="field">
+            <label>Formatting</label>
+            <div class="severity-picker">
+              <button class="chip" id="btn-bold" style="font-weight:800; flex:0 0 auto; min-width:52px;">B</button>
+              <button class="chip" id="btn-underline" style="text-decoration:underline; flex:0 0 auto; min-width:52px;">U</button>
+              <button class="chip" id="btn-size-down" style="flex:0 0 auto; min-width:52px;">A−</button>
+              <button class="chip" id="btn-size-up" style="flex:0 0 auto; min-width:52px;">A+</button>
+            </div>
+            <p class="hint" id="size-readout">Size: ${fontSize}px</p>
           </div>
           <button class="btn btn-primary btn-block" id="btn-place">Place text</button>
           <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
@@ -778,12 +873,21 @@ async function openAnnotator(photoId, onDone) {
       </div>
     `);
     presentOverlay(sheet);
+    const boldBtn = sheet.querySelector('#btn-bold');
+    const underlineBtn = sheet.querySelector('#btn-underline');
+    function syncToggle(btn, active) {
+      btn.classList.toggle('selected', active);
+      btn.style.background = active ? 'var(--ink)' : '';
+    }
+    syncToggle(boldBtn, bold);
+    syncToggle(underlineBtn, underline);
+
     sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
     sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
-    sheet.querySelector('#btn-bold').addEventListener('click', (e) => { bold = !bold; e.currentTarget.style.background = bold ? 'var(--ink)' : ''; });
-    sheet.querySelector('#btn-underline').addEventListener('click', (e) => { underline = !underline; e.currentTarget.style.background = underline ? 'var(--ink)' : ''; });
-    sheet.querySelector('#btn-size-down').addEventListener('click', () => { fontSize = Math.max(14, fontSize - 4); sheet.querySelector('#size-readout').textContent = fontSize; });
-    sheet.querySelector('#btn-size-up').addEventListener('click', () => { fontSize = Math.min(72, fontSize + 4); sheet.querySelector('#size-readout').textContent = fontSize; });
+    boldBtn.addEventListener('click', () => { bold = !bold; syncToggle(boldBtn, bold); });
+    underlineBtn.addEventListener('click', () => { underline = !underline; syncToggle(underlineBtn, underline); });
+    sheet.querySelector('#btn-size-down').addEventListener('click', () => { fontSize = Math.max(14, fontSize - 4); sheet.querySelector('#size-readout').textContent = `Size: ${fontSize}px`; });
+    sheet.querySelector('#btn-size-up').addEventListener('click', () => { fontSize = Math.min(72, fontSize + 4); sheet.querySelector('#size-readout').textContent = `Size: ${fontSize}px`; });
     sheet.querySelector('#btn-place').addEventListener('click', () => {
       const text = sheet.querySelector('#f-text').value.trim();
       if (!text) { toast('Enter some text'); return; }
@@ -804,8 +908,8 @@ async function openAnnotator(photoId, onDone) {
         const start = rectEdgeIntersection(box.centerX, box.centerY, box.w, box.h, arrowTarget.x, arrowTarget.y);
         const { headSize, lineWidth } = measureArrowSizing();
         ctx.save();
-        ctx.strokeStyle = '#1c1f26';
-        ctx.fillStyle = '#1c1f26';
+        ctx.strokeStyle = currentColor;
+        ctx.fillStyle = currentColor;
         ctx.lineWidth = lineWidth;
         ctx.beginPath();
         ctx.moveTo(start.x, start.y);
@@ -887,6 +991,7 @@ async function openAnnotator(photoId, onDone) {
         if (touches.size >= 2) { updatePinch(); e.preventDefault(); return; }
       }
       calPending = canvasPoint(e);
+      showMagnifier(calPending, e.clientX, e.clientY);
       renderCalMarkers();
       updateCalToolbar();
       e.preventDefault();
@@ -901,6 +1006,7 @@ async function openAnnotator(photoId, onDone) {
       }
       measureStart = canvasPoint(e);
       measurePointerId = e.pointerId;
+      showMagnifier(measureStart, e.clientX, e.clientY);
       e.preventDefault();
       return;
     }
@@ -913,6 +1019,7 @@ async function openAnnotator(photoId, onDone) {
       }
       textPressPoint = canvasPoint(e);
       textPointerId = e.pointerId;
+      showMagnifier(textPressPoint, e.clientX, e.clientY);
       e.preventDefault();
       return;
     }
@@ -949,6 +1056,7 @@ async function openAnnotator(photoId, onDone) {
       }
       if (e.pointerType === 'pen' || e.pointerType === 'mouse' || (e.pointerType === 'touch' && touches.size === 1)) {
         calPending = canvasPoint(e);
+        showMagnifier(calPending, e.clientX, e.clientY);
         renderCalMarkers();
       }
       e.preventDefault();
@@ -965,6 +1073,7 @@ async function openAnnotator(photoId, onDone) {
         const p = canvasPoint(e);
         clearPreview();
         drawMeasureArrowOn(previewCtx, measureStart.x, measureStart.y, p.x, p.y);
+        showMagnifier(p, e.clientX, e.clientY);
       }
       e.preventDefault();
       return;
@@ -990,6 +1099,7 @@ async function openAnnotator(photoId, onDone) {
           previewCtx.stroke();
           previewCtx.restore();
         }
+        showMagnifier(p, e.clientX, e.clientY);
       }
       e.preventDefault();
       return;
@@ -1014,6 +1124,7 @@ async function openAnnotator(photoId, onDone) {
   });
 
   function endStroke(e) {
+    hideMagnifier();
     if (e.pointerType === 'touch') {
       touches.delete(e.pointerId);
       if (touches.size < 2) pinchState = null;
@@ -1041,8 +1152,13 @@ async function openAnnotator(photoId, onDone) {
   markCanvas.addEventListener('pointercancel', endStroke);
   markCanvas.addEventListener('pointerleave', endStroke);
 
+  function removeMagnifierEl() {
+    if (magnifierEl) { magnifierEl.remove(); magnifierEl = null; magnifierCanvas = null; magnifierCtx = null; }
+  }
+
   view.querySelector('#btn-cancel').addEventListener('click', () => {
     window.removeEventListener('resize', fitCanvas);
+    removeMagnifierEl();
     view.remove();
   });
 
@@ -1056,6 +1172,7 @@ async function openAnnotator(photoId, onDone) {
     mergeCanvas.toBlob(async (blob) => {
       await DB.setAnnotatedBlob(photoId, blob);
       window.removeEventListener('resize', fitCanvas);
+      removeMagnifierEl();
       view.remove();
       if (onDone) onDone();
     }, 'image/jpeg', 0.92);
