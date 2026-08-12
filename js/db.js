@@ -2,7 +2,7 @@
 // Stores: inspections, sections, elements, findings, photos, templates
 
 const DB_NAME = 'siteInspectionDB';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 let dbPromise = null;
 
@@ -51,6 +51,13 @@ function openDB() {
         const photosStore2 = tx.objectStore('photos');
         if (!photosStore2.indexNames.contains('riskAssessmentId')) {
           photosStore2.createIndex('riskAssessmentId', 'riskAssessmentId', { unique: false });
+        }
+      }
+
+      if (oldVersion < 4) {
+        const photosStore3 = tx.objectStore('photos');
+        if (!photosStore3.indexNames.contains('appendixId')) {
+          photosStore3.createIndex('appendixId', 'appendixId', { unique: false });
         }
       }
     };
@@ -118,6 +125,8 @@ const DB = {
       companyName: data.companyName || '',
       companyAddress: data.companyAddress || '',
       currency: data.currency || 'USD',
+      locationMapMode: data.locationMapMode || 'auto', // 'auto' (generated) | 'custom' (uploaded) | 'off'
+      includeRiskAssessmentAppendix: !!data.includeRiskAssessmentAppendix,
       introduction: data.introduction || '',
       conclusion: data.conclusion || '',
       recommendations: data.recommendations || [],
@@ -147,6 +156,11 @@ const DB = {
     }
     const ra = await this.getRiskAssessment(id);
     if (ra) await this.deleteRiskAssessmentCascade(ra.id);
+    const insp = await this.get('inspections', id);
+    for (const a of ((insp && insp.appendices) || [])) {
+      const items = await this.listAppendixItems(a.id);
+      for (const item of items) await this.delete('photos', item.id);
+    }
     const inspPhotos = await this.getAllByIndex('photos', 'inspectionId', id);
     for (const p of inspPhotos) await this.delete('photos', p.id);
     await this.delete('inspections', id);
@@ -239,6 +253,10 @@ const DB = {
       worksDescription: data.worksDescription || '',
       costEstimate: data.costEstimate || '',
       notes: data.notes || '',
+      // For Safety Inspection: whether severity/extent/works are shown for this finding.
+      // Defaults false there (simple mode); irrelevant for other inspection types, which
+      // always show the full fields regardless of this flag.
+      showDetail: data.showDetail != null ? !!data.showDetail : false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -261,9 +279,9 @@ const DB = {
   },
 
   // --- Photos ---
-  // photo: { id, kind: 'cover'|'logo'|'element'|'finding'|'signature', findingId, elementId,
-  //          inspectionId, riskAssessmentId, role, originalBlob, annotatedBlob, order, createdAt }
-  async addPhoto({ kind = 'finding', findingId = null, elementId = null, inspectionId = null, riskAssessmentId = null, originalBlob, order = 0, role = null }) {
+  // photo: { id, kind: 'cover'|'logo'|'element'|'finding'|'signature'|'drawing'|'standalone'|'appendixItem', findingId, elementId,
+  //          inspectionId, riskAssessmentId, appendixId, role, originalBlob, annotatedBlob, order, createdAt }
+  async addPhoto({ kind = 'finding', findingId = null, elementId = null, inspectionId = null, riskAssessmentId = null, appendixId = null, originalBlob, order = 0, role = null, title = '' }) {
     const photo = {
       id: uid(),
       kind,
@@ -271,7 +289,9 @@ const DB = {
       elementId,
       inspectionId,
       riskAssessmentId,
+      appendixId,
       role,
+      title,
       originalBlob,
       annotatedBlob: null,
       order,
@@ -383,6 +403,60 @@ const DB = {
     const existing = await this.get('photos', id);
     if (!existing) throw new Error('Photo not found');
     return this.put('photos', { ...existing, ...patch });
+  },
+
+  // --- Appendices (named groups of PDFs/photos, appear after Conclusion & Recommendations) ---
+  // Lightweight metadata lives as an array on the inspection itself; items (photos / imported
+  // PDF pages) live in the photos store, same pattern as Drawings, linked via appendixId.
+  async listAppendices(inspectionId) {
+    const insp = await this.get('inspections', inspectionId);
+    return ((insp && insp.appendices) || []).slice().sort((a, b) => a.order - b.order);
+  },
+  async addAppendix(inspectionId, name) {
+    const insp = await this.get('inspections', inspectionId);
+    const appendices = [...((insp && insp.appendices) || [])];
+    const appendix = { id: uid(), name: name || 'Untitled appendix', order: appendices.length };
+    appendices.push(appendix);
+    await this.updateInspection(inspectionId, { appendices });
+    return appendix;
+  },
+  async updateAppendix(inspectionId, appendixId, patch) {
+    const insp = await this.get('inspections', inspectionId);
+    const appendices = ((insp && insp.appendices) || []).map((a) => (a.id === appendixId ? { ...a, ...patch } : a));
+    await this.updateInspection(inspectionId, { appendices });
+  },
+  async deleteAppendixCascade(inspectionId, appendixId) {
+    const insp = await this.get('inspections', inspectionId);
+    const appendices = ((insp && insp.appendices) || []).filter((a) => a.id !== appendixId);
+    await this.updateInspection(inspectionId, { appendices });
+    const items = await this.listAppendixItems(appendixId);
+    for (const item of items) await this.delete('photos', item.id);
+  },
+  async listAppendixItems(appendixId) {
+    const all = await this.getAllByIndex('photos', 'appendixId', appendixId);
+    return all.sort((a, b) => a.order - b.order);
+  },
+  async addAppendixItem(appendixId, blob, title) {
+    const existing = await this.listAppendixItems(appendixId);
+    return this.addPhoto({ kind: 'appendixItem', appendixId, originalBlob: blob, order: existing.length, title: title || '' });
+  },
+
+  // --- Custom location map image (alternative to the auto-generated map) ---
+  async getCustomLocationMap(inspectionId) {
+    const all = await this.getAllByIndex('photos', 'inspectionId', inspectionId);
+    return all.find((p) => p.kind === 'locationMapCustom') || null;
+  },
+  async setCustomLocationMap(inspectionId, blob) {
+    const existing = await this.getCustomLocationMap(inspectionId);
+    if (existing) {
+      existing.originalBlob = blob;
+      return this.put('photos', existing);
+    }
+    return this.addPhoto({ kind: 'locationMapCustom', inspectionId, originalBlob: blob });
+  },
+  async removeCustomLocationMap(inspectionId) {
+    const existing = await this.getCustomLocationMap(inspectionId);
+    if (existing) await this.delete('photos', existing.id);
   },
 
   // --- Standalone Scale/Annotate sessions (not tied to any inspection) ---

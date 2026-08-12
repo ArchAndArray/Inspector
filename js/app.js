@@ -5,8 +5,8 @@ const SEVERITY_LABELS = { 1: 'As New', 2: 'Minor', 3: 'Moderate', 4: 'Severe', 5
 const EXTENT_LABELS = { A: 'None', B: 'Slight (≤5%)', C: 'Moderate (5–20%)', D: 'Wide (20–50%)', E: 'Extensive (>50%)' };
 const PRIORITY_COLORS = { High: '#c81e1e', Medium: '#e0672e', Low: '#4f9d5c', Monitor: '#1e7dc8' };
 const CURRENCY_SYMBOLS = { USD: '$', GBP: '£', EUR: '€' };
-const INSPECTION_TYPES = ['Routine', 'Detailed', 'Special', 'Follow-up', 'GI Bridges'];
-const APP_VERSION = '2.0';
+const INSPECTION_TYPES = ['Safety Inspection', 'Detailed', 'Special', 'Follow-up', 'GI Bridges'];
+const APP_VERSION = '2.1';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -329,6 +329,7 @@ async function route() {
     else if (p[0] === 'inspection' && p[1] && p[2] === 'element' && p[3]) await renderElement(p[1], p[3]);
     else if (p[0] === 'inspection' && p[1] && p[2] === 'risk-assessment') await renderRiskAssessment(p[1]);
     else if (p[0] === 'inspection' && p[1] && p[2] === 'drawings') await renderDrawings(p[1]);
+    else if (p[0] === 'inspection' && p[1] && p[2] === 'appendix' && p[3]) await renderAppendix(p[1], p[3]);
     else if (p[0] === 'inspection' && p[1] && !p[2]) await renderInspection(p[1]);
     else if (p[0] === 'templates') await renderTemplates();
     else if (p[0] === 'scale-annotate') await renderScaleAnnotate();
@@ -763,6 +764,8 @@ async function openReportInfoSheet(inspectionId) {
   const insp = await DB.get('inspections', inspectionId);
   let companyLogo = await DB.getLogoByRole(inspectionId, 'company');
   let clientLogo = await DB.getLogoByRole(inspectionId, 'client');
+  let customMapImage = await DB.getCustomLocationMap(inspectionId);
+  let appendices = await DB.listAppendices(inspectionId);
 
   const sheet = el(`
     <div class="sheet-backdrop">
@@ -801,6 +804,25 @@ async function openReportInfoSheet(inspectionId) {
           <button class="chip ${insp.coverStyle === 'archarray' ? 'selected' : ''}" data-style="archarray" style="${insp.coverStyle === 'archarray' ? 'background:var(--ink);' : ''}">Arch&amp;Array</button>
         </div>
 
+        <div class="section-header" style="margin-top:22px;"><h2>Location Map</h2></div>
+        <div class="severity-picker" id="map-mode-picker">
+          <button class="chip ${(!insp.locationMapMode || insp.locationMapMode === 'auto') ? 'selected' : ''}" data-mapmode="auto" style="${(!insp.locationMapMode || insp.locationMapMode === 'auto') ? 'background:var(--ink);' : ''}">Auto map</button>
+          <button class="chip ${insp.locationMapMode === 'custom' ? 'selected' : ''}" data-mapmode="custom" style="${insp.locationMapMode === 'custom' ? 'background:var(--ink);' : ''}">Upload image</button>
+          <button class="chip ${insp.locationMapMode === 'off' ? 'selected' : ''}" data-mapmode="off" style="${insp.locationMapMode === 'off' ? 'background:var(--ink);' : ''}">Off</button>
+        </div>
+        <div id="custom-map-area" class="${insp.locationMapMode === 'custom' ? '' : 'hidden'}" style="margin-top:10px;">
+          <div class="photo-grid" id="custom-map-grid"></div>
+        </div>
+        <input type="file" id="map-file-input" accept="image/*" style="display:none;">
+        <p class="hint">Placed after the Introduction, sized under half a page. Auto mode needs internet at export time; if the structure has no coordinates set, the map section is skipped with a warning.</p>
+
+        <div class="section-header" style="margin-top:22px;"><h2>Appendices</h2><button class="small-btn" id="btn-add-appendix">＋ Add</button></div>
+        <div id="appendix-list"></div>
+        <div class="checkbox-row" style="margin-top:6px;">
+          <input type="checkbox" id="f-include-ra-appendix" ${insp.includeRiskAssessmentAppendix ? 'checked' : ''}>
+          <label for="f-include-ra-appendix">Include Risk Assessment as an appendix (always last)</label>
+        </div>
+
         <div class="section-header" style="margin-top:22px;"><h2>Report content</h2></div>
         <button class="btn btn-secondary btn-block" id="btn-intro">📝 Introduction / Summary${insp.introduction ? ' — added' : ''}</button>
         <button class="btn btn-secondary btn-block" id="btn-conclusion" style="margin-top:10px;">📋 Conclusion &amp; Recommendations${(insp.conclusion || (insp.recommendations && insp.recommendations.length)) ? ' — added' : ''}</button>
@@ -818,6 +840,7 @@ async function openReportInfoSheet(inspectionId) {
   async function persistFields() {
     const styleBtn = sheet.querySelector('#cover-style-picker .chip.selected');
     const currencyBtn = sheet.querySelector('#currency-picker .chip.selected');
+    const mapModeBtn = sheet.querySelector('#map-mode-picker .chip.selected');
     await DB.updateInspection(inspectionId, {
       companyName: sheet.querySelector('#f-companyName').value.trim(),
       companyAddress: sheet.querySelector('#f-companyAddress').value.trim(),
@@ -825,7 +848,9 @@ async function openReportInfoSheet(inspectionId) {
       reference: sheet.querySelector('#f-reference').value.trim(),
       date: sheet.querySelector('#f-date').value,
       currency: currencyBtn ? currencyBtn.dataset.currency : 'USD',
-      coverStyle: styleBtn ? styleBtn.dataset.style : 'basic'
+      coverStyle: styleBtn ? styleBtn.dataset.style : 'basic',
+      locationMapMode: mapModeBtn ? mapModeBtn.dataset.mapmode : 'auto',
+      includeRiskAssessmentAppendix: sheet.querySelector('#f-include-ra-appendix').checked
     });
   }
 
@@ -853,6 +878,89 @@ async function openReportInfoSheet(inspectionId) {
       sheet.querySelectorAll('#currency-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
       chip.classList.add('selected');
       chip.style.background = 'var(--ink)';
+    });
+  });
+
+  sheet.querySelectorAll('#map-mode-picker .chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      sheet.querySelectorAll('#map-mode-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
+      chip.classList.add('selected');
+      chip.style.background = 'var(--ink)';
+      sheet.querySelector('#custom-map-area').classList.toggle('hidden', chip.dataset.mapmode !== 'custom');
+    });
+  });
+
+  function renderCustomMapGrid() {
+    const grid = sheet.querySelector('#custom-map-grid');
+    grid.innerHTML = customMapImage
+      ? `<div class="photo-thumb" style="position:relative; width:96px; height:96px;">
+           <img src="${blobUrl(customMapImage.originalBlob)}">
+           <button class="icon-btn" id="btn-remove-custom-map" style="position:absolute; top:4px; right:4px; width:24px; height:24px; background:rgba(28,31,38,0.75); font-size:13px;">✕</button>
+         </div>`
+      : `<div class="photo-add" id="btn-add-custom-map" style="width:96px; height:96px;">＋</div>`;
+    const addTile = grid.querySelector('#btn-add-custom-map');
+    if (addTile) addTile.addEventListener('click', () => sheet.querySelector('#map-file-input').click());
+    const removeBtn = grid.querySelector('#btn-remove-custom-map');
+    if (removeBtn) removeBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await DB.removeCustomLocationMap(inspectionId);
+      customMapImage = null;
+      renderCustomMapGrid();
+    });
+  }
+  renderCustomMapGrid();
+  sheet.querySelector('#map-file-input').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const normalized = await normalizeImageFile(file, 1600);
+    customMapImage = await DB.setCustomLocationMap(inspectionId, normalized);
+    renderCustomMapGrid();
+    e.target.value = '';
+  });
+
+  function renderAppendixList() {
+    const list = sheet.querySelector('#appendix-list');
+    if (!appendices.length) {
+      list.innerHTML = `<p class="muted" style="font-size:13px; padding:0 2px;">No appendices yet.</p>`;
+      return;
+    }
+    list.innerHTML = appendices.map((a) => `
+      <div class="tpl-row" data-appendix="${a.id}" style="cursor:pointer;">
+        <span>${esc(a.name)}</span>
+        <span class="chevron">›</span>
+      </div>
+    `).join('');
+    list.querySelectorAll('[data-appendix]').forEach((row) => {
+      row.addEventListener('click', async () => {
+        await persistFields();
+        sheet.remove();
+        navigate(`#/inspection/${inspectionId}/appendix/${row.dataset.appendix}`);
+      });
+    });
+  }
+  renderAppendixList();
+  sheet.querySelector('#btn-add-appendix').addEventListener('click', () => {
+    const nameSheet = el(`
+      <div class="sheet-backdrop">
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <h2>New appendix</h2>
+          <div class="field"><label>Name</label><input type="text" id="f-appendix-name" placeholder="e.g. Appendix A — Site Photos"></div>
+          <button class="btn btn-primary btn-block" id="btn-save-appendix">Add</button>
+          <button class="btn btn-ghost btn-block" id="btn-cancel-appendix">Cancel</button>
+        </div>
+      </div>
+    `);
+    presentOverlay(nameSheet);
+    nameSheet.addEventListener('click', (e) => { if (e.target === nameSheet) nameSheet.remove(); });
+    nameSheet.querySelector('#btn-cancel-appendix').addEventListener('click', () => nameSheet.remove());
+    nameSheet.querySelector('#btn-save-appendix').addEventListener('click', async () => {
+      const name = nameSheet.querySelector('#f-appendix-name').value.trim();
+      if (!name) { toast('Enter a name'); return; }
+      const appendix = await DB.addAppendix(inspectionId, name);
+      appendices.push(appendix);
+      nameSheet.remove();
+      renderAppendixList();
     });
   });
 
@@ -2077,6 +2185,172 @@ async function openPdfPagePickerSheet(pdfDoc, filename, onImportPage, onAllImpor
   });
 }
 
+async function renderAppendix(inspectionId, appendixId) {
+  const insp = await DB.get('inspections', inspectionId);
+  if (!insp) { navigate('#/'); return; }
+  const appendices = await DB.listAppendices(inspectionId);
+  const appendix = appendices.find((a) => a.id === appendixId);
+  if (!appendix) { navigate(`#/inspection/${inspectionId}`); return; }
+  let items = await DB.listAppendixItems(appendixId);
+
+  appEl.innerHTML = `
+    <div class="topbar">
+      <button class="icon-btn" id="btn-back">‹</button>
+      <div style="flex:1; min-width:0;">
+        <h1 style="font-size:17px;">${esc(appendix.name)}</h1>
+        <span class="sub">${esc(insp.structureName)}</span>
+      </div>
+      <button class="text-btn" id="btn-rename-appendix">Edit</button>
+    </div>
+    <div class="content" id="appendix-item-list"></div>
+    <button class="fab" id="btn-add-item">＋</button>
+  `;
+  document.getElementById('btn-back').addEventListener('click', () => navigate(`#/inspection/${inspectionId}`));
+  document.getElementById('btn-rename-appendix').addEventListener('click', () => openEditAppendixSheet(inspectionId, appendix));
+  document.getElementById('btn-add-item').addEventListener('click', () => openAddAppendixItemSheet(inspectionId, appendixId, () => renderAppendix(inspectionId, appendixId)));
+
+  function renderList() {
+    const list = document.getElementById('appendix-item-list');
+    if (!items.length) {
+      list.innerHTML = `
+        <div class="empty-state">
+          <div class="glyph">📎</div>
+          <h3>No items yet</h3>
+          <p>Add photos or import a PDF (page by page) into this appendix.</p>
+        </div>`;
+      return;
+    }
+    list.innerHTML = items.map((it) => `
+      <div class="list-item" data-item="${it.id}">
+        <div class="photo-thumb" style="width:56px; height:56px; flex-shrink:0; margin-right:12px;">
+          <img src="${blobUrl(it.annotatedBlob || it.originalBlob)}">
+          ${it.annotatedBlob ? '<div class="annotated-dot"></div>' : ''}
+        </div>
+        <div class="meta"><h3>${esc(it.title) || 'Untitled'}</h3></div>
+        <span class="chevron">›</span>
+      </div>
+    `).join('');
+    list.querySelectorAll('[data-item]').forEach((row) => {
+      row.addEventListener('click', () => {
+        const it = items.find((x) => x.id === row.dataset.item);
+        openAppendixItemDetailSheet(it, {
+          onChanged: async () => { items = await DB.listAppendixItems(appendixId); renderList(); }
+        });
+      });
+    });
+  }
+  renderList();
+}
+
+function openEditAppendixSheet(inspectionId, appendix) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Edit appendix</h2>
+        <div class="field"><label>Name</label><input type="text" id="f-name" value="${esc(appendix.name)}"></div>
+        <button class="btn btn-primary btn-block" id="btn-save">Save</button>
+        <button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:8px;">Delete appendix</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-save').addEventListener('click', async () => {
+    const name = sheet.querySelector('#f-name').value.trim();
+    if (!name) { toast('Enter a name'); return; }
+    await DB.updateAppendix(inspectionId, appendix.id, { name });
+    sheet.remove();
+    renderAppendix(inspectionId, appendix.id);
+  });
+  sheet.querySelector('#btn-delete').addEventListener('click', async () => {
+    if (!confirm('Delete this appendix and everything in it?')) return;
+    await DB.deleteAppendixCascade(inspectionId, appendix.id);
+    sheet.remove();
+    navigate(`#/inspection/${inspectionId}`);
+  });
+}
+
+function openAddAppendixItemSheet(inspectionId, appendixId, onAdded) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Add to appendix</h2>
+        <button class="btn btn-primary btn-block" id="btn-camera">📷 Take photo</button>
+        <button class="btn btn-secondary btn-block" id="btn-library" style="margin-top:10px;">🖼 Choose from library</button>
+        <button class="btn btn-secondary btn-block" id="btn-pdf" style="margin-top:10px;">📄 Import PDF</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel" style="margin-top:16px;">Cancel</button>
+        <input type="file" id="ai-camera-input" accept="image/*" capture="environment" style="display:none;">
+        <input type="file" id="ai-library-input" accept="image/*" multiple style="display:none;">
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+
+  async function handleImageFiles(fileList) {
+    sheet.remove();
+    for (const file of Array.from(fileList)) {
+      const normalized = await normalizeImageFile(file);
+      await DB.addAppendixItem(appendixId, normalized, file.name.replace(/\.[a-z0-9]+$/i, ''));
+    }
+    onAdded();
+  }
+  sheet.querySelector('#btn-camera').addEventListener('click', () => sheet.querySelector('#ai-camera-input').click());
+  sheet.querySelector('#btn-library').addEventListener('click', () => sheet.querySelector('#ai-library-input').click());
+  sheet.querySelector('#ai-camera-input').addEventListener('change', (e) => { if (e.target.files.length) handleImageFiles(e.target.files); });
+  sheet.querySelector('#ai-library-input').addEventListener('change', (e) => { if (e.target.files.length) handleImageFiles(e.target.files); });
+
+  sheet.querySelector('#btn-pdf').addEventListener('click', () => {
+    sheet.remove();
+    openPdfImportFlow(
+      (blob, title) => DB.addAppendixItem(appendixId, blob, title),
+      () => { toast('Import complete'); onAdded(); }
+    );
+  });
+}
+
+function openAppendixItemDetailSheet(item, { onChanged }) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>${esc(item.title) || 'Item'}</h2>
+        <div class="photo-thumb" style="width:100%; height:220px; margin-bottom:16px;">
+          <img src="${blobUrl(item.annotatedBlob || item.originalBlob)}" style="object-fit:contain; background:#fafafa;">
+        </div>
+        <div class="field"><label>Title</label><input type="text" id="f-title" value="${esc(item.title)}"></div>
+        <button class="btn btn-primary btn-block" id="btn-annotate">✏️ Edit — draw with Pencil</button>
+        <button class="btn btn-secondary btn-block" id="btn-save" style="margin-top:10px;">Save</button>
+        <button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:10px;">Delete item</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Close</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-annotate').addEventListener('click', async () => {
+    sheet.remove();
+    await openAnnotator(item.id, () => onChanged());
+  });
+  sheet.querySelector('#btn-save').addEventListener('click', async () => {
+    await DB.updatePhoto(item.id, { title: sheet.querySelector('#f-title').value.trim() });
+    sheet.remove();
+    onChanged();
+  });
+  sheet.querySelector('#btn-delete').addEventListener('click', async () => {
+    if (!confirm('Delete this item?')) return;
+    await DB.delete('photos', item.id);
+    sheet.remove();
+    onChanged();
+  });
+}
+
 // ---------- SCALE / ANNOTATE (standalone tool, not tied to any inspection) ----------
 
 function downloadBlob(blob, filename) {
@@ -2307,7 +2581,12 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
   }
   let photos = await DB.listPhotosForFinding(findingId);
   const isGiBridges = insp && insp.inspectionType === 'GI Bridges';
+  const isSafetyInspection = insp && insp.inspectionType === 'Safety Inspection';
   const elMeta = elementSublineParts(elmt, isGiBridges).join('   ·   ');
+  // Safety Inspection: severity/extent/works are hidden by default per finding, behind a
+  // toggle — most findings stay simple (notes/priority/photos only), and it's switched on
+  // individually for the rare finding that needs a rating.
+  const showDetailFields = !isSafetyInspection || finding.showDetail;
 
   const view = el(`
     <div class="fullscreen">
@@ -2326,22 +2605,34 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
           ${elMeta ? `<p class="muted" style="margin:4px 0 0; font-size:13px;">${esc(elMeta)}</p>` : ''}
         </div>
 
-        <div class="section-header" style="margin-top:0;"><h2>Severity</h2></div>
-        <div class="severity-picker" id="severity-picker">
-          ${[1, 2, 3, 4, 5].map((s) => `
-            <button class="chip ${finding.severity === s ? 'selected' : ''}" data-sev="${s}" style="${finding.severity === s ? `background:var(--sev-${s});` : ''}">
-              ${s}<span class="chip-label">${SEVERITY_LABELS[s]}</span>
-            </button>
-          `).join('')}
-        </div>
+        <div class="section-header" style="margin-top:0;"><h2>Notes</h2></div>
+        <div class="field"><textarea id="f-notes" placeholder="Describe the finding…">${esc(finding.notes)}</textarea></div>
 
-        <div class="section-header"><h2>Extent</h2></div>
-        <div class="extent-picker" id="extent-picker">
-          ${['A', 'B', 'C', 'D', 'E'].map((x) => `
-            <button class="chip ${finding.extent === x ? 'selected' : ''}" data-ext="${x}" style="${finding.extent === x ? 'background:var(--ink);' : ''}">
-              ${x}<span class="chip-label">${EXTENT_LABELS[x]}</span>
-            </button>
-          `).join('')}
+        ${isSafetyInspection ? `
+        <div class="checkbox-row">
+          <input type="checkbox" id="f-show-detail" ${finding.showDetail ? 'checked' : ''}>
+          <label for="f-show-detail">Add severity, extent &amp; works required</label>
+        </div>
+        ` : ''}
+
+        <div id="detail-fields" class="${showDetailFields ? '' : 'hidden'}">
+          <div class="section-header" style="margin-top:0;"><h2>Severity</h2></div>
+          <div class="severity-picker" id="severity-picker">
+            ${[1, 2, 3, 4, 5].map((s) => `
+              <button class="chip ${finding.severity === s ? 'selected' : ''}" data-sev="${s}" style="${finding.severity === s ? `background:var(--sev-${s});` : ''}">
+                ${s}<span class="chip-label">${SEVERITY_LABELS[s]}</span>
+              </button>
+            `).join('')}
+          </div>
+
+          <div class="section-header"><h2>Extent</h2></div>
+          <div class="extent-picker" id="extent-picker">
+            ${['A', 'B', 'C', 'D', 'E'].map((x) => `
+              <button class="chip ${finding.extent === x ? 'selected' : ''}" data-ext="${x}" style="${finding.extent === x ? 'background:var(--ink);' : ''}">
+                ${x}<span class="chip-label">${EXTENT_LABELS[x]}</span>
+              </button>
+            `).join('')}
+          </div>
         </div>
 
         <div class="section-header"><h2>Priority</h2></div>
@@ -2353,24 +2644,23 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
           `).join('')}
         </div>
 
-        <div class="section-header"><h2>Works</h2></div>
-        <div class="checkbox-row">
-          <input type="checkbox" id="f-works-required" ${finding.worksRequired ? 'checked' : ''}>
-          <label for="f-works-required">Works required</label>
-        </div>
-        <div id="works-detail" class="${finding.worksRequired ? '' : 'hidden'}">
-          <div class="field"><label>Works needed</label><textarea id="f-works-desc" placeholder="Describe the works required…">${esc(finding.worksDescription)}</textarea></div>
-          <div class="field">
-            <label>Cost estimate</label>
-            <div class="link-row">
-              <span style="font-size:18px; font-weight:700; color:var(--ink-soft); margin-right:8px;">${currencySymbol}</span>
-              <input type="text" id="f-cost" inputmode="decimal" value="${esc(String(finding.costEstimate || '').replace(/^[\$£€\s]+/, ''))}" placeholder="e.g. 12,500" style="flex:1;">
+        <div id="works-section" class="${showDetailFields ? '' : 'hidden'}">
+          <div class="section-header"><h2>Works</h2></div>
+          <div class="checkbox-row">
+            <input type="checkbox" id="f-works-required" ${finding.worksRequired ? 'checked' : ''}>
+            <label for="f-works-required">Works required</label>
+          </div>
+          <div id="works-detail" class="${finding.worksRequired ? '' : 'hidden'}">
+            <div class="field"><label>Works needed</label><textarea id="f-works-desc" placeholder="Describe the works required…">${esc(finding.worksDescription)}</textarea></div>
+            <div class="field">
+              <label>Cost estimate</label>
+              <div class="link-row">
+                <span style="font-size:18px; font-weight:700; color:var(--ink-soft); margin-right:8px;">${currencySymbol}</span>
+                <input type="text" id="f-cost" inputmode="decimal" value="${esc(String(finding.costEstimate || '').replace(/^[\$£€\s]+/, ''))}" placeholder="e.g. 12,500" style="flex:1;">
+              </div>
             </div>
           </div>
         </div>
-
-        <div class="section-header"><h2>Notes</h2></div>
-        <div class="field"><textarea id="f-notes" placeholder="Describe the finding…">${esc(finding.notes)}</textarea></div>
 
         <div class="section-header"><h2>Photos</h2></div>
         <div class="photo-grid" id="photo-grid"></div>
@@ -2395,14 +2685,18 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
     const extBtn = view.querySelector('.chip.selected[data-ext]');
     const priBtn = view.querySelector('.chip.selected[data-pri]');
     const worksRequired = view.querySelector('#f-works-required').checked;
+    const showDetailCheckbox = view.querySelector('#f-show-detail');
+    const showDetail = showDetailCheckbox ? showDetailCheckbox.checked : true;
+    const detailVisible = !isSafetyInspection || showDetail;
     await DB.updateFinding(findingId, {
-      severity: sevBtn ? Number(sevBtn.dataset.sev) : null,
-      extent: extBtn ? extBtn.dataset.ext : null,
+      severity: detailVisible && sevBtn ? Number(sevBtn.dataset.sev) : null,
+      extent: detailVisible && extBtn ? extBtn.dataset.ext : null,
       priority: priBtn ? priBtn.dataset.pri : null,
-      worksRequired,
-      worksDescription: worksRequired ? view.querySelector('#f-works-desc').value.trim() : '',
-      costEstimate: worksRequired ? view.querySelector('#f-cost').value.trim() : '',
-      notes: view.querySelector('#f-notes').value.trim()
+      worksRequired: detailVisible ? worksRequired : false,
+      worksDescription: detailVisible && worksRequired ? view.querySelector('#f-works-desc').value.trim() : '',
+      costEstimate: detailVisible && worksRequired ? view.querySelector('#f-cost').value.trim() : '',
+      notes: view.querySelector('#f-notes').value.trim(),
+      showDetail: isSafetyInspection ? showDetail : finding.showDetail
     });
     if (showStatus) flashSaveStatus('Saved');
   }
@@ -2419,6 +2713,15 @@ async function openFindingEditor(inspectionId, elementId, findingId) {
     field.addEventListener('input', debouncedAutosave);
     field.addEventListener('blur', () => persistFields(false));
   });
+
+  const showDetailCheckbox = view.querySelector('#f-show-detail');
+  if (showDetailCheckbox) {
+    showDetailCheckbox.addEventListener('change', (e) => {
+      view.querySelector('#detail-fields').classList.toggle('hidden', !e.target.checked);
+      view.querySelector('#works-section').classList.toggle('hidden', !e.target.checked);
+      persistFields(false);
+    });
+  }
 
   view.querySelector('#f-works-required').addEventListener('change', (e) => {
     view.querySelector('#works-detail').classList.toggle('hidden', !e.target.checked);

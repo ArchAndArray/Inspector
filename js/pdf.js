@@ -50,6 +50,122 @@ async function loadNormalizedImage(blob) {
   }
 }
 
+// ---------- Location Map (auto-generated from OpenStreetMap tiles, no API key needed) ----------
+//
+// There's no free "static map image" service usable without an account, so this fetches
+// the raw OSM tiles directly (the same source the in-app map picker already uses) and
+// composites them into one image itself, with a pin at the exact structure location.
+//
+// The target scale (1:2500) is genuinely an approximation: true cartographic scale depends
+// on both latitude (Web Mercator distorts by latitude) and the physical print size of the
+// image, so the zoom level is calculated to land close to 1:2500 for THIS image's actual
+// placement size in the report — not a universal guarantee at every location on Earth.
+function lonToTileX(lon, zoom) { return ((lon + 180) / 360) * Math.pow(2, zoom); }
+function latToTileY(lat, zoom) {
+  const latRad = (lat * Math.PI) / 180;
+  return ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * Math.pow(2, zoom);
+}
+function computeZoomForScale(lat, targetScale, placementWidthPt, pxW) {
+  const dpi = pxW / (placementWidthPt / 72);
+  const metersPerPixelOnPaper = 0.0254 / dpi;
+  const targetGroundResolution = metersPerPixelOnPaper * targetScale;
+  const latRad = (lat * Math.PI) / 180;
+  const zoomFloat = Math.log2((156543.03392 * Math.cos(latRad)) / targetGroundResolution);
+  return Math.max(1, Math.min(19, Math.round(zoomFloat)));
+}
+
+async function generateLocationMapImage(lat, lng, placementWidthPt, pxW, pxH) {
+  const zoom = computeZoomForScale(lat, 2500, placementWidthPt, pxW);
+  const TILE_SIZE = 256;
+  const centerPxX = lonToTileX(lng, zoom) * TILE_SIZE;
+  const centerPxY = latToTileY(lat, zoom) * TILE_SIZE;
+  const originWorldX = centerPxX - pxW / 2;
+  const originWorldY = centerPxY - pxH / 2;
+  const firstTileX = Math.floor(originWorldX / TILE_SIZE);
+  const firstTileY = Math.floor(originWorldY / TILE_SIZE);
+  const lastTileX = Math.floor((originWorldX + pxW) / TILE_SIZE);
+  const lastTileY = Math.floor((originWorldY + pxH) / TILE_SIZE);
+  const numTiles = Math.pow(2, zoom);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = pxW; canvas.height = pxH;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#e8e8e8';
+  ctx.fillRect(0, 0, pxW, pxH);
+
+  const loads = [];
+  for (let tx = firstTileX; tx <= lastTileX; tx++) {
+    for (let ty = firstTileY; ty <= lastTileY; ty++) {
+      if (ty < 0 || ty >= numTiles) continue;
+      const wrappedX = ((tx % numTiles) + numTiles) % numTiles;
+      const destX = tx * TILE_SIZE - originWorldX;
+      const destY = ty * TILE_SIZE - originWorldY;
+      const url = `https://tile.openstreetmap.org/${zoom}/${wrappedX}/${ty}.png`;
+      loads.push(new Promise((resolve) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => { try { ctx.drawImage(img, destX, destY); } catch (e) {} resolve(); };
+        img.onerror = () => resolve(); // a missing tile just leaves the grey background showing through
+        img.src = url;
+      }));
+    }
+  }
+  await Promise.all(loads);
+
+  // Pin marker at the exact center — that pixel is precisely the structure's coordinates,
+  // since the tile fetch was centered on them.
+  const cx = pxW / 2, cy = pxH / 2;
+  ctx.fillStyle = '#c81e1e';
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx - 9, cy - 22);
+  ctx.lineTo(cx + 9, cy - 22);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(cx, cy - 28, 11, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+
+  // Throws SecurityError if any tile load left the canvas cross-origin-tainted — caught by
+  // the caller, which treats it the same as any other map-generation failure (skip + warn).
+  return canvas.toDataURL('image/jpeg', 0.85);
+}
+
+async function buildLocationMapForReport(insp, { contentW }) {
+  const MAP_PX_W = 900, MAP_PX_H = 340;
+  const placementW = contentW;
+  const placementH = contentW * (MAP_PX_H / MAP_PX_W);
+
+  if (insp.locationMapMode === 'custom') {
+    try {
+      const custom = await DB.getCustomLocationMap(insp.id);
+      if (!custom) return null;
+      const data = await loadNormalizedImage(custom.originalBlob);
+      let w = placementW, h = (data.h / data.w) * w;
+      if (h > placementH) { h = placementH; w = (data.w / data.h) * h; }
+      return { url: data.url, w, h };
+    } catch (err) {
+      console.error('Custom map load failed', err);
+      return null;
+    }
+  }
+
+  const lat = insp.location && insp.location.lat;
+  const lng = insp.location && insp.location.lng;
+  if (lat == null || lng == null) return null;
+
+  try {
+    const url = await generateLocationMapImage(lat, lng, placementW, MAP_PX_W, MAP_PX_H);
+    return { url, w: placementW, h: placementH };
+  } catch (err) {
+    console.error('Location map generation failed', err);
+    return null;
+  }
+}
+
 async function exportInspectionPDF(inspectionId) {
   if (!window.jspdf) {
     toast('PDF library not loaded. Connect to the internet once to cache it, then try again.');
@@ -121,9 +237,16 @@ async function buildAndSaveInspectionPDF(inspectionId) {
     drawBasicCover(doc, { insp, coverData, logoData, pageW, pageH, margin, contentW });
   }
 
+  // ---------- Table of Contents (reserved blank page; backfilled at the very end once
+  // every section's actual page number is known — the standard two-pass jsPDF technique) ----------
+  doc.addPage();
+  const tocPageNum = doc.internal.getNumberOfPages();
+  const tocEntries = [];
+
   // ---------- Introduction / Summary ----------
   if (insp.introduction) {
     doc.addPage();
+    tocEntries.push({ label: 'Introduction / Summary', page: doc.internal.getNumberOfPages() });
     let iy = margin;
     iy = pageHeading(doc, 'Introduction / Summary', iy);
     doc.setFont('helvetica', 'normal');
@@ -137,8 +260,26 @@ async function buildAndSaveInspectionPDF(inspectionId) {
     }
   }
 
+  // ---------- Location Map ----------
+  const mapMode = insp.locationMapMode || 'auto';
+  if (mapMode !== 'off') {
+    const mapResult = await buildLocationMapForReport(insp, { pageW, margin, contentW });
+    if (mapResult) {
+      doc.addPage();
+      tocEntries.push({ label: 'Location Map', page: doc.internal.getNumberOfPages() });
+      let my = margin;
+      my = pageHeading(doc, 'Location Map', my);
+      doc.addImage(mapResult.url, 'JPEG', margin, my, mapResult.w, mapResult.h, undefined, 'FAST');
+    } else if (mapMode === 'auto' && (!insp.location || insp.location.lat == null)) {
+      toast('No coordinates set for this structure — location map skipped');
+    } else if (mapMode === 'auto') {
+      toast('Could not generate the location map — check your internet connection. Section skipped.');
+    }
+  }
+
   // ---------- Details page ----------
   doc.addPage();
+  tocEntries.push({ label: 'Inspection Details', page: doc.internal.getNumberOfPages() });
   let y = margin;
   y = pageHeading(doc, 'Inspection Details', y);
 
@@ -284,8 +425,10 @@ async function buildAndSaveInspectionPDF(inspectionId) {
   }
 
   // ---------- Detailed findings, grouped by section ----------
+  let isFirstGroup = true;
   for (const g of groups) {
     doc.addPage();
+    if (isFirstGroup) { tocEntries.push({ label: 'Findings', page: doc.internal.getNumberOfPages() }); isFirstGroup = false; }
     y = margin;
     if (g.section) {
       doc.setFont('helvetica', 'bold');
@@ -464,6 +607,7 @@ async function buildAndSaveInspectionPDF(inspectionId) {
   // ---------- Conclusion & Recommendations ----------
   if (insp.conclusion || (insp.recommendations && insp.recommendations.length)) {
     doc.addPage();
+    tocEntries.push({ label: 'Conclusion & Recommendations', page: doc.internal.getNumberOfPages() });
     let cy = margin;
     if (insp.conclusion) {
       cy = pageHeading(doc, 'Conclusion', cy);
@@ -497,6 +641,7 @@ async function buildAndSaveInspectionPDF(inspectionId) {
   const drawingsToInclude = (await DB.listDrawings(inspectionId)).filter((d) => d.includeInReport);
   if (drawingsToInclude.length) {
     doc.addPage();
+    tocEntries.push({ label: 'Drawings', page: doc.internal.getNumberOfPages() });
     let dy = margin;
     dy = pageHeading(doc, 'Drawings', dy);
     for (const d of drawingsToInclude) {
@@ -516,6 +661,59 @@ async function buildAndSaveInspectionPDF(inspectionId) {
       if (dy > pageH - margin - 40 && d !== drawingsToInclude[drawingsToInclude.length - 1]) { doc.addPage(); dy = margin; }
     }
   }
+
+  // ---------- Named Appendices ----------
+  const appendices = await DB.listAppendices(inspectionId);
+  for (const appendix of appendices) {
+    const items = await DB.listAppendixItems(appendix.id);
+    if (!items.length) continue;
+    doc.addPage();
+    tocEntries.push({ label: appendix.name, page: doc.internal.getNumberOfPages() });
+    let ay = margin;
+    ay = pageHeading(doc, appendix.name, ay);
+    for (const item of items) {
+      const data = await loadNormalizedImage(item.annotatedBlob || item.originalBlob);
+      const maxW = contentW;
+      const maxH = pageH - margin - ay - 20;
+      let w = maxW, h = (data.h / data.w) * w;
+      if (h > maxH) { h = maxH; w = (data.w / data.h) * h; }
+      if (ay + 20 + h > pageH - margin) { doc.addPage(); ay = margin; }
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10.5);
+      doc.setTextColor(28, 31, 38);
+      doc.text(item.title || 'Untitled', margin, ay);
+      ay += 14;
+      doc.addImage(data.url, 'JPEG', margin, ay, w, h, undefined, 'FAST');
+      ay += h + 24;
+      if (ay > pageH - margin - 40 && item !== items[items.length - 1]) { doc.addPage(); ay = margin; }
+    }
+  }
+
+  // ---------- Risk Assessment as appendix (always last, if enabled) ----------
+  if (insp.includeRiskAssessmentAppendix) {
+    const ra = await DB.getRiskAssessment(inspectionId);
+    if (ra) {
+      const sigData = await loadRiskAssessmentSignatures(ra);
+      doc.addPage();
+      tocEntries.push({ label: 'Risk Assessment', page: doc.internal.getNumberOfPages() });
+      drawRiskAssessmentContent(doc, insp, ra, sigData);
+    }
+  }
+
+  // ---------- Backfill the Table of Contents now that every section's actual page is known ----------
+  doc.setPage(tocPageNum);
+  let ty = margin;
+  ty = pageHeading(doc, 'Contents', ty);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(11);
+  doc.setTextColor(28, 31, 38);
+  tocEntries.forEach((entry) => {
+    if (ty > pageH - margin) return;
+    doc.text(entry.label, margin, ty, { maxWidth: contentW - 50 });
+    doc.text(String(entry.page), pageW - margin, ty, { align: 'right' });
+    ty += 22;
+  });
+  doc.setPage(doc.internal.getNumberOfPages()); // don't leave the cursor on the ToC page
 
   const filename = `${(insp.structureName || 'inspection').replace(/[^a-z0-9]+/gi, '_')}_${(insp.date || '').slice(0, 10)}.pdf`;
   doc.save(filename);
@@ -758,6 +956,19 @@ async function buildAndSaveRiskAssessmentPDF(inspectionId) {
   const ra = await DB.getRiskAssessment(inspectionId);
   if (!ra) { toast('No risk assessment to export yet'); return; }
 
+  const sigData = await loadRiskAssessmentSignatures(ra);
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+  drawRiskAssessmentContent(doc, insp, ra, sigData);
+
+  const filename = `${(insp.structureName || 'inspection').replace(/[^a-z0-9]+/gi, '_')}_RiskAssessment_${(ra.assessmentDate || '').slice(0, 10)}.pdf`;
+  doc.save(filename);
+  toast('Risk assessment saved');
+}
+
+// Gathers the Risk Assessment's signature images once, reused whether the RA is exported
+// standalone or embedded as an appendix in the main report.
+async function loadRiskAssessmentSignatures(ra) {
   const inspectorSigPhoto = await DB.getSignature(ra.id, 'inspector');
   const inspectorSigData = inspectorSigPhoto ? await loadNormalizedImage(inspectorSigPhoto.originalBlob) : null;
 
@@ -776,8 +987,13 @@ async function buildAndSaveRiskAssessmentPDF(inspectionId) {
     if (sigPhoto) riskSigMap[r.id] = await loadNormalizedImage(sigPhoto.originalBlob);
   }
 
-  const { jsPDF } = window.jspdf;
-  const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+  return { inspectorSigData, staffSigData, riskSigMap };
+}
+
+// Draws the full Risk Assessment content into an already-open jsPDF document, starting on
+// whatever the current page is — the caller decides whether that's a brand-new document
+// (standalone export) or a page just added to the main report (appendix embedding).
+function drawRiskAssessmentContent(doc, insp, ra, { inspectorSigData, staffSigData, riskSigMap }) {
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
   const margin = 40;
@@ -1024,8 +1240,4 @@ async function buildAndSaveRiskAssessmentPDF(inspectionId) {
     }
     if (col !== 0) y = rowStartY + rowMaxH + 14;
   }
-
-  const filename = `${(insp.structureName || 'inspection').replace(/[^a-z0-9]+/gi, '_')}_RiskAssessment_${(ra.assessmentDate || '').slice(0, 10)}.pdf`;
-  doc.save(filename);
-  toast('Risk assessment saved');
 }
