@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '2.3';
+const APP_VERSION = '2.6';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -286,7 +286,11 @@ async function openMapPickerSheet(initialCoords, onConfirm) {
 // iOS Safari quirk: tapping a button while a text field still has focus sometimes only
 // dismisses the keyboard on the first tap, requiring a second tap to register the click.
 // Blurring the active field as soon as a touch/pointer lands elsewhere fixes this everywhere.
+// Excludes Apple Pencil taps specifically — the reported keyboard/Scribble stickiness is
+// pencil-specific, so this narrows the blur trigger away from that device while leaving the
+// original finger-tap fix fully intact.
 document.addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'pen') return;
   const active = document.activeElement;
   if (!active) return;
   const isField = active.tagName === 'INPUT' || active.tagName === 'TEXTAREA';
@@ -446,6 +450,24 @@ async function forceUpdate() {
   }
 }
 
+// Manually forces a real focus→blur cycle on a throwaway hidden input, distinct from what
+// the global blur-on-tap listener already does (which only ever blurs, never focuses
+// anything) — offered as a fallback if the on-screen keyboard still gets stuck in its
+// compact Scribble layout after using Apple Pencil, without leaving the app to toggle
+// Scribble off in Settings. Not guaranteed to work — there's no documented API into this
+// iPadOS behavior — but a genuine, distinct attempt worth having on hand.
+function resetKeyboardState() {
+  const dummy = document.createElement('input');
+  dummy.type = 'text';
+  dummy.style.cssText = 'position:fixed; top:-100px; left:-100px; width:1px; height:1px; opacity:0;';
+  document.body.appendChild(dummy);
+  dummy.focus();
+  setTimeout(() => {
+    dummy.blur();
+    dummy.remove();
+  }, 50);
+}
+
 // ---------- BACKUP & RESTORE (raw data export/import) ----------
 function openBackupRestoreSheet() {
   const sheet = el(`
@@ -457,6 +479,11 @@ function openBackupRestoreSheet() {
         <button class="btn btn-primary btn-block" id="btn-do-export">⬆️ Export all data</button>
         <button class="btn btn-secondary btn-block" id="btn-do-import" style="margin-top:10px;">⬇️ Import data</button>
         <input type="file" id="backup-file-input" accept="application/json" style="display:none;">
+
+        <div class="section-header" style="margin-top:22px;"><h2>Device utilities</h2></div>
+        <p class="muted" style="font-size:13px; margin-top:-4px;">If the on-screen keyboard gets stuck in its small Scribble layout after using Apple Pencil, try this before resorting to Settings → Scribble.</p>
+        <button class="btn btn-secondary btn-block" id="btn-reset-keyboard">⌨️ Reset keyboard</button>
+
         <button class="btn btn-ghost btn-block" id="btn-cancel" style="margin-top:16px;">Close</button>
       </div>
     </div>
@@ -464,6 +491,11 @@ function openBackupRestoreSheet() {
   presentOverlay(sheet);
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+
+  sheet.querySelector('#btn-reset-keyboard').addEventListener('click', () => {
+    resetKeyboardState();
+    toast('Keyboard reset');
+  });
 
   sheet.querySelector('#btn-do-export').addEventListener('click', async () => {
     toast('Preparing export…');
@@ -617,7 +649,9 @@ async function renderInspection(inspectionId) {
     const s = await DB.getElementConditionSummary(elmt.id);
     const badge = s.worstSeverity
       ? `<span class="badge badge-sev-${s.worstSeverity}">S${s.worstSeverity}</span> <span class="badge badge-extent">${s.worstExtent || '—'}</span>`
-      : `<span class="badge badge-none">No findings</span>`;
+      : s.findingCount
+        ? `<span class="badge badge-none">${s.findingCount} finding${s.findingCount === 1 ? '' : 's'}</span>`
+        : `<span class="badge badge-none">No findings</span>`;
     const subline = elementSublineParts(elmt, isGiBridges).join(' · ') || `${s.findingCount} finding${s.findingCount === 1 ? '' : 's'}`;
     return `
       <div class="list-item" data-el="${elmt.id}">
@@ -843,6 +877,11 @@ async function openReportInfoSheet(inspectionId) {
         <input type="file" id="logo-file-input" accept="image/*" style="display:none;">
 
         <div class="section-header" style="margin-top:22px;"><h2>Cover style</h2></div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="f-include-cover" ${insp.includeCoverPage !== false ? 'checked' : ''}>
+          <label for="f-include-cover">Include cover page</label>
+        </div>
+        <p class="hint" style="margin-top:-4px;">Off: the report starts from the Table of Contents instead.</p>
         <div class="severity-picker" id="cover-style-picker">
           <button class="chip ${(!insp.coverStyle || insp.coverStyle === 'basic') ? 'selected' : ''}" data-style="basic" style="${(!insp.coverStyle || insp.coverStyle === 'basic') ? 'background:var(--ink);' : ''}">Basic</button>
           <button class="chip ${insp.coverStyle === 'archarray' ? 'selected' : ''}" data-style="archarray" style="${insp.coverStyle === 'archarray' ? 'background:var(--ink);' : ''}">Arch&amp;Array</button>
@@ -900,6 +939,7 @@ async function openReportInfoSheet(inspectionId) {
       date: sheet.querySelector('#f-date').value,
       currency: currencyBtn ? currencyBtn.dataset.currency : 'USD',
       coverStyle: styleBtn ? styleBtn.dataset.style : 'basic',
+      includeCoverPage: sheet.querySelector('#f-include-cover').checked,
       locationMapMode: mapModeBtn ? mapModeBtn.dataset.mapmode : 'auto',
       locationMapScale: Number(sheet.querySelector('#f-map-scale').value) || 2500,
       includeRiskAssessmentAppendix: sheet.querySelector('#f-include-ra-appendix').checked
@@ -1281,7 +1321,9 @@ async function renderSection(inspectionId, sectionId) {
     const s = await DB.getElementConditionSummary(elmt.id);
     const badge = s.worstSeverity
       ? `<span class="badge badge-sev-${s.worstSeverity}">S${s.worstSeverity}</span> <span class="badge badge-extent">${s.worstExtent || '—'}</span>`
-      : `<span class="badge badge-none">No findings</span>`;
+      : s.findingCount
+        ? `<span class="badge badge-none">${s.findingCount} finding${s.findingCount === 1 ? '' : 's'}</span>`
+        : `<span class="badge badge-none">No findings</span>`;
     const subline = elementSublineParts(elmt, isGiBridges).join(' · ') || `${s.findingCount} finding${s.findingCount === 1 ? '' : 's'}`;
     rows.push(`
       <div class="list-item" data-el="${elmt.id}">

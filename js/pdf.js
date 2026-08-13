@@ -235,15 +235,21 @@ async function buildAndSaveInspectionPDF(inspectionId) {
   const contentW = pageW - margin * 2;
 
   // ---------- Cover page ----------
-  if (insp.coverStyle === 'archarray') {
-    drawArchArrayCover(doc, { insp, coverData, companyLogoData, clientLogoData, pageW, pageH, margin, contentW });
-  } else {
-    drawBasicCover(doc, { insp, coverData, logoData, pageW, pageH, margin, contentW });
+  const includeCover = insp.includeCoverPage !== false;
+  if (includeCover) {
+    if (insp.coverStyle === 'archarray') {
+      drawArchArrayCover(doc, { insp, coverData, companyLogoData, clientLogoData, pageW, pageH, margin, contentW });
+    } else {
+      drawBasicCover(doc, { insp, coverData, logoData, pageW, pageH, margin, contentW });
+    }
   }
 
   // ---------- Table of Contents (reserved blank page; backfilled at the very end once
-  // every section's actual page number is known — the standard two-pass jsPDF technique) ----------
-  doc.addPage();
+  // every section's actual page number is known — the standard two-pass jsPDF technique).
+  // jsPDF always creates page 1 automatically; when the cover is included that page holds
+  // it and this addPage() moves to a fresh page 2 for the ToC. When the cover is excluded,
+  // that same unused page 1 becomes the ToC directly instead. ----------
+  if (includeCover) doc.addPage();
   const tocPageNum = doc.internal.getNumberOfPages();
   const tocEntries = [];
 
@@ -926,13 +932,18 @@ function drawRefinedPageTitle(doc, title, subtitle, y, { margin, contentW }) {
   doc.setFont('times', 'bold');
   doc.setFontSize(29);
   doc.setTextColor(28, 31, 38);
-  doc.text(title, margin, y, { maxWidth: contentW });
+  // Measure how many lines the title actually wraps to — it previously assumed one line
+  // always, so a long appendix name wrapping to two lines printed the subtitle straight
+  // over the top of the second line instead of below it.
+  const titleLines = doc.splitTextToSize(title, contentW);
+  doc.text(titleLines, margin, y);
+  y += titleLines.length * 34;
   if (subtitle) {
-    y += 21;
     doc.setFont('times', 'italic');
     doc.setFontSize(12.5);
     doc.setTextColor(91, 96, 105);
     doc.text(subtitle, margin, y, { maxWidth: contentW });
+    y += 19;
   }
   y += 19;
   doc.setFillColor(200, 30, 30);

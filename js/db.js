@@ -127,6 +127,7 @@ const DB = {
       currency: data.currency || 'USD',
       locationMapMode: data.locationMapMode || 'auto', // 'auto' (generated) | 'custom' (uploaded) | 'off'
       locationMapScale: data.locationMapScale || 2500,
+      includeCoverPage: data.includeCoverPage != null ? !!data.includeCoverPage : true,
       includeRiskAssessmentAppendix: !!data.includeRiskAssessmentAppendix,
       introduction: data.introduction || '',
       summary: data.summary || '',

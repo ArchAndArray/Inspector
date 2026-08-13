@@ -354,7 +354,12 @@ async function openAnnotator(photoId, onDone) {
     cropRect = { x: cw * 0.1, y: ch * 0.1, w: cw * 0.8, h: ch * 0.8 };
     view.querySelector('#main-toolbar').style.display = 'none';
     view.querySelector('#ruler-toolbar').style.display = 'none';
-    view.querySelector('#crop-toolbar').style.display = '';
+    const cropToolbar = view.querySelector('#crop-toolbar');
+    cropToolbar.style.display = '';
+    // Same fix as the calibration toolbar: this row normally sits below the main toolbar
+    // (which already reserves safe-area space) so it skips its own top padding — but
+    // hiding that row here makes this one the topmost, so it needs the clearance itself.
+    cropToolbar.style.paddingTop = 'calc(10px + var(--safe-top))';
     view.querySelector('#crop-visual').style.display = 'block';
     updateCropVisual();
   }
@@ -363,6 +368,7 @@ async function openAnnotator(photoId, onDone) {
     view.querySelector('#main-toolbar').style.display = '';
     view.querySelector('#ruler-toolbar').style.display = '';
     view.querySelector('#crop-toolbar').style.display = 'none';
+    view.querySelector('#crop-toolbar').style.paddingTop = '0';
     view.querySelector('#crop-visual').style.display = 'none';
   }
   view.querySelector('#btn-crop').addEventListener('click', () => {
@@ -429,7 +435,12 @@ async function openAnnotator(photoId, onDone) {
 
   view.querySelector('#btn-crop-apply').addEventListener('click', () => {
     const { x, y, w, h } = cropRect;
-    const newCw = Math.max(1, Math.round(w)), newCh = Math.max(1, Math.round(h));
+    // Math.max(1, Math.round(w)) does not actually guard against w being NaN — Math.max
+    // with NaN always returns NaN regardless of the other argument — so a stray NaN
+    // reaching here would silently produce a 0-dimension canvas, which is a plausible
+    // route to corrupt data reaching the save step later.
+    const newCw = Math.max(1, Math.round(w) || 1);
+    const newCh = Math.max(1, Math.round(h) || 1);
 
     const croppedPhoto = document.createElement('canvas');
     croppedPhoto.width = newCw; croppedPhoto.height = newCh;
@@ -1017,11 +1028,36 @@ async function openAnnotator(photoId, onDone) {
     return { x: centerX + dx * tMin, y: centerY + dy * tMin };
   }
 
+  // Word-wraps typed text within maxWidth — splits on explicit line breaks first (paragraph
+  // boundaries), then wraps each paragraph's words so no line exceeds maxWidth. Used so a
+  // long line can't grow the text box out past the image, which it previously could.
+  function wrapTextLines(targetCtx, text, maxWidth) {
+    const paragraphs = text.split('\n');
+    const wrapped = [];
+    paragraphs.forEach((para) => {
+      if (para === '') { wrapped.push(''); return; }
+      const words = para.split(' ');
+      let line = '';
+      words.forEach((word) => {
+        const test = line ? line + ' ' + word : word;
+        if (targetCtx.measureText(test).width > maxWidth && line) {
+          wrapped.push(line);
+          line = word;
+        } else {
+          line = test;
+        }
+      });
+      if (line) wrapped.push(line);
+    });
+    return wrapped;
+  }
+
   function drawTextBoxOn(targetCtx, x, y, text, opts) {
     const { bold, underline, fontSize } = opts;
-    const lines = text.split('\n');
     const fontWeight = bold ? '800' : '400';
     targetCtx.font = `${fontWeight} ${fontSize}px -apple-system, sans-serif`;
+    const maxTextWidth = cw * 0.65; // cap so the box can't grow past the image, regardless of line length
+    const lines = wrapTextLines(targetCtx, text, maxTextWidth);
     const lineHeight = fontSize * 1.35;
     const padding = 12;
     let maxLineW = 0;
@@ -1377,7 +1413,17 @@ async function openAnnotator(photoId, onDone) {
     mergeCtx.drawImage(photoCanvas, 0, 0);
     mergeCtx.drawImage(markCanvas, 0, 0);
     mergeCanvas.toBlob(async (blob) => {
-      await DB.setAnnotatedBlob(photoId, blob);
+      if (!blob) {
+        toast('Could not prepare the image to save — nothing was lost, please try again');
+        return;
+      }
+      try {
+        await DB.setAnnotatedBlob(photoId, blob);
+      } catch (err) {
+        console.error('Save failed', err);
+        toast('Save failed — your edits are still here, please try again');
+        return; // keep the annotator open rather than losing the user's work
+      }
       window.removeEventListener('resize', fitCanvas);
       removeMagnifierEl();
       view.remove();
