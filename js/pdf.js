@@ -734,7 +734,7 @@ async function buildAndSaveInspectionPDF(inspectionId) {
   // ---------- Backfill the Table of Contents now that every section's actual page is known ----------
   doc.setPage(tocPageNum);
   let ty = margin;
-  ty = drawRefinedPageTitle(doc, 'Contents', insp.structureName, ty, { margin, contentW });
+  ty = drawRefinedPageTitle(doc, 'Contents', null, ty, { margin, contentW });
 
   function drawTocGroup(label, entries) {
     if (!entries.length) return;
@@ -1629,9 +1629,9 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
       if (!section.textHtml) continue;
       y = ensureRoomForHeading(y);
       tocEntries.push({ label: section.title || 'Text', page: doc.internal.getNumberOfPages() });
-      y = drawRefinedPageTitle(doc, section.title || 'Text', insp.structureName, y, { margin, contentW });
+      y = pageHeading(doc, section.title || 'Text', y);
       y = drawRichHtmlContent(doc, section.textHtml, y, { margin, contentW, pageH });
-      y += 24;
+      y += 48;
       continue;
     }
 
@@ -1644,11 +1644,15 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
           : `Could not generate the location map — "${section.title || 'Location Map'}" skipped`);
         continue;
       }
-      y = ensureRoomForHeading(y);
+      // The generic bottom-quarter heading check isn't enough here — the map image itself
+      // is roughly half a page tall, so it needs that much room checked explicitly, or it
+      // clips off the bottom of the page when it starts partway down.
+      const headingAllowance = 30;
+      if (y + headingAllowance + mapResult.h > pageH - margin) { doc.addPage(); y = margin; }
       tocEntries.push({ label: section.title || 'Location Map', page: doc.internal.getNumberOfPages() });
       y = pageHeading(doc, section.title || 'Location Map', y);
       doc.addImage(mapResult.url, 'JPEG', margin, y, mapResult.w, mapResult.h, undefined, 'FAST');
-      y += mapResult.h + 24;
+      y += mapResult.h + 48;
       continue;
     }
 
@@ -1657,7 +1661,7 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
       tocEntries.push({ label: section.title || 'Inspection Details', page: doc.internal.getNumberOfPages() });
       y = pageHeading(doc, section.title || 'Inspection Details', y);
       y = drawInspectionDetailsBlock(doc, insp, y, { margin, contentW });
-      y += 24;
+      y += 48;
       continue;
     }
 
@@ -1666,7 +1670,7 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
       y = ensureRoomForHeading(y);
       tocEntries.push({ label: section.title || 'Element Summary', page: doc.internal.getNumberOfPages() });
       y = drawElementSummaryTableForGroups(doc, allGroups, y, { margin, contentW, pageH, title: section.title });
-      y += 24;
+      y += 48;
       continue;
     }
 
@@ -1701,7 +1705,7 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
         }
         y = drawGroupFindings(doc, insp, g, y, { margin, contentW, pageH, pageW });
       }
-      y += 24;
+      y += 48;
       continue;
     }
 
@@ -1760,7 +1764,7 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
   // (no "Report" vs "Appendices" grouping needed, unlike Old Style's fixed structure).
   doc.setPage(tocPageNum);
   let ty = margin;
-  ty = drawRefinedPageTitle(doc, 'Contents', insp.structureName, ty, { margin, contentW });
+  ty = drawRefinedPageTitle(doc, 'Contents', null, ty, { margin, contentW });
   for (const entry of tocEntries) {
     if (ty > pageH - margin) break;
     doc.setFont('helvetica', 'normal');
