@@ -2,7 +2,7 @@
 // Stores: inspections, sections, elements, findings, photos, templates
 
 const DB_NAME = 'siteInspectionDB';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 
 let dbPromise = null;
 
@@ -58,6 +58,22 @@ function openDB() {
         const photosStore3 = tx.objectStore('photos');
         if (!photosStore3.indexNames.contains('appendixId')) {
           photosStore3.createIndex('appendixId', 'appendixId', { unique: false });
+        }
+      }
+
+      if (oldVersion < 5) {
+        // New Style reports: a flexible, user-ordered list of report sections, plus
+        // reusable templates defining a starter set of section shells.
+        if (!db.objectStoreNames.contains('reportSections')) {
+          const rsStore = db.createObjectStore('reportSections', { keyPath: 'id' });
+          rsStore.createIndex('inspectionId', 'inspectionId', { unique: false });
+        }
+        if (!db.objectStoreNames.contains('reportTemplates')) {
+          db.createObjectStore('reportTemplates', { keyPath: 'id' });
+        }
+        const photosStore4 = tx.objectStore('photos');
+        if (!photosStore4.indexNames.contains('reportSectionId')) {
+          photosStore4.createIndex('reportSectionId', 'reportSectionId', { unique: false });
         }
       }
     };
@@ -128,6 +144,7 @@ const DB = {
       locationMapMode: data.locationMapMode || 'auto', // 'auto' (generated) | 'custom' (uploaded) | 'off'
       locationMapScale: data.locationMapScale || 2500,
       includeCoverPage: data.includeCoverPage != null ? !!data.includeCoverPage : true,
+      reportStyle: data.reportStyle === 'new' ? 'new' : 'old', // set once at creation, not changed later
       includeRiskAssessmentAppendix: !!data.includeRiskAssessmentAppendix,
       introduction: data.introduction || '',
       summary: data.summary || '',
@@ -163,6 +180,22 @@ const DB = {
     for (const a of ((insp && insp.appendices) || [])) {
       const items = await this.listAppendixItems(a.id);
       for (const item of items) await this.delete('photos', item.id);
+    }
+    const reportSections = await this.getAllByIndex('reportSections', 'inspectionId', id);
+    for (const rs of reportSections) {
+      // Drawing/appendix items and any linked element-grouping `sections` record; the
+      // `sections` cleanup above already covers the element side for the whole inspection.
+      if (rs.type === 'drawing') {
+        const items = await this.getAllByIndex('photos', 'reportSectionId', rs.id);
+        for (const item of items) await this.delete('photos', item.id);
+      }
+      if (rs.type === 'appendices') {
+        for (const a of (rs.appendices || [])) {
+          const items = await this.listAppendixItems(a.id);
+          for (const item of items) await this.delete('photos', item.id);
+        }
+      }
+      await this.delete('reportSections', rs.id);
     }
     const inspPhotos = await this.getAllByIndex('photos', 'inspectionId', id);
     for (const p of inspPhotos) await this.delete('photos', p.id);
@@ -463,6 +496,150 @@ const DB = {
   async removeCustomLocationMap(inspectionId) {
     const existing = await this.getCustomLocationMap(inspectionId);
     if (existing) await this.delete('photos', existing.id);
+  },
+
+  // --- New Style reports: flexible, user-ordered report sections ---
+  // reportSection: { id, inspectionId, order, type, title,
+  //   textHtml (type='text'), elementSectionId (type='inspection', links to `sections`),
+  //   appendices[] + includeRiskAssessment (type='appendices'), createdAt, updatedAt }
+  // type is one of: 'text' | 'drawing' | 'inspection' | 'locationMap' | 'inspectionDetails' |
+  //                 'elementSummary' | 'appendices'
+  async listReportSections(inspectionId) {
+    const all = await this.getAllByIndex('reportSections', 'inspectionId', inspectionId);
+    return all.sort((a, b) => a.order - b.order);
+  },
+  async addReportSection(inspectionId, type, title) {
+    const existing = await this.listReportSections(inspectionId);
+    const section = {
+      id: uid(),
+      inspectionId,
+      order: existing.length + 1,
+      type,
+      title: title || '',
+      textHtml: '',
+      elementSectionId: null,
+      appendices: [],
+      includeRiskAssessment: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    await this.put('reportSections', section);
+    return section;
+  },
+  async updateReportSection(id, patch) {
+    const existing = await this.get('reportSections', id);
+    if (!existing) throw new Error('Report section not found');
+    const updated = { ...existing, ...patch, updatedAt: new Date().toISOString() };
+    await this.put('reportSections', updated);
+    return updated;
+  },
+  async deleteReportSectionCascade(id) {
+    const section = await this.get('reportSections', id);
+    if (!section) return;
+    if (section.type === 'inspection' && section.elementSectionId) {
+      await this.deleteSectionCascade(section.elementSectionId);
+    }
+    if (section.type === 'drawing') {
+      const items = await this.getAllByIndex('photos', 'reportSectionId', id);
+      for (const item of items) await this.delete('photos', item.id);
+    }
+    if (section.type === 'appendices') {
+      for (const a of (section.appendices || [])) {
+        const items = await this.listAppendixItems(a.id);
+        for (const item of items) await this.delete('photos', item.id);
+      }
+    }
+    await this.delete('reportSections', id);
+    // Renumber remaining sections so order stays a contiguous 1..N sequence.
+    const remaining = await this.listReportSections(section.inspectionId);
+    for (let i = 0; i < remaining.length; i++) {
+      if (remaining[i].order !== i + 1) await this.updateReportSection(remaining[i].id, { order: i + 1 });
+    }
+  },
+  // Moves a section to a new position, shifting everything between old and new position to
+  // make room — insert-at-position semantics, matching how you'd expect renumbering to work.
+  async reorderReportSection(inspectionId, sectionId, newOrder) {
+    const sections = await this.listReportSections(inspectionId);
+    const moving = sections.find((s) => s.id === sectionId);
+    if (!moving) return;
+    const clampedOrder = Math.max(1, Math.min(sections.length, newOrder));
+    const others = sections.filter((s) => s.id !== sectionId);
+    others.splice(clampedOrder - 1, 0, moving);
+    for (let i = 0; i < others.length; i++) {
+      if (others[i].order !== i + 1) await this.updateReportSection(others[i].id, { order: i + 1 });
+    }
+  },
+
+  // --- Drawing items scoped to a specific Drawing-type report section ---
+  async listSectionDrawings(reportSectionId) {
+    const all = await this.getAllByIndex('photos', 'reportSectionId', reportSectionId);
+    return all.filter((p) => p.kind === 'drawing').sort((a, b) => a.order - b.order);
+  },
+  async addSectionDrawing(reportSectionId, inspectionId, blob, title) {
+    const existing = await this.listSectionDrawings(reportSectionId);
+    return this.addPhoto({ kind: 'drawing', reportSectionId, inspectionId, originalBlob: blob, order: existing.length, title: title || '' });
+  },
+
+  // --- Appendices scoped to a specific Appendices-type report section ---
+  async listSectionAppendices(reportSectionId) {
+    const section = await this.get('reportSections', reportSectionId);
+    return ((section && section.appendices) || []).slice().sort((a, b) => a.order - b.order);
+  },
+  async addSectionAppendix(reportSectionId, name) {
+    const section = await this.get('reportSections', reportSectionId);
+    const appendices = [...((section && section.appendices) || [])];
+    const appendix = { id: uid(), name: name || 'Untitled appendix', order: appendices.length };
+    appendices.push(appendix);
+    await this.updateReportSection(reportSectionId, { appendices });
+    return appendix;
+  },
+  async updateSectionAppendix(reportSectionId, appendixId, patch) {
+    const section = await this.get('reportSections', reportSectionId);
+    const appendices = ((section && section.appendices) || []).map((a) => (a.id === appendixId ? { ...a, ...patch } : a));
+    await this.updateReportSection(reportSectionId, { appendices });
+  },
+  async deleteSectionAppendixCascade(reportSectionId, appendixId) {
+    const section = await this.get('reportSections', reportSectionId);
+    const appendices = ((section && section.appendices) || []).filter((a) => a.id !== appendixId);
+    await this.updateReportSection(reportSectionId, { appendices });
+    const items = await this.listAppendixItems(appendixId);
+    for (const item of items) await this.delete('photos', item.id);
+  },
+
+  // --- Report templates: reusable starter shells (type + title, no content) for New Style ---
+  async listReportTemplates() {
+    const all = await this.getAll('reportTemplates');
+    return all.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  },
+  async saveReportTemplate(name, sectionShells) {
+    const template = { id: uid(), name, sections: sectionShells, createdAt: new Date().toISOString() };
+    await this.put('reportTemplates', template);
+    return template;
+  },
+  async deleteReportTemplate(id) {
+    await this.delete('reportTemplates', id);
+  },
+  async applyReportTemplate(inspectionId, templateId) {
+    const template = await this.get('reportTemplates', templateId);
+    if (!template) return;
+    for (const shell of template.sections) {
+      await this.addReportSection(inspectionId, shell.type, shell.title);
+    }
+  },
+  async seedDefaultReportTemplate() {
+    const existing = await this.get('reportTemplates', 'default-template');
+    if (existing) return;
+    await this.put('reportTemplates', {
+      id: 'default-template',
+      name: 'Standard Report',
+      sections: [
+        { type: 'locationMap', title: 'Location Map' },
+        { type: 'inspectionDetails', title: 'Inspection Details' },
+        { type: 'elementSummary', title: 'Element Summary' },
+        { type: 'text', title: 'Conclusion' }
+      ],
+      createdAt: new Date().toISOString()
+    });
   },
 
   // --- Standalone Scale/Annotate sessions (not tied to any inspection) ---

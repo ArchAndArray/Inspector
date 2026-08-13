@@ -133,6 +133,13 @@ button {
 
 .list-item .meta { flex: 1; min-width: 0; }
 .list-item .meta h3 { margin: 0 0 3px; font-size: 16px; font-weight: 600; }
+
+.rs-order-input {
+  width: 46px; height: 40px; flex-shrink: 0;
+  text-align: center; font-weight: 700; font-size: 15px;
+  border: 1.5px solid var(--line); border-radius: 8px;
+  background: var(--paper); color: var(--ink);
+}
 .list-item .meta p { margin: 0; font-size: 13px; color: var(--ink-soft); }
 .chevron { color: #b3b6bc; font-size: 20px; }
 
@@ -282,13 +289,14 @@ button {
   font-size: 14px; font-weight: 700;
 }
 .rt-editor {
-  min-height: 160px; max-height: 320px; overflow-y: auto;
+  min-height: 50vh; max-height: 55vh; overflow-y: auto;
   border: 1.5px solid var(--line); border-radius: 10px;
   padding: 12px; font-size: 15px; line-height: 1.5;
   background: #fff; color: var(--ink);
 }
 .rt-editor:focus { outline: none; border-color: var(--ink); }
 .rt-editor ul, .rt-editor ol { padding-left: 22px; margin: 6px 0; }
+.rt-btn.active { background: var(--ink); color: #fff; border-color: var(--ink); }
 
 /* Photo grid */
 .photo-grid {

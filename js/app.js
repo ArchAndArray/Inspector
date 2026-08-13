@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '2.6';
+const APP_VERSION = '3.0';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -342,6 +342,9 @@ async function route() {
     else if (p[0] === 'inspection' && p[1] && p[2] === 'risk-assessment') await renderRiskAssessment(p[1]);
     else if (p[0] === 'inspection' && p[1] && p[2] === 'drawings') await renderDrawings(p[1]);
     else if (p[0] === 'inspection' && p[1] && p[2] === 'appendix' && p[3]) await renderAppendix(p[1], p[3]);
+    else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'drawings') await renderReportSectionDrawings(p[1], p[3]);
+    else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'appendices' && p[5]) await renderReportSectionAppendix(p[1], p[3], p[5]);
+    else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'appendices') await renderReportSectionAppendicesList(p[1], p[3]);
     else if (p[0] === 'inspection' && p[1] && !p[2]) await renderInspection(p[1]);
     else if (p[0] === 'templates') await renderTemplates();
     else if (p[0] === 'scale-annotate') await renderScaleAnnotate();
@@ -601,7 +604,20 @@ function openNewInspectionSheet() {
         <div class="field"><label>Inspector</label><input type="text" id="f-inspector" placeholder="Name"></div>
         <div class="field"><label>Weather</label><input type="text" id="f-weather" placeholder="e.g. Overcast, 14°C"></div>
         ${locationFieldHTML('')}
-        <button class="btn btn-primary btn-block" id="btn-create-inspection">Create inspection</button>
+
+        <div class="section-header" style="margin-top:22px;"><h2>Report Style</h2></div>
+        <div class="severity-picker" id="report-style-picker">
+          <button class="chip selected" data-style="old" style="background:var(--ink);">Old Style<span class="chip-label">Current system</span></button>
+          <button class="chip" data-style="new">New Style<span class="chip-label">Flexible sections</span></button>
+        </div>
+        <p class="hint" id="style-hint">The proven, current report system — Introduction, Summary, Conclusion, Drawings, and Appendices exactly as they work today.</p>
+        <div class="field hidden" id="template-field">
+          <label>Starting template</label>
+          <select id="f-template"></select>
+          <p class="hint">Defines the starting set of sections — fully editable afterward.</p>
+        </div>
+
+        <button class="btn btn-primary btn-block" id="btn-create-inspection" style="margin-top:14px;">Create inspection</button>
         <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
       </div>
     </div>
@@ -610,6 +626,25 @@ function openNewInspectionSheet() {
   sheet.querySelector('#f-date').value = new Date().toISOString().slice(0, 10);
 
   const locationField = wireLocationField(sheet, null);
+
+  let reportStyle = 'old';
+  DB.seedDefaultReportTemplate().then(() => DB.listReportTemplates()).then((templates) => {
+    const select = sheet.querySelector('#f-template');
+    select.innerHTML = templates.map((t) => `<option value="${t.id}" ${t.id === 'default-template' ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
+  });
+
+  sheet.querySelectorAll('#report-style-picker .chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      sheet.querySelectorAll('#report-style-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
+      chip.classList.add('selected');
+      chip.style.background = 'var(--ink)';
+      reportStyle = chip.dataset.style;
+      sheet.querySelector('#template-field').classList.toggle('hidden', reportStyle !== 'new');
+      sheet.querySelector('#style-hint').textContent = reportStyle === 'new'
+        ? 'Build the report from an ordered list of sections you choose and arrange yourself — still being tested, so Old Style is recommended for reports you need to finish reliably right now.'
+        : 'The proven, current report system — Introduction, Summary, Conclusion, Drawings, and Appendices exactly as they work today.';
+    });
+  });
 
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
@@ -626,10 +661,539 @@ function openNewInspectionSheet() {
       weather: sheet.querySelector('#f-weather').value.trim(),
       location: { ...(coords || {}), manual: locationField.getManualText() },
       title: 'Structural Inspection Report',
-      subtitle: ''
+      subtitle: '',
+      reportStyle
     });
+    if (reportStyle === 'new') {
+      const templateId = sheet.querySelector('#f-template').value;
+      if (templateId) await DB.applyReportTemplate(insp.id, templateId);
+    }
     sheet.remove();
     navigate(`#/inspection/${insp.id}`);
+  });
+}
+
+// ---------- NEW STYLE REPORTS (flexible, user-ordered sections) ----------
+const REPORT_SECTION_TYPES = {
+  text: { label: 'Text', icon: '📝' },
+  drawing: { label: 'Drawing', icon: '📐' },
+  inspection: { label: 'Inspection', icon: '🏗️' },
+  locationMap: { label: 'Location Map', icon: '🗺️' },
+  inspectionDetails: { label: 'Inspection Details', icon: 'ℹ️' },
+  elementSummary: { label: 'Element Summary', icon: '📊' },
+  appendices: { label: 'Appendices', icon: '📎' }
+};
+
+async function renderInspectionNewStyle(inspectionId, insp) {
+  let reportSections = await DB.listReportSections(inspectionId);
+
+  appEl.innerHTML = `
+    <div class="topbar">
+      <button class="icon-btn" id="btn-back">‹</button>
+      <div style="flex:1; min-width:0;">
+        <h1 style="font-size:17px;">${esc(insp.structureName)}</h1>
+        <span class="sub">${esc(insp.inspectionType)} · New Style</span>
+      </div>
+      <button class="icon-btn" id="btn-risk-assessment" title="Risk Assessment">⚠️</button>
+      <button class="text-btn" id="btn-report-info">Info</button>
+      <button class="text-btn" id="btn-print">Print</button>
+    </div>
+    <div class="content" id="rs-list"></div>
+    <button class="fab" id="btn-add-section">＋</button>
+  `;
+  document.getElementById('btn-back').addEventListener('click', () => navigate('#/'));
+  document.getElementById('btn-risk-assessment').addEventListener('click', () => navigate(`#/inspection/${inspectionId}/risk-assessment`));
+  document.getElementById('btn-report-info').addEventListener('click', () => openReportInfoSheet(inspectionId));
+  document.getElementById('btn-print').addEventListener('click', () => {
+    try { exportInspectionPDFNewStyle(inspectionId); } catch (err) { console.error(err); toast('Error: ' + err.message); }
+  });
+  document.getElementById('btn-add-section').addEventListener('click', () => openAddReportSectionSheet(inspectionId, async () => { reportSections = await DB.listReportSections(inspectionId); renderList(); }));
+
+  function renderList() {
+    const list = document.getElementById('rs-list');
+    if (!reportSections.length) {
+      list.innerHTML = `
+        <div class="empty-state">
+          <div class="glyph">📄</div>
+          <h3>No sections yet</h3>
+          <p>Tap ＋ to add your first report section — text, drawings, an inspection group, the location map, details, element summary, or appendices.</p>
+        </div>`;
+      return;
+    }
+    list.innerHTML = reportSections.map((s) => {
+      const typeInfo = REPORT_SECTION_TYPES[s.type] || { label: s.type, icon: '📄' };
+      return `
+        <div class="list-item" data-rs="${s.id}">
+          <input type="number" class="rs-order-input" data-rs-order="${s.id}" value="${s.order}" min="1" max="${reportSections.length}">
+          <div class="meta">
+            <h3>${typeInfo.icon} ${esc(s.title) || typeInfo.label}</h3>
+            <p>${typeInfo.label}</p>
+          </div>
+          <span class="chevron">›</span>
+        </div>
+      `;
+    }).join('') + `<button class="small-btn" id="btn-save-template" style="margin-top:6px;">💾 Save this section set as a template</button>`;
+
+    const saveTemplateBtn = list.querySelector('#btn-save-template');
+    if (saveTemplateBtn) saveTemplateBtn.addEventListener('click', () => openSaveReportTemplateSheet(reportSections));
+
+    list.querySelectorAll('[data-rs]').forEach((row) => {
+      row.addEventListener('click', (e) => {
+        if (e.target.classList.contains('rs-order-input')) return;
+        const s = reportSections.find((x) => x.id === row.dataset.rs);
+        openReportSectionEditor(inspectionId, s, async () => { reportSections = await DB.listReportSections(inspectionId); renderList(); });
+      });
+    });
+    list.querySelectorAll('.rs-order-input').forEach((input) => {
+      input.addEventListener('click', (e) => e.stopPropagation());
+      input.addEventListener('change', async (e) => {
+        e.stopPropagation();
+        const newOrder = Number(e.target.value);
+        if (!newOrder || newOrder < 1) { renderList(); return; }
+        await DB.reorderReportSection(inspectionId, input.dataset.rsOrder, newOrder);
+        reportSections = await DB.listReportSections(inspectionId);
+        renderList();
+      });
+    });
+  }
+  renderList();
+}
+
+function openSaveReportTemplateSheet(reportSections) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Save as template</h2>
+        <p class="muted" style="font-size:13px; margin-top:-8px;">Saves the current set of section types, titles, and order — not their content — as a reusable starting point for future New Style inspections.</p>
+        <div class="field"><label>Template name</label><input type="text" id="f-tpl-name" placeholder="e.g. Detailed Bridge Report"></div>
+        <button class="btn btn-primary btn-block" id="btn-save-tpl">Save template</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-save-tpl').addEventListener('click', async () => {
+    const name = sheet.querySelector('#f-tpl-name').value.trim();
+    if (!name) { toast('Enter a template name'); return; }
+    const shells = reportSections
+      .slice()
+      .sort((a, b) => a.order - b.order)
+      .map((s) => ({ type: s.type, title: s.title }));
+    await DB.saveReportTemplate(name, shells);
+    sheet.remove();
+    toast('Template saved');
+  });
+}
+
+function openAddReportSectionSheet(inspectionId, onAdded) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Add section</h2>
+        ${Object.entries(REPORT_SECTION_TYPES).map(([type, info]) => `
+          <button class="btn btn-secondary btn-block" data-type="${type}" style="margin-top:8px; text-align:left;">${info.icon}&nbsp;&nbsp;${info.label}</button>
+        `).join('')}
+        <button class="btn btn-ghost btn-block" id="btn-cancel" style="margin-top:16px;">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelectorAll('[data-type]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const type = btn.dataset.type;
+      const info = REPORT_SECTION_TYPES[type];
+      sheet.remove();
+      const section = await DB.addReportSection(inspectionId, type, info.label);
+      await openReportSectionEditor(inspectionId, section, onAdded);
+      onAdded();
+    });
+  });
+}
+
+async function openReportSectionEditor(inspectionId, section, onChanged) {
+  if (section.type === 'text') return openTextReportSectionSheet(inspectionId, section, onChanged);
+  if (section.type === 'drawing') { navigate(`#/inspection/${inspectionId}/rsection/${section.id}/drawings`); return; }
+  if (section.type === 'appendices') { navigate(`#/inspection/${inspectionId}/rsection/${section.id}/appendices`); return; }
+  if (section.type === 'inspection') return openInspectionTypeSectionLink(inspectionId, section, onChanged);
+  return openAutoSectionInfoSheet(inspectionId, section, onChanged);
+}
+
+function openTextReportSectionSheet(inspectionId, section, onChanged) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Text section</h2>
+        <div class="field"><label>Title</label><input type="text" id="f-title" value="${esc(section.title)}"></div>
+        ${richTextToolbarHTML('rst')}
+        <div class="rt-editor" id="rst-editor" contenteditable="true"></div>
+        <button class="btn btn-primary btn-block" id="btn-save" style="margin-top:14px;">Save</button>
+        <button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:10px;">Delete section</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  const editorApi = wireRichTextEditor(sheet, 'rst', section.textHtml);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-save').addEventListener('click', async () => {
+    await DB.updateReportSection(section.id, { title: sheet.querySelector('#f-title').value.trim(), textHtml: editorApi.getHTML() });
+    sheet.remove();
+    onChanged();
+  });
+  sheet.querySelector('#btn-delete').addEventListener('click', async () => {
+    if (!confirm('Delete this section?')) return;
+    await DB.deleteReportSectionCascade(section.id);
+    sheet.remove();
+    onChanged();
+  });
+}
+
+async function openInspectionTypeSectionLink(inspectionId, section) {
+  let elementSectionId = section.elementSectionId;
+  if (!elementSectionId) {
+    const newSection = await DB.createSection(inspectionId, { name: section.title || 'Inspection Section' });
+    elementSectionId = newSection.id;
+    await DB.updateReportSection(section.id, { elementSectionId });
+  }
+  navigate(`#/inspection/${inspectionId}/section/${elementSectionId}`);
+}
+
+function openAutoSectionInfoSheet(inspectionId, section, onChanged) {
+  const descriptions = {
+    locationMap: 'Uses the map mode and scale set in Report Info — the same auto-generated or uploaded map used elsewhere.',
+    inspectionDetails: 'Generated automatically from this inspection\u2019s own details (date, inspector, weather, reference, etc.) — nothing to fill in here.',
+    elementSummary: 'Generated automatically as a table summarizing every element and finding across the whole inspection.'
+  };
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>${REPORT_SECTION_TYPES[section.type].icon} ${REPORT_SECTION_TYPES[section.type].label}</h2>
+        <p class="muted" style="font-size:14px;">${descriptions[section.type] || ''}</p>
+        <div class="field"><label>Title (shown in the report)</label><input type="text" id="f-title" value="${esc(section.title)}"></div>
+        <button class="btn btn-primary btn-block" id="btn-save">Save</button>
+        ${section.type === 'locationMap' ? '<button class="btn btn-secondary btn-block" id="btn-open-info" style="margin-top:10px;">Open Report Info</button>' : ''}
+        <button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:10px;">Delete section</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-save').addEventListener('click', async () => {
+    await DB.updateReportSection(section.id, { title: sheet.querySelector('#f-title').value.trim() });
+    sheet.remove();
+    onChanged();
+  });
+  const infoBtn = sheet.querySelector('#btn-open-info');
+  if (infoBtn) infoBtn.addEventListener('click', () => { sheet.remove(); openReportInfoSheet(inspectionId); });
+  sheet.querySelector('#btn-delete').addEventListener('click', async () => {
+    if (!confirm('Delete this section?')) return;
+    await DB.deleteReportSectionCascade(section.id);
+    sheet.remove();
+    onChanged();
+  });
+}
+
+async function renderReportSectionDrawings(inspectionId, reportSectionId) {
+  const insp = await DB.get('inspections', inspectionId);
+  const section = await DB.get('reportSections', reportSectionId);
+  if (!insp || !section) { navigate(`#/inspection/${inspectionId}`); return; }
+  let drawings = await DB.listSectionDrawings(reportSectionId);
+
+  appEl.innerHTML = `
+    <div class="topbar">
+      <button class="icon-btn" id="btn-back">‹</button>
+      <div style="flex:1; min-width:0;">
+        <h1 style="font-size:17px;">${esc(section.title) || 'Drawing section'}</h1>
+        <span class="sub">${esc(insp.structureName)}</span>
+      </div>
+    </div>
+    <div class="content" id="drawings-list"></div>
+    <button class="fab" id="btn-add-drawing">＋</button>
+  `;
+  document.getElementById('btn-back').addEventListener('click', () => navigate(`#/inspection/${inspectionId}`));
+  document.getElementById('btn-add-drawing').addEventListener('click', () => openAddSectionDrawingSheet(inspectionId, reportSectionId, () => renderReportSectionDrawings(inspectionId, reportSectionId)));
+
+  function renderList() {
+    const list = document.getElementById('drawings-list');
+    if (!drawings.length) {
+      list.innerHTML = `
+        <div class="empty-state">
+          <div class="glyph">📐</div>
+          <h3>No drawings yet</h3>
+          <p>Add photos or import a PDF (page by page) into this section.</p>
+        </div>`;
+      return;
+    }
+    list.innerHTML = drawings.map((d) => `
+      <div class="list-item" data-drawing="${d.id}">
+        <div class="photo-thumb" style="width:56px; height:56px; flex-shrink:0; margin-right:12px;">
+          <img src="${blobUrl(d.annotatedBlob || d.originalBlob)}">
+          ${d.annotatedBlob ? '<div class="annotated-dot"></div>' : ''}
+        </div>
+        <div class="meta"><h3>${esc(d.title) || 'Untitled'}</h3></div>
+        <span class="chevron">›</span>
+      </div>
+    `).join('');
+    list.querySelectorAll('[data-drawing]').forEach((row) => {
+      row.addEventListener('click', () => {
+        const d = drawings.find((x) => x.id === row.dataset.drawing);
+        openDrawingDetailSheet(d, {
+          onChanged: async () => { drawings = await DB.listSectionDrawings(reportSectionId); renderList(); }
+        });
+      });
+    });
+  }
+  renderList();
+}
+
+function openAddSectionDrawingSheet(inspectionId, reportSectionId, onAdded) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Add drawing</h2>
+        <button class="btn btn-primary btn-block" id="btn-camera">📷 Take photo</button>
+        <button class="btn btn-secondary btn-block" id="btn-library" style="margin-top:10px;">🖼 Choose from library</button>
+        <button class="btn btn-secondary btn-block" id="btn-pdf" style="margin-top:10px;">📄 Import PDF</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel" style="margin-top:16px;">Cancel</button>
+        <input type="file" id="asd-camera-input" accept="image/*" capture="environment" style="display:none;">
+        <input type="file" id="asd-library-input" accept="image/*" multiple style="display:none;">
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
+
+  async function handleImageFiles(fileList) {
+    sheet.remove();
+    for (const file of Array.from(fileList)) {
+      const normalized = await normalizeImageFile(file);
+      await DB.addSectionDrawing(reportSectionId, inspectionId, normalized, file.name.replace(/\.[a-z0-9]+$/i, ''));
+    }
+    onAdded();
+  }
+  sheet.querySelector('#btn-camera').addEventListener('click', () => sheet.querySelector('#asd-camera-input').click());
+  sheet.querySelector('#btn-library').addEventListener('click', () => sheet.querySelector('#asd-library-input').click());
+  sheet.querySelector('#asd-camera-input').addEventListener('change', (e) => { if (e.target.files.length) handleImageFiles(e.target.files); });
+  sheet.querySelector('#asd-library-input').addEventListener('change', (e) => { if (e.target.files.length) handleImageFiles(e.target.files); });
+
+  sheet.querySelector('#btn-pdf').addEventListener('click', () => {
+    sheet.remove();
+    openPdfImportFlow(
+      (blob, title) => DB.addSectionDrawing(reportSectionId, inspectionId, blob, title),
+      () => { toast('Import complete'); onAdded(); }
+    );
+  });
+}
+
+// ---------- APPENDICES scoped to a report section (New Style) ----------
+async function renderReportSectionAppendix(inspectionId, reportSectionId, appendixId) {
+  const insp = await DB.get('inspections', inspectionId);
+  const section = await DB.get('reportSections', reportSectionId);
+  if (!insp || !section) { navigate(`#/inspection/${inspectionId}`); return; }
+  const appendices = await DB.listSectionAppendices(reportSectionId);
+  const appendixIndex = appendices.findIndex((a) => a.id === appendixId);
+  const appendix = appendices[appendixIndex];
+  if (!appendix) { navigate(`#/inspection/${inspectionId}/rsection/${reportSectionId}/appendices`); return; }
+  const fullTitle = `Appendix ${appendixLetter(appendixIndex)} - ${appendix.name}`;
+  let items = await DB.listAppendixItems(appendixId);
+
+  appEl.innerHTML = `
+    <div class="topbar">
+      <button class="icon-btn" id="btn-back">‹</button>
+      <div style="flex:1; min-width:0;">
+        <h1 style="font-size:17px;">${esc(fullTitle)}</h1>
+        <span class="sub">${esc(insp.structureName)}</span>
+      </div>
+      <button class="text-btn" id="btn-rename">Edit</button>
+    </div>
+    <div class="content" id="ai-list"></div>
+    <button class="fab" id="btn-add-item">＋</button>
+  `;
+  document.getElementById('btn-back').addEventListener('click', () => navigate(`#/inspection/${inspectionId}/rsection/${reportSectionId}/appendices`));
+  document.getElementById('btn-rename').addEventListener('click', () => {
+    const nameSheet = el(`
+      <div class="sheet-backdrop">
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <h2>Edit appendix</h2>
+          <div class="field">
+            <label>Name</label>
+            <div class="link-row">
+              <span style="font-weight:700; color:var(--ink-soft); margin-right:6px; white-space:nowrap;">Appendix ${appendixLetter(appendixIndex)} -</span>
+              <input type="text" id="f-name" value="${esc(appendix.name)}" style="flex:1;">
+            </div>
+          </div>
+          <button class="btn btn-primary btn-block" id="btn-save">Save</button>
+          <button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:8px;">Delete appendix</button>
+          <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+        </div>
+      </div>
+    `);
+    presentOverlay(nameSheet);
+    nameSheet.addEventListener('click', (e) => { if (e.target === nameSheet) nameSheet.remove(); });
+    nameSheet.querySelector('#btn-cancel').addEventListener('click', () => nameSheet.remove());
+    nameSheet.querySelector('#btn-save').addEventListener('click', async () => {
+      const name = nameSheet.querySelector('#f-name').value.trim();
+      if (!name) { toast('Enter a name'); return; }
+      await DB.updateSectionAppendix(reportSectionId, appendixId, { name });
+      nameSheet.remove();
+      renderReportSectionAppendix(inspectionId, reportSectionId, appendixId);
+    });
+    nameSheet.querySelector('#btn-delete').addEventListener('click', async () => {
+      if (!confirm('Delete this appendix and everything in it?')) return;
+      await DB.deleteSectionAppendixCascade(reportSectionId, appendixId);
+      nameSheet.remove();
+      navigate(`#/inspection/${inspectionId}/rsection/${reportSectionId}/appendices`);
+    });
+  });
+  document.getElementById('btn-add-item').addEventListener('click', () => openAddAppendixItemSheet(inspectionId, appendixId, () => renderReportSectionAppendix(inspectionId, reportSectionId, appendixId)));
+
+  function renderList() {
+    const list = document.getElementById('ai-list');
+    if (!items.length) {
+      list.innerHTML = `<div class="empty-state"><div class="glyph">📎</div><h3>No items yet</h3><p>Add photos or import a PDF into this appendix.</p></div>`;
+      return;
+    }
+    list.innerHTML = items.map((it) => `
+      <div class="list-item" data-item="${it.id}">
+        <div class="photo-thumb" style="width:56px; height:56px; flex-shrink:0; margin-right:12px;">
+          <img src="${blobUrl(it.annotatedBlob || it.originalBlob)}">
+          ${it.annotatedBlob ? '<div class="annotated-dot"></div>' : ''}
+        </div>
+        <div class="meta"><h3>${esc(it.title) || 'Untitled'}</h3></div>
+        <span class="chevron">›</span>
+      </div>
+    `).join('');
+    list.querySelectorAll('[data-item]').forEach((row) => {
+      row.addEventListener('click', () => {
+        const it = items.find((x) => x.id === row.dataset.item);
+        openAppendixItemDetailSheet(it, {
+          onChanged: async () => { items = await DB.listAppendixItems(appendixId); renderList(); }
+        });
+      });
+    });
+  }
+  renderList();
+}
+
+async function renderReportSectionAppendicesList(inspectionId, reportSectionId) {
+  const insp = await DB.get('inspections', inspectionId);
+  const section = await DB.get('reportSections', reportSectionId);
+  if (!insp || !section) { navigate(`#/inspection/${inspectionId}`); return; }
+  let appendices = await DB.listSectionAppendices(reportSectionId);
+
+  appEl.innerHTML = `
+    <div class="topbar">
+      <button class="icon-btn" id="btn-back">‹</button>
+      <div style="flex:1; min-width:0;">
+        <h1 style="font-size:17px;">${esc(section.title) || 'Appendices'}</h1>
+        <span class="sub">${esc(insp.structureName)}</span>
+      </div>
+      <button class="text-btn" id="btn-section-title">Edit</button>
+    </div>
+    <div class="content">
+      <div id="appendix-list"></div>
+      <div class="checkbox-row" style="margin-top:14px;">
+        <input type="checkbox" id="f-include-ra" ${section.includeRiskAssessment ? 'checked' : ''}>
+        <label for="f-include-ra">Include Risk Assessment as an appendix (always last)</label>
+      </div>
+    </div>
+    <button class="fab" id="btn-add-appendix">＋</button>
+  `;
+  document.getElementById('btn-back').addEventListener('click', () => navigate(`#/inspection/${inspectionId}`));
+  document.getElementById('f-include-ra').addEventListener('change', async (e) => {
+    await DB.updateReportSection(reportSectionId, { includeRiskAssessment: e.target.checked });
+  });
+  document.getElementById('btn-section-title').addEventListener('click', () => {
+    const nameSheet = el(`
+      <div class="sheet-backdrop">
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <h2>Section title</h2>
+          <div class="field"><label>Title</label><input type="text" id="f-title" value="${esc(section.title)}"></div>
+          <button class="btn btn-primary btn-block" id="btn-save">Save</button>
+          <button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:8px;">Delete section</button>
+          <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+        </div>
+      </div>
+    `);
+    presentOverlay(nameSheet);
+    nameSheet.addEventListener('click', (e) => { if (e.target === nameSheet) nameSheet.remove(); });
+    nameSheet.querySelector('#btn-cancel').addEventListener('click', () => nameSheet.remove());
+    nameSheet.querySelector('#btn-save').addEventListener('click', async () => {
+      await DB.updateReportSection(reportSectionId, { title: nameSheet.querySelector('#f-title').value.trim() });
+      nameSheet.remove();
+      renderReportSectionAppendicesList(inspectionId, reportSectionId);
+    });
+    nameSheet.querySelector('#btn-delete').addEventListener('click', async () => {
+      if (!confirm('Delete this section and every appendix in it?')) return;
+      await DB.deleteReportSectionCascade(reportSectionId);
+      nameSheet.remove();
+      navigate(`#/inspection/${inspectionId}`);
+    });
+  });
+
+  function renderList() {
+    const list = document.getElementById('appendix-list');
+    if (!appendices.length) {
+      list.innerHTML = `<p class="muted" style="font-size:13px; padding:0 2px;">No appendices yet.</p>`;
+      return;
+    }
+    list.innerHTML = appendices.map((a, i) => `
+      <div class="tpl-row" data-appendix="${a.id}" style="cursor:pointer;">
+        <span>Appendix ${appendixLetter(i)} - ${esc(a.name)}</span>
+        <span class="chevron">›</span>
+      </div>
+    `).join('');
+    list.querySelectorAll('[data-appendix]').forEach((row) => {
+      row.addEventListener('click', () => navigate(`#/inspection/${inspectionId}/rsection/${reportSectionId}/appendices/${row.dataset.appendix}`));
+    });
+  }
+  renderList();
+
+  document.getElementById('btn-add-appendix').addEventListener('click', () => {
+    const letter = appendixLetter(appendices.length);
+    const nameSheet = el(`
+      <div class="sheet-backdrop">
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <h2>New appendix</h2>
+          <div class="field">
+            <label>Name</label>
+            <div class="link-row">
+              <span style="font-weight:700; color:var(--ink-soft); margin-right:6px; white-space:nowrap;">Appendix ${letter} -</span>
+              <input type="text" id="f-appendix-name" placeholder="e.g. Site Photos" style="flex:1;">
+            </div>
+          </div>
+          <button class="btn btn-primary btn-block" id="btn-save-appendix">Add</button>
+          <button class="btn btn-ghost btn-block" id="btn-cancel-appendix">Cancel</button>
+        </div>
+      </div>
+    `);
+    presentOverlay(nameSheet);
+    nameSheet.addEventListener('click', (e) => { if (e.target === nameSheet) nameSheet.remove(); });
+    nameSheet.querySelector('#btn-cancel-appendix').addEventListener('click', () => nameSheet.remove());
+    nameSheet.querySelector('#btn-save-appendix').addEventListener('click', async () => {
+      const name = nameSheet.querySelector('#f-appendix-name').value.trim();
+      if (!name) { toast('Enter a name'); return; }
+      await DB.addSectionAppendix(reportSectionId, name);
+      nameSheet.remove();
+      appendices = await DB.listSectionAppendices(reportSectionId);
+      renderList();
+    });
   });
 }
 
@@ -637,6 +1201,7 @@ function openNewInspectionSheet() {
 async function renderInspection(inspectionId) {
   const insp = await DB.get('inspections', inspectionId);
   if (!insp) { navigate('#/'); return; }
+  if (insp.reportStyle === 'new') { await renderInspectionNewStyle(inspectionId, insp); return; }
   const sections = await DB.listSections(inspectionId);
   const ungroupedElements = await DB.listElementsBySection(inspectionId, null);
   const coverPhoto = await DB.getCoverPhoto(inspectionId);
@@ -1157,12 +1722,18 @@ function wireRichTextEditor(container, idPrefix, initialValue) {
   function cmd(command, value) {
     editor.focus();
     document.execCommand(command, false, value);
+    syncToolbarState();
   }
-  container.querySelector(`#${idPrefix}-bold`).addEventListener('click', () => cmd('bold'));
-  container.querySelector(`#${idPrefix}-italic`).addEventListener('click', () => cmd('italic'));
-  container.querySelector(`#${idPrefix}-underline`).addEventListener('click', () => cmd('underline'));
-  container.querySelector(`#${idPrefix}-ul`).addEventListener('click', () => cmd('insertUnorderedList'));
-  container.querySelector(`#${idPrefix}-ol`).addEventListener('click', () => cmd('insertOrderedList'));
+  const boldBtn = container.querySelector(`#${idPrefix}-bold`);
+  const italicBtn = container.querySelector(`#${idPrefix}-italic`);
+  const underlineBtn = container.querySelector(`#${idPrefix}-underline`);
+  const ulBtn = container.querySelector(`#${idPrefix}-ul`);
+  const olBtn = container.querySelector(`#${idPrefix}-ol`);
+  boldBtn.addEventListener('click', () => cmd('bold'));
+  italicBtn.addEventListener('click', () => cmd('italic'));
+  underlineBtn.addEventListener('click', () => cmd('underline'));
+  ulBtn.addEventListener('click', () => cmd('insertUnorderedList'));
+  olBtn.addEventListener('click', () => cmd('insertOrderedList'));
   container.querySelector(`#${idPrefix}-indent`).addEventListener('click', () => cmd('indent'));
   container.querySelector(`#${idPrefix}-outdent`).addEventListener('click', () => cmd('outdent'));
 
@@ -1180,6 +1751,28 @@ function wireRichTextEditor(container, idPrefix, initialValue) {
     // highlighting; fall back if hiliteColor isn't reported as supported.
     const supported = document.queryCommandSupported && document.queryCommandSupported('hiliteColor');
     document.execCommand(supported ? 'hiliteColor' : 'backColor', false, e.target.value);
+    syncToolbarState();
+  });
+
+  // Reflects whatever formatting is active at the current cursor/selection back onto the
+  // toolbar buttons — previously the buttons worked but never indicated selected state,
+  // which was confusing since there was no way to tell bold/italic/etc were "on" without
+  // clicking and checking the text.
+  function syncToolbarState() {
+    if (!document.queryCommandState) return;
+    try {
+      boldBtn.classList.toggle('active', document.queryCommandState('bold'));
+      italicBtn.classList.toggle('active', document.queryCommandState('italic'));
+      underlineBtn.classList.toggle('active', document.queryCommandState('underline'));
+      ulBtn.classList.toggle('active', document.queryCommandState('insertUnorderedList'));
+      olBtn.classList.toggle('active', document.queryCommandState('insertOrderedList'));
+    } catch (err) { /* queryCommandState can throw for unsupported commands on some browsers */ }
+  }
+  editor.addEventListener('keyup', syncToolbarState);
+  editor.addEventListener('mouseup', syncToolbarState);
+  editor.addEventListener('focus', syncToolbarState);
+  document.addEventListener('selectionchange', () => {
+    if (document.activeElement === editor) syncToolbarState();
   });
 
   return { getHTML: () => editor.innerHTML };

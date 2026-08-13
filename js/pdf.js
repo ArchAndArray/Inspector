@@ -166,6 +166,289 @@ async function buildLocationMapForReport(insp, { contentW }) {
   }
 }
 
+function drawInspectionDetailsBlock(doc, insp, y, { margin, contentW }) {
+  const details = [
+    ['Structure name', insp.structureName || '—'],
+    ['Structure ID', insp.structureId || '—'],
+    ['Client', insp.client || '—'],
+    ['Reference', insp.reference || '—'],
+    ['Inspection type', insp.inspectionType || '—'],
+    ['Date', fmtDate(insp.date)],
+    ['Inspector', insp.inspector || '—'],
+    ['Weather', insp.weather || '—'],
+    ['Location', (insp.location && insp.location.manual) || '—']
+  ];
+  doc.setFontSize(11);
+  for (const [label, value] of details) {
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(74, 79, 90);
+    doc.text(label, margin, y);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(28, 31, 38);
+    doc.text(String(value), margin + 150, y, { maxWidth: contentW - 150 });
+    y += 22;
+  }
+  if (insp.notes) {
+    y += 10;
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(74, 79, 90);
+    doc.text('Notes', margin, y);
+    y += 16;
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(28, 31, 38);
+    const lines = doc.splitTextToSize(insp.notes, contentW);
+    doc.text(lines, margin, y);
+    y += lines.length * 14;
+  }
+  return y;
+}
+
+function drawElementSummaryTableForGroups(doc, groups, y, { margin, contentW, pageH, title }) {
+  if (y > pageH - 150) { doc.addPage(); y = margin; }
+  y = pageHeading(doc, title || 'Element Summary', y);
+
+  const rows = [];
+  for (const g of groups) {
+    for (const ed of g.elementData) {
+      let worstSeverity = 0, worstExtent = '';
+      const extentOrder = ['A', 'B', 'C', 'D', 'E'];
+      ed.findings.forEach((f) => {
+        if (f.severity && f.severity > worstSeverity) worstSeverity = f.severity;
+        if (f.extent && (!worstExtent || extentOrder.indexOf(f.extent) > extentOrder.indexOf(worstExtent))) worstExtent = f.extent;
+      });
+      rows.push([
+        g.section ? g.section.name : '—',
+        ed.element.name,
+        ed.element.materialType || '—',
+        ed.element.location || '—',
+        String(ed.findings.length),
+        worstSeverity ? String(worstSeverity) : '—',
+        worstExtent || '—'
+      ]);
+    }
+  }
+
+  if (doc.autoTable) {
+    doc.autoTable({
+      startY: y,
+      margin: { left: margin, right: margin },
+      head: [['Section', 'Element', 'Material', 'Location', 'Findings', 'Worst Sev.', 'Worst Ext.']],
+      body: rows,
+      styles: { font: 'helvetica', fontSize: 8.5, cellPadding: 5 },
+      headStyles: { fillColor: [28, 31, 38], textColor: 255 },
+      didParseCell: (data) => {
+        if (data.section === 'body' && data.column.index === 5) {
+          const sev = Number(data.cell.raw);
+          if (SEV_COLORS_RGB[sev]) {
+            data.cell.styles.textColor = SEV_COLORS_RGB[sev];
+            data.cell.styles.fontStyle = 'bold';
+          }
+        }
+      }
+    });
+    y = doc.lastAutoTable.finalY + 20;
+  } else {
+    doc.setFontSize(9);
+    rows.forEach((r) => { doc.text(r.join('   |   '), margin, y); y += 14; });
+  }
+  return y;
+}
+
+// Draws one group's (section's) header plus every element and finding within it — the
+// reusable core of the detailed findings loop, used both for Old Style's all-groups-in-
+// sequence flow and for New Style's single Inspection-type section.
+function drawGroupFindings(doc, insp, g, y, { margin, contentW, pageH, pageW }) {
+  if (g.section) {
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(18);
+    doc.setTextColor(200, 30, 30);
+    doc.text(g.section.name, margin, y);
+    y += 22;
+    if (g.section.comments) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10.5);
+      doc.setTextColor(74, 79, 90);
+      const lines = doc.splitTextToSize(g.section.comments, contentW);
+      doc.text(lines, margin, y);
+      y += lines.length * 13 + 6;
+    }
+    doc.setDrawColor(220, 223, 228);
+    doc.line(margin, y, pageW - margin, y);
+    y += 20;
+  }
+
+  for (const ed of g.elementData) {
+    if (y > pageH - margin - 60) { doc.addPage(); y = margin; }
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(15);
+    doc.setTextColor(28, 31, 38);
+    doc.text(ed.element.name, margin, y);
+    y += 18;
+
+    const meta = [ed.element.materialType, ed.element.location].filter(Boolean).join('   ·   ');
+    if (meta) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.setTextColor(120, 124, 132);
+      doc.text(meta, margin, y);
+      y += 16;
+    }
+
+    if (ed.refPhotos.length) {
+      for (const p of ed.refPhotos) {
+        y = drawPhotoBlock(doc, p, p.caption, y, { margin, contentW, pageH });
+      }
+    }
+
+    doc.setDrawColor(235, 236, 239);
+    doc.line(margin, y, pageW - margin, y);
+    y += 16;
+
+    if (!ed.findings.length) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10.5);
+      doc.setTextColor(120, 124, 132);
+      doc.text('No findings recorded for this element.', margin, y);
+      y += 24;
+      continue;
+    }
+
+    for (const f of ed.findings) {
+      if (y + 60 > pageH - margin) { doc.addPage(); y = margin; }
+
+      let bx = margin;
+      if (f.severity) {
+        const col = SEV_COLORS_RGB[f.severity];
+        doc.setFillColor(col[0], col[1], col[2]);
+        const label = `S${f.severity} · ${SEVERITY_LABELS[f.severity]}`;
+        const w = doc.getTextWidth(label) + 16;
+        doc.roundedRect(bx, y, w, 20, 10, 10, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(10);
+        doc.text(label, bx + 8, y + 14);
+        bx += w + 8;
+      }
+      if (f.extent) {
+        doc.setFillColor(28, 31, 38);
+        const label = `${f.extent} · ${EXTENT_LABELS[f.extent]}`;
+        const w = doc.getTextWidth(label) + 16;
+        doc.roundedRect(bx, y, w, 20, 10, 10, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(10);
+        doc.text(label, bx + 8, y + 14);
+        bx += w + 8;
+      }
+      if (f.priority) {
+        const col = PRIORITY_COLORS_RGB[f.priority] || [120, 124, 132];
+        doc.setFillColor(col[0], col[1], col[2]);
+        const label = `Priority: ${f.priority}`;
+        const w = doc.getTextWidth(label) + 16;
+        doc.roundedRect(bx, y, w, 20, 10, 10, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(10);
+        doc.text(label, bx + 8, y + 14);
+      }
+      y += 32;
+
+      if (f.notes) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10.5);
+        doc.setTextColor(28, 31, 38);
+        const lines = doc.splitTextToSize(f.notes, contentW);
+        if (y + lines.length * 13 > pageH - margin) { doc.addPage(); y = margin; }
+        doc.text(lines, margin, y);
+        y += lines.length * 13 + 8;
+      }
+
+      if (f.worksRequired) {
+        if (y + 40 > pageH - margin) { doc.addPage(); y = margin; }
+        const boxTop = y;
+        let boxLines = [];
+        if (f.worksDescription) {
+          doc.setFont('helvetica', 'normal');
+          boxLines = doc.splitTextToSize(f.worksDescription, contentW - 20);
+        }
+        const currencySymbol = CURRENCY_SYMBOLS[insp.currency] || '$';
+        const cleanCost = String(f.costEstimate || '').replace(/^[\$£€\s]+/, '');
+        const estLine = cleanCost ? `Cost estimate: ${currencySymbol}${cleanCost}` : '';
+        const totalLines = boxLines.length + (estLine ? 1 : 0);
+        const boxH = 22 + totalLines * 13 + 8;
+        doc.setFillColor(247, 238, 233);
+        doc.roundedRect(margin, boxTop, contentW, boxH, 4, 4, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(10);
+        doc.setTextColor(28, 31, 38);
+        doc.text('Works required', margin + 10, boxTop + 15);
+        let wy = boxTop + 15 + 15;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+        if (boxLines.length) {
+          doc.text(boxLines, margin + 10, wy);
+          wy += boxLines.length * 13;
+        }
+        if (estLine) {
+          doc.setFont('helvetica', 'bold');
+          doc.text(estLine, margin + 10, wy);
+        }
+        y = boxTop + boxH + 10;
+      }
+
+      if (f.photos.length) {
+        for (const p of f.photos) {
+          y = drawPhotoBlock(doc, p, p.caption, y, { margin, contentW, pageH });
+        }
+      }
+      y += 8;
+      doc.setDrawColor(235, 236, 239);
+      doc.line(margin, y - 8, pageW - margin, y - 8);
+    }
+    y += 12;
+  }
+  return y;
+}
+
+// Standalone version of the element-data loader used inside buildAndSaveInspectionPDF's
+// closure — needed as a free function here since New Style gathers elements per report
+// section rather than for the whole inspection at once.
+async function loadElementDataForPdf(elmt) {
+  const refPhotos = [];
+  for (const p of await DB.listPhotosForElement(elmt.id)) {
+    refPhotos.push({ ...(await loadNormalizedImage(p.annotatedBlob || p.originalBlob)), caption: p.caption || '' });
+  }
+  const findings = await DB.listFindings(elmt.id);
+  const findingsWithPhotos = [];
+  for (const f of findings) {
+    const photoData = [];
+    for (const p of await DB.listPhotosForFinding(f.id)) {
+      photoData.push({ ...(await loadNormalizedImage(p.annotatedBlob || p.originalBlob)), caption: p.caption || '' });
+    }
+    findingsWithPhotos.push({ ...f, photos: photoData });
+  }
+  return { element: elmt, refPhotos, findings: findingsWithPhotos };
+}
+
+async function buildAllElementGroups(inspectionId) {
+  const sections = await DB.listSections(inspectionId);
+  const groups = [];
+  for (const sec of sections) {
+    const elements = await DB.listElementsBySection(inspectionId, sec.id);
+    const elementData = [];
+    for (const e of elements) elementData.push(await loadElementDataForPdf(e));
+    groups.push({ section: sec, elementData });
+  }
+  const ungrouped = await DB.listElementsBySection(inspectionId, null);
+  if (ungrouped.length) {
+    const elementData = [];
+    for (const e of ungrouped) elementData.push(await loadElementDataForPdf(e));
+    groups.push({ section: null, elementData });
+  }
+  return groups;
+}
+
 async function exportInspectionPDF(inspectionId) {
   if (!window.jspdf) {
     toast('PDF library not loaded. Connect to the internet once to cache it, then try again.');
@@ -293,40 +576,7 @@ async function buildAndSaveInspectionPDF(inspectionId) {
   tocEntries.push({ label: 'Inspection Details', page: doc.internal.getNumberOfPages(), group: 'report' });
   let y = margin;
   y = pageHeading(doc, 'Inspection Details', y);
-
-  const details = [
-    ['Structure name', insp.structureName || '—'],
-    ['Structure ID', insp.structureId || '—'],
-    ['Client', insp.client || '—'],
-    ['Reference', insp.reference || '—'],
-    ['Inspection type', insp.inspectionType || '—'],
-    ['Date', fmtDate(insp.date)],
-    ['Inspector', insp.inspector || '—'],
-    ['Weather', insp.weather || '—'],
-    ['Location', (insp.location && insp.location.manual) || '—']
-  ];
-  doc.setFontSize(11);
-  for (const [label, value] of details) {
-    doc.setFont('helvetica', 'bold');
-    doc.setTextColor(74, 79, 90);
-    doc.text(label, margin, y);
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(28, 31, 38);
-    doc.text(String(value), margin + 150, y, { maxWidth: contentW - 150 });
-    y += 22;
-  }
-  if (insp.notes) {
-    y += 10;
-    doc.setFont('helvetica', 'bold');
-    doc.setTextColor(74, 79, 90);
-    doc.text('Notes', margin, y);
-    y += 16;
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(28, 31, 38);
-    const lines = doc.splitTextToSize(insp.notes, contentW);
-    doc.text(lines, margin, y);
-    y += lines.length * 14;
-  }
+  y = drawInspectionDetailsBlock(doc, insp, y, { margin, contentW });
 
   // ---- BCI / MDCI summary (GI Bridges inspections only) ----
   if (insp.inspectionType === 'GI Bridges') {
@@ -387,53 +637,7 @@ async function buildAndSaveInspectionPDF(inspectionId) {
 
   // Element summary table (grouped by section)
   y += 20;
-  if (y > pageH - 150) { doc.addPage(); y = margin; }
-  y = pageHeading(doc, 'Element Summary', y);
-
-  const rows = [];
-  for (const g of groups) {
-    for (const ed of g.elementData) {
-      let worstSeverity = 0, worstExtent = '';
-      const extentOrder = ['A', 'B', 'C', 'D', 'E'];
-      ed.findings.forEach((f) => {
-        if (f.severity && f.severity > worstSeverity) worstSeverity = f.severity;
-        if (f.extent && (!worstExtent || extentOrder.indexOf(f.extent) > extentOrder.indexOf(worstExtent))) worstExtent = f.extent;
-      });
-      rows.push([
-        g.section ? g.section.name : '—',
-        ed.element.name,
-        ed.element.materialType || '—',
-        ed.element.location || '—',
-        String(ed.findings.length),
-        worstSeverity ? String(worstSeverity) : '—',
-        worstExtent || '—'
-      ]);
-    }
-  }
-
-  if (doc.autoTable) {
-    doc.autoTable({
-      startY: y,
-      margin: { left: margin, right: margin },
-      head: [['Section', 'Element', 'Material', 'Location', 'Findings', 'Worst Sev.', 'Worst Ext.']],
-      body: rows,
-      styles: { font: 'helvetica', fontSize: 8.5, cellPadding: 5 },
-      headStyles: { fillColor: [28, 31, 38], textColor: 255 },
-      didParseCell: (data) => {
-        if (data.section === 'body' && data.column.index === 5) {
-          const sev = Number(data.cell.raw);
-          if (SEV_COLORS_RGB[sev]) {
-            data.cell.styles.textColor = SEV_COLORS_RGB[sev];
-            data.cell.styles.fontStyle = 'bold';
-          }
-        }
-      }
-    });
-    y = doc.lastAutoTable.finalY + 20;
-  } else {
-    doc.setFontSize(9);
-    rows.forEach((r) => { doc.text(r.join('   |   '), margin, y); y += 14; });
-  }
+  y = drawElementSummaryTableForGroups(doc, groups, y, { margin, contentW, pageH });
 
   // ---------- Detailed findings, grouped by section ----------
   let isFirstGroup = true;
@@ -441,157 +645,7 @@ async function buildAndSaveInspectionPDF(inspectionId) {
     doc.addPage();
     if (isFirstGroup) { tocEntries.push({ label: 'Findings', page: doc.internal.getNumberOfPages(), group: 'report' }); isFirstGroup = false; }
     y = margin;
-    if (g.section) {
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(18);
-      doc.setTextColor(200, 30, 30);
-      doc.text(g.section.name, margin, y);
-      y += 22;
-      if (g.section.comments) {
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(10.5);
-        doc.setTextColor(74, 79, 90);
-        const lines = doc.splitTextToSize(g.section.comments, contentW);
-        doc.text(lines, margin, y);
-        y += lines.length * 13 + 6;
-      }
-      doc.setDrawColor(220, 223, 228);
-      doc.line(margin, y, pageW - margin, y);
-      y += 20;
-    }
-
-    for (const ed of g.elementData) {
-      if (y > pageH - margin - 60) { doc.addPage(); y = margin; }
-
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(15);
-      doc.setTextColor(28, 31, 38);
-      doc.text(ed.element.name, margin, y);
-      y += 18;
-
-      const meta = [ed.element.materialType, ed.element.location].filter(Boolean).join('   ·   ');
-      if (meta) {
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(10);
-        doc.setTextColor(120, 124, 132);
-        doc.text(meta, margin, y);
-        y += 16;
-      }
-
-      // Element reference photos
-      if (ed.refPhotos.length) {
-        for (const p of ed.refPhotos) {
-          y = drawPhotoBlock(doc, p, p.caption, y, { margin, contentW, pageH });
-        }
-      }
-
-      doc.setDrawColor(235, 236, 239);
-      doc.line(margin, y, pageW - margin, y);
-      y += 16;
-
-      if (!ed.findings.length) {
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(10.5);
-        doc.setTextColor(120, 124, 132);
-        doc.text('No findings recorded for this element.', margin, y);
-        y += 24;
-        continue;
-      }
-
-      for (const f of ed.findings) {
-        if (y + 60 > pageH - margin) { doc.addPage(); y = margin; }
-
-        let bx = margin;
-        if (f.severity) {
-          const col = SEV_COLORS_RGB[f.severity];
-          doc.setFillColor(col[0], col[1], col[2]);
-          const label = `S${f.severity} · ${SEVERITY_LABELS[f.severity]}`;
-          const w = doc.getTextWidth(label) + 16;
-          doc.roundedRect(bx, y, w, 20, 10, 10, 'F');
-          doc.setTextColor(255, 255, 255);
-          doc.setFont('helvetica', 'bold');
-          doc.setFontSize(10);
-          doc.text(label, bx + 8, y + 14);
-          bx += w + 8;
-        }
-        if (f.extent) {
-          doc.setFillColor(28, 31, 38);
-          const label = `${f.extent} · ${EXTENT_LABELS[f.extent]}`;
-          const w = doc.getTextWidth(label) + 16;
-          doc.roundedRect(bx, y, w, 20, 10, 10, 'F');
-          doc.setTextColor(255, 255, 255);
-          doc.setFont('helvetica', 'bold');
-          doc.setFontSize(10);
-          doc.text(label, bx + 8, y + 14);
-          bx += w + 8;
-        }
-        if (f.priority) {
-          const col = PRIORITY_COLORS_RGB[f.priority] || [120, 124, 132];
-          doc.setFillColor(col[0], col[1], col[2]);
-          const label = `Priority: ${f.priority}`;
-          const w = doc.getTextWidth(label) + 16;
-          doc.roundedRect(bx, y, w, 20, 10, 10, 'F');
-          doc.setTextColor(255, 255, 255);
-          doc.setFont('helvetica', 'bold');
-          doc.setFontSize(10);
-          doc.text(label, bx + 8, y + 14);
-        }
-        y += 32;
-
-        if (f.notes) {
-          doc.setFont('helvetica', 'normal');
-          doc.setFontSize(10.5);
-          doc.setTextColor(28, 31, 38);
-          const lines = doc.splitTextToSize(f.notes, contentW);
-          if (y + lines.length * 13 > pageH - margin) { doc.addPage(); y = margin; }
-          doc.text(lines, margin, y);
-          y += lines.length * 13 + 8;
-        }
-
-        if (f.worksRequired) {
-          if (y + 40 > pageH - margin) { doc.addPage(); y = margin; }
-          const boxTop = y;
-          let boxLines = [];
-          if (f.worksDescription) {
-            doc.setFont('helvetica', 'normal');
-            boxLines = doc.splitTextToSize(f.worksDescription, contentW - 20);
-          }
-          const currencySymbol = CURRENCY_SYMBOLS[insp.currency] || '$';
-          const cleanCost = String(f.costEstimate || '').replace(/^[\$£€\s]+/, '');
-          const estLine = cleanCost ? `Cost estimate: ${currencySymbol}${cleanCost}` : '';
-          const totalLines = boxLines.length + (estLine ? 1 : 0);
-          const boxH = 22 + totalLines * 13 + 8;
-          doc.setFillColor(247, 238, 233);
-          doc.roundedRect(margin, boxTop, contentW, boxH, 4, 4, 'F');
-          doc.setFont('helvetica', 'bold');
-          doc.setFontSize(10);
-          doc.setTextColor(28, 31, 38);
-          doc.text('Works required', margin + 10, boxTop + 15);
-          let wy = boxTop + 15 + 15;
-          doc.setFont('helvetica', 'normal');
-          doc.setFontSize(10);
-          if (boxLines.length) {
-            doc.text(boxLines, margin + 10, wy);
-            wy += boxLines.length * 13;
-          }
-          if (estLine) {
-            doc.setFont('helvetica', 'bold');
-            doc.text(estLine, margin + 10, wy);
-          }
-          y = boxTop + boxH + 10;
-        }
-
-        if (f.photos.length) {
-          for (const p of f.photos) {
-            y = drawPhotoBlock(doc, p, p.caption, y, { margin, contentW, pageH });
-          }
-        }
-        y += 8;
-        doc.setDrawColor(235, 236, 239);
-        doc.line(margin, y - 8, pageW - margin, y - 8);
-      }
-      y += 12;
-    }
+    y = drawGroupFindings(doc, insp, g, y, { margin, contentW, pageH, pageW });
   }
 
   // ---------- Conclusion & Recommendations ----------
@@ -1471,4 +1525,207 @@ function drawRiskAssessmentContent(doc, insp, ra, { inspectorSigData, staffSigDa
     }
     if (col !== 0) y = rowStartY + rowMaxH + 14;
   }
+}
+
+// ---------- New Style report export: builds the whole PDF from an ordered list of
+// user-defined report sections, reusing every drawing block already built for Old Style
+// (rich text, location map, details, element summary, findings, photos, appendices, risk
+// assessment) rather than duplicating that logic. ----------
+async function exportInspectionPDFNewStyle(inspectionId) {
+  if (!window.jspdf) {
+    toast('PDF library not loaded. Connect to the internet once to cache it, then try again.');
+    return;
+  }
+  toast('Building report…');
+  try {
+    await buildAndSaveNewStyleInspectionPDF(inspectionId);
+  } catch (err) {
+    console.error('New Style PDF export failed', err);
+    toast('Export failed: ' + (err && err.message ? err.message : 'unknown error'));
+  }
+}
+
+async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
+  const insp = await DB.get('inspections', inspectionId);
+  if (!insp) { toast('Inspection not found'); return; }
+
+  const coverPhoto = await DB.getCoverPhoto(inspectionId);
+  const companyLogoPhoto = await DB.getLogoByRole(inspectionId, 'company');
+  const clientLogoPhoto = await DB.getLogoByRole(inspectionId, 'client');
+  const coverData = coverPhoto ? await loadNormalizedImage(coverPhoto.annotatedBlob || coverPhoto.originalBlob) : null;
+  const companyLogoData = companyLogoPhoto ? await loadNormalizedImage(companyLogoPhoto.originalBlob) : null;
+  const clientLogoData = clientLogoPhoto ? await loadNormalizedImage(clientLogoPhoto.originalBlob) : null;
+  const logoData = [companyLogoData, clientLogoData].filter(Boolean);
+
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 48;
+  const contentW = pageW - margin * 2;
+
+  const includeCover = insp.includeCoverPage !== false;
+  if (includeCover) {
+    if (insp.coverStyle === 'archarray') {
+      drawArchArrayCover(doc, { insp, coverData, companyLogoData, clientLogoData, pageW, pageH, margin, contentW });
+    } else {
+      drawBasicCover(doc, { insp, coverData, logoData, pageW, pageH, margin, contentW });
+    }
+  }
+  if (includeCover) doc.addPage();
+  const tocPageNum = doc.internal.getNumberOfPages();
+  const tocEntries = [];
+
+  function addImageItemPage(item, data) {
+    const isLandscape = data.w > data.h;
+    doc.addPage('a4', isLandscape ? 'landscape' : 'portrait');
+    const pw = doc.internal.pageSize.getWidth();
+    const ph = doc.internal.pageSize.getHeight();
+    const cw2 = pw - margin * 2;
+    let iy = margin;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10.5);
+    doc.setTextColor(28, 31, 38);
+    doc.text(item.title || 'Untitled', margin, iy);
+    iy += 14;
+    const maxH = ph - margin - iy;
+    let w = cw2, h = (data.h / data.w) * w;
+    if (h > maxH) { h = maxH; w = (data.w / data.h) * h; }
+    doc.addImage(data.url, 'JPEG', margin, iy, w, h, undefined, 'FAST');
+  }
+
+  const reportSections = await DB.listReportSections(inspectionId);
+
+  for (const section of reportSections) {
+    if (section.type === 'text') {
+      if (!section.textHtml) continue;
+      doc.addPage();
+      tocEntries.push({ label: section.title || 'Text', page: doc.internal.getNumberOfPages() });
+      let y = margin;
+      y = drawRefinedPageTitle(doc, section.title || 'Text', insp.structureName, y, { margin, contentW });
+      drawRichHtmlContent(doc, section.textHtml, y, { margin, contentW, pageH });
+      continue;
+    }
+
+    if (section.type === 'locationMap') {
+      const mapResult = await buildLocationMapForReport(insp, { contentW });
+      if (!mapResult) {
+        const noCoords = (insp.locationMapMode || 'auto') === 'auto' && (!insp.location || insp.location.lat == null);
+        toast(noCoords
+          ? `No coordinates set — "${section.title || 'Location Map'}" skipped`
+          : `Could not generate the location map — "${section.title || 'Location Map'}" skipped`);
+        continue;
+      }
+      doc.addPage();
+      tocEntries.push({ label: section.title || 'Location Map', page: doc.internal.getNumberOfPages() });
+      let y = margin;
+      y = pageHeading(doc, section.title || 'Location Map', y);
+      doc.addImage(mapResult.url, 'JPEG', margin, y, mapResult.w, mapResult.h, undefined, 'FAST');
+      continue;
+    }
+
+    if (section.type === 'inspectionDetails') {
+      doc.addPage();
+      tocEntries.push({ label: section.title || 'Inspection Details', page: doc.internal.getNumberOfPages() });
+      let y = margin;
+      y = pageHeading(doc, section.title || 'Inspection Details', y);
+      drawInspectionDetailsBlock(doc, insp, y, { margin, contentW });
+      continue;
+    }
+
+    if (section.type === 'elementSummary') {
+      const allGroups = await buildAllElementGroups(inspectionId);
+      doc.addPage();
+      tocEntries.push({ label: section.title || 'Element Summary', page: doc.internal.getNumberOfPages() });
+      drawElementSummaryTableForGroups(doc, allGroups, margin, { margin, contentW, pageH, title: section.title });
+      continue;
+    }
+
+    if (section.type === 'inspection') {
+      if (!section.elementSectionId) continue;
+      const elSection = await DB.get('sections', section.elementSectionId);
+      const elements = await DB.listElementsBySection(inspectionId, section.elementSectionId);
+      const elementData = [];
+      for (const e of elements) elementData.push(await loadElementDataForPdf(e));
+      doc.addPage();
+      tocEntries.push({ label: section.title || (elSection && elSection.name) || 'Inspection', page: doc.internal.getNumberOfPages() });
+      const y = margin;
+      drawGroupFindings(doc, insp, { section: elSection, elementData }, y, { margin, contentW, pageH, pageW });
+      continue;
+    }
+
+    if (section.type === 'drawing') {
+      const items = await DB.listSectionDrawings(section.id);
+      if (!items.length) continue;
+      let firstPage = true;
+      for (const item of items) {
+        const data = await loadNormalizedImage(item.annotatedBlob || item.originalBlob);
+        addImageItemPage(item, data);
+        if (firstPage) { tocEntries.push({ label: section.title || 'Drawings', page: doc.internal.getNumberOfPages() }); firstPage = false; }
+      }
+      continue;
+    }
+
+    if (section.type === 'appendices') {
+      const appendices = await DB.listSectionAppendices(section.id);
+      const backMatter = [];
+      for (const appendix of appendices) {
+        const items = await DB.listAppendixItems(appendix.id);
+        if (items.length) backMatter.push({ title: appendix.name, items });
+      }
+      if (section.includeRiskAssessment) {
+        const ra = await DB.getRiskAssessment(inspectionId);
+        if (ra) backMatter.push({ title: 'Risk Assessment', ra, isRA: true });
+      }
+      if (!backMatter.length) continue;
+
+      const APPENDIX_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+      for (let i = 0; i < backMatter.length; i++) {
+        const bm = backMatter[i];
+        const letter = APPENDIX_LETTERS[i] || String(i + 1);
+        const fullTitle = `Appendix ${letter} - ${bm.title}`;
+        doc.addPage('a4', 'portrait');
+        tocEntries.push({ label: fullTitle, page: doc.internal.getNumberOfPages() });
+        drawRefinedPageTitle(doc, fullTitle, insp.structureName, margin, { margin, contentW });
+
+        if (bm.isRA) {
+          doc.addPage('a4', 'portrait');
+          const sigData = await loadRiskAssessmentSignatures(bm.ra);
+          drawRiskAssessmentContent(doc, insp, bm.ra, sigData);
+        } else {
+          for (const item of bm.items) {
+            const data = await loadNormalizedImage(item.annotatedBlob || item.originalBlob);
+            addImageItemPage(item, data);
+          }
+        }
+      }
+      continue;
+    }
+  }
+
+  // Backfill the Table of Contents — a flat list, since sections are already user-ordered
+  // (no "Report" vs "Appendices" grouping needed, unlike Old Style's fixed structure).
+  doc.setPage(tocPageNum);
+  let ty = margin;
+  ty = drawRefinedPageTitle(doc, 'Contents', insp.structureName, ty, { margin, contentW });
+  for (const entry of tocEntries) {
+    if (ty > pageH - margin) break;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(11.5);
+    doc.setTextColor(28, 31, 38);
+    doc.text(entry.label, margin, ty, { maxWidth: contentW - 50 });
+    const pageLabel = String(entry.page);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(91, 96, 105);
+    doc.text(pageLabel, pageW - margin, ty, { align: 'right' });
+    const labelW = doc.getTextWidth(entry.label);
+    const pageLabelW = doc.getTextWidth(pageLabel);
+    drawDotLeader(doc, margin + labelW + 8, pageW - margin - pageLabelW - 8, ty - 3);
+    ty += 25;
+  }
+  doc.setPage(doc.internal.getNumberOfPages());
+
+  const filename = `${(insp.structureName || 'inspection').replace(/[^a-z0-9]+/gi, '_')}_${(insp.date || '').slice(0, 10)}.pdf`;
+  doc.save(filename);
+  toast('Report saved');
 }
