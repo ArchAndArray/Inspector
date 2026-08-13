@@ -1642,15 +1642,31 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
     }
 
     if (section.type === 'inspection') {
-      if (!section.elementSectionId) continue;
-      const elSection = await DB.get('sections', section.elementSectionId);
-      const elements = await DB.listElementsBySection(inspectionId, section.elementSectionId);
-      const elementData = [];
-      for (const e of elements) elementData.push(await loadElementDataForPdf(e));
-      doc.addPage();
-      tocEntries.push({ label: section.title || (elSection && elSection.name) || 'Inspection', page: doc.internal.getNumberOfPages() });
-      const y = margin;
-      drawGroupFindings(doc, insp, { section: elSection, elementData }, y, { margin, contentW, pageH, pageW });
+      const structureSections = await DB.listStructureSections(inspectionId, section.id);
+      const directElements = await DB.listDirectElements(inspectionId, section.id);
+      const groups = [];
+      for (const ss of structureSections) {
+        const elements = await DB.listElementsBySection(inspectionId, ss.id);
+        const elementData = [];
+        for (const e of elements) elementData.push(await loadElementDataForPdf(e));
+        groups.push({ section: ss, elementData });
+      }
+      if (directElements.length) {
+        const elementData = [];
+        for (const e of directElements) elementData.push(await loadElementDataForPdf(e));
+        groups.push({ section: null, elementData });
+      }
+      if (!groups.length) continue;
+
+      let firstGroup = true;
+      for (const g of groups) {
+        doc.addPage();
+        if (firstGroup) {
+          tocEntries.push({ label: section.title || 'Inspection Findings', page: doc.internal.getNumberOfPages() });
+          firstGroup = false;
+        }
+        drawGroupFindings(doc, insp, g, margin, { margin, contentW, pageH, pageW });
+      }
       continue;
     }
 

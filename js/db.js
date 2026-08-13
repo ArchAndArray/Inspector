@@ -211,6 +211,7 @@ const DB = {
     const section = {
       id: uid(),
       inspectionId,
+      reportSectionId: data.reportSectionId || null, // links a Structure Section to its owning Inspection Findings report section (New Style only)
       name: data.name || 'Untitled section',
       comments: data.comments || '',
       order: data.order || 0,
@@ -242,6 +243,7 @@ const DB = {
       id: uid(),
       inspectionId,
       sectionId: data.sectionId || null,
+      reportSectionId: data.reportSectionId || null, // for elements added directly under an Inspection Findings report section, no Structure Section (New Style only)
       name: data.name || 'Untitled element',
       category: data.category || '',
       materialType: data.materialType || '',
@@ -266,6 +268,18 @@ const DB = {
   async listElementsBySection(inspectionId, sectionId) {
     const all = await this.listElements(inspectionId);
     return all.filter((e) => (e.sectionId || null) === (sectionId || null));
+  },
+  // --- Nested content within an Inspection Findings report section (New Style) ---
+  async listStructureSections(inspectionId, reportSectionId) {
+    const all = await this.listSections(inspectionId);
+    return all.filter((s) => s.reportSectionId === reportSectionId);
+  },
+  async createStructureSection(inspectionId, reportSectionId, data) {
+    return this.createSection(inspectionId, { ...data, reportSectionId });
+  },
+  async listDirectElements(inspectionId, reportSectionId) {
+    const all = await this.listElements(inspectionId);
+    return all.filter((e) => e.reportSectionId === reportSectionId && !e.sectionId);
   },
   async deleteElementCascade(elementId) {
     const findings = await this.getAllByIndex('findings', 'elementId', elementId);
@@ -536,8 +550,13 @@ const DB = {
   async deleteReportSectionCascade(id) {
     const section = await this.get('reportSections', id);
     if (!section) return;
-    if (section.type === 'inspection' && section.elementSectionId) {
-      await this.deleteSectionCascade(section.elementSectionId);
+    if (section.type === 'inspection') {
+      // Every Structure Section (and its elements/findings) nested under this Inspection
+      // Findings section, plus any elements added directly without a Structure Section.
+      const structureSections = await this.listStructureSections(section.inspectionId, id);
+      for (const ss of structureSections) await this.deleteSectionCascade(ss.id);
+      const directElements = await this.listDirectElements(section.inspectionId, id);
+      for (const el of directElements) await this.deleteElementCascade(el.id);
     }
     if (section.type === 'drawing') {
       const items = await this.getAllByIndex('photos', 'reportSectionId', id);

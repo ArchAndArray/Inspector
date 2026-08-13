@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '3.0';
+const APP_VERSION = '3.1';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -343,6 +343,11 @@ async function route() {
     else if (p[0] === 'inspection' && p[1] && p[2] === 'drawings') await renderDrawings(p[1]);
     else if (p[0] === 'inspection' && p[1] && p[2] === 'appendix' && p[3]) await renderAppendix(p[1], p[3]);
     else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'drawings') await renderReportSectionDrawings(p[1], p[3]);
+    else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'text') await renderTextReportSection(p[1], p[3]);
+    else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'locationMap') await renderLocationMapReportSection(p[1], p[3]);
+    else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'inspectionDetails') await renderBasicInfoReportSection(p[1], p[3]);
+    else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'elementSummary') await renderElementSummaryReportSection(p[1], p[3]);
+    else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'inspection') await renderInspectionFindingsReportSection(p[1], p[3]);
     else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'appendices' && p[5]) await renderReportSectionAppendix(p[1], p[3], p[5]);
     else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'appendices') await renderReportSectionAppendicesList(p[1], p[3]);
     else if (p[0] === 'inspection' && p[1] && !p[2]) await renderInspection(p[1]);
@@ -677,9 +682,9 @@ function openNewInspectionSheet() {
 const REPORT_SECTION_TYPES = {
   text: { label: 'Text', icon: '📝' },
   drawing: { label: 'Drawing', icon: '📐' },
-  inspection: { label: 'Inspection', icon: '🏗️' },
+  inspection: { label: 'Inspection Findings', icon: '🏗️' },
   locationMap: { label: 'Location Map', icon: '🗺️' },
-  inspectionDetails: { label: 'Inspection Details', icon: 'ℹ️' },
+  inspectionDetails: { label: 'Basic Inspection Information', icon: 'ℹ️' },
   elementSummary: { label: 'Element Summary', icon: '📊' },
   appendices: { label: 'Appendices', icon: '📎' }
 };
@@ -741,7 +746,7 @@ async function renderInspectionNewStyle(inspectionId, insp) {
       row.addEventListener('click', (e) => {
         if (e.target.classList.contains('rs-order-input')) return;
         const s = reportSections.find((x) => x.id === row.dataset.rs);
-        openReportSectionEditor(inspectionId, s, async () => { reportSections = await DB.listReportSections(inspectionId); renderList(); });
+        openReportSectionEditor(inspectionId, s);
       });
     });
     list.querySelectorAll('.rs-order-input').forEach((input) => {
@@ -810,97 +815,294 @@ function openAddReportSectionSheet(inspectionId, onAdded) {
       const info = REPORT_SECTION_TYPES[type];
       sheet.remove();
       const section = await DB.addReportSection(inspectionId, type, info.label);
-      await openReportSectionEditor(inspectionId, section, onAdded);
-      onAdded();
+      openReportSectionEditor(inspectionId, section);
     });
   });
 }
 
-async function openReportSectionEditor(inspectionId, section, onChanged) {
-  if (section.type === 'text') return openTextReportSectionSheet(inspectionId, section, onChanged);
+function openReportSectionEditor(inspectionId, section) {
   if (section.type === 'drawing') { navigate(`#/inspection/${inspectionId}/rsection/${section.id}/drawings`); return; }
   if (section.type === 'appendices') { navigate(`#/inspection/${inspectionId}/rsection/${section.id}/appendices`); return; }
-  if (section.type === 'inspection') return openInspectionTypeSectionLink(inspectionId, section, onChanged);
-  return openAutoSectionInfoSheet(inspectionId, section, onChanged);
+  navigate(`#/inspection/${inspectionId}/rsection/${section.id}/${section.type}`);
 }
 
-function openTextReportSectionSheet(inspectionId, section, onChanged) {
-  const sheet = el(`
-    <div class="sheet-backdrop">
-      <div class="sheet">
-        <div class="sheet-handle"></div>
-        <h2>Text section</h2>
-        <div class="field"><label>Title</label><input type="text" id="f-title" value="${esc(section.title)}"></div>
-        ${richTextToolbarHTML('rst')}
-        <div class="rt-editor" id="rst-editor" contenteditable="true"></div>
-        <button class="btn btn-primary btn-block" id="btn-save" style="margin-top:14px;">Save</button>
-        <button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:10px;">Delete section</button>
-        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
+function reportSectionPageHeader(section, inspectionId, insp) {
+  return `
+    <div class="topbar">
+      <button class="icon-btn" id="btn-back">‹</button>
+      <div style="flex:1; min-width:0;">
+        <h1 style="font-size:17px;">${REPORT_SECTION_TYPES[section.type].icon} ${esc(section.title) || REPORT_SECTION_TYPES[section.type].label}</h1>
+        <span class="sub">${esc(insp.structureName)} · ${REPORT_SECTION_TYPES[section.type].label}</span>
       </div>
+      <button class="text-btn" id="btn-delete-section" style="color:#ff9d9d;">Delete</button>
     </div>
-  `);
-  presentOverlay(sheet);
-  const editorApi = wireRichTextEditor(sheet, 'rst', section.textHtml);
-  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
-  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
-  sheet.querySelector('#btn-save').addEventListener('click', async () => {
-    await DB.updateReportSection(section.id, { title: sheet.querySelector('#f-title').value.trim(), textHtml: editorApi.getHTML() });
-    sheet.remove();
-    onChanged();
-  });
-  sheet.querySelector('#btn-delete').addEventListener('click', async () => {
+  `;
+}
+function wireReportSectionPageHeader(inspectionId, section) {
+  document.getElementById('btn-back').addEventListener('click', () => navigate(`#/inspection/${inspectionId}`));
+  document.getElementById('btn-delete-section').addEventListener('click', async () => {
     if (!confirm('Delete this section?')) return;
     await DB.deleteReportSectionCascade(section.id);
-    sheet.remove();
-    onChanged();
+    navigate(`#/inspection/${inspectionId}`);
   });
 }
 
-async function openInspectionTypeSectionLink(inspectionId, section) {
-  let elementSectionId = section.elementSectionId;
-  if (!elementSectionId) {
-    const newSection = await DB.createSection(inspectionId, { name: section.title || 'Inspection Section' });
-    elementSectionId = newSection.id;
-    await DB.updateReportSection(section.id, { elementSectionId });
+async function renderTextReportSection(inspectionId, reportSectionId) {
+  const insp = await DB.get('inspections', inspectionId);
+  const section = await DB.get('reportSections', reportSectionId);
+  if (!insp || !section) { navigate(`#/inspection/${inspectionId}`); return; }
+  appEl.innerHTML = `
+    ${reportSectionPageHeader(section, inspectionId, insp)}
+    <div class="content">
+      <div class="field"><label>Title</label><input type="text" id="f-title" value="${esc(section.title)}"></div>
+      ${richTextToolbarHTML('rst')}
+      <div class="rt-editor" id="rst-editor" contenteditable="true"></div>
+      <button class="btn btn-primary btn-block" id="btn-save" style="margin-top:14px;">Save</button>
+    </div>
+  `;
+  wireReportSectionPageHeader(inspectionId, section);
+  const editorApi = wireRichTextEditor(appEl, 'rst', section.textHtml);
+  document.getElementById('btn-save').addEventListener('click', async () => {
+    await DB.updateReportSection(section.id, { title: document.getElementById('f-title').value.trim(), textHtml: editorApi.getHTML() });
+    toast('Saved');
+    renderTextReportSection(inspectionId, reportSectionId);
+  });
+}
+
+async function renderLocationMapReportSection(inspectionId, reportSectionId) {
+  const insp = await DB.get('inspections', inspectionId);
+  const section = await DB.get('reportSections', reportSectionId);
+  if (!insp || !section) { navigate(`#/inspection/${inspectionId}`); return; }
+  let customMapImage = await DB.getCustomLocationMap(inspectionId);
+
+  appEl.innerHTML = `
+    ${reportSectionPageHeader(section, inspectionId, insp)}
+    <div class="content">
+      <div class="field"><label>Title</label><input type="text" id="f-title" value="${esc(section.title)}"></div>
+
+      <div class="section-header" style="margin-top:14px;"><h2>Map mode</h2></div>
+      <div class="severity-picker" id="map-mode-picker">
+        <button class="chip ${(!insp.locationMapMode || insp.locationMapMode === 'auto') ? 'selected' : ''}" data-mapmode="auto" style="${(!insp.locationMapMode || insp.locationMapMode === 'auto') ? 'background:var(--ink);' : ''}">Auto map</button>
+        <button class="chip ${insp.locationMapMode === 'custom' ? 'selected' : ''}" data-mapmode="custom" style="${insp.locationMapMode === 'custom' ? 'background:var(--ink);' : ''}">Upload image</button>
+        <button class="chip ${insp.locationMapMode === 'off' ? 'selected' : ''}" data-mapmode="off" style="${insp.locationMapMode === 'off' ? 'background:var(--ink);' : ''}">Off</button>
+      </div>
+      <div class="field" style="margin-top:10px;">
+        <label>Map scale</label>
+        <select id="f-map-scale">
+          ${[500, 1250, 2500, 5000, 10000, 25000].map((s) => `<option value="${s}" ${(insp.locationMapScale || 2500) === s ? 'selected' : ''}>1:${formatWithCommas(s)}</option>`).join('')}
+        </select>
+      </div>
+      <div id="custom-map-area" class="${insp.locationMapMode === 'custom' ? '' : 'hidden'}" style="margin-top:10px;">
+        <div class="photo-grid" id="custom-map-grid"></div>
+      </div>
+      <input type="file" id="map-file-input" accept="image/*" style="display:none;">
+
+      <div class="section-header"><h2>Structure location</h2></div>
+      ${locationFieldHTML(insp.location && insp.location.manual || '')}
+
+      <button class="btn btn-primary btn-block" id="btn-save" style="margin-top:14px;">Save</button>
+    </div>
+  `;
+  wireReportSectionPageHeader(inspectionId, section);
+  const locationField = wireLocationField(appEl, insp.location);
+
+  appEl.querySelectorAll('#map-mode-picker .chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      appEl.querySelectorAll('#map-mode-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
+      chip.classList.add('selected');
+      chip.style.background = 'var(--ink)';
+      appEl.querySelector('#custom-map-area').classList.toggle('hidden', chip.dataset.mapmode !== 'custom');
+    });
+  });
+
+  function renderCustomMapGrid() {
+    const grid = appEl.querySelector('#custom-map-grid');
+    grid.innerHTML = customMapImage
+      ? `<div class="photo-thumb" style="position:relative; width:96px; height:96px;">
+           <img src="${blobUrl(customMapImage.originalBlob)}">
+           <button class="icon-btn" id="btn-remove-custom-map" style="position:absolute; top:4px; right:4px; width:24px; height:24px; background:rgba(28,31,38,0.75); font-size:13px;">✕</button>
+         </div>`
+      : `<div class="photo-add" id="btn-add-custom-map" style="width:96px; height:96px;">＋</div>`;
+    const addTile = grid.querySelector('#btn-add-custom-map');
+    if (addTile) addTile.addEventListener('click', () => appEl.querySelector('#map-file-input').click());
+    const removeBtn = grid.querySelector('#btn-remove-custom-map');
+    if (removeBtn) removeBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await DB.removeCustomLocationMap(inspectionId);
+      customMapImage = null;
+      renderCustomMapGrid();
+    });
   }
-  navigate(`#/inspection/${inspectionId}/section/${elementSectionId}`);
+  renderCustomMapGrid();
+  appEl.querySelector('#map-file-input').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const normalized = await normalizeImageFile(file, 1600);
+    customMapImage = await DB.setCustomLocationMap(inspectionId, normalized);
+    renderCustomMapGrid();
+    e.target.value = '';
+  });
+
+  document.getElementById('btn-save').addEventListener('click', async () => {
+    const mapModeBtn = appEl.querySelector('#map-mode-picker .chip.selected');
+    const coords = locationField.getCoords();
+    await DB.updateInspection(inspectionId, {
+      locationMapMode: mapModeBtn ? mapModeBtn.dataset.mapmode : 'auto',
+      locationMapScale: Number(appEl.querySelector('#f-map-scale').value) || 2500,
+      location: { ...(coords || {}), manual: locationField.getManualText() }
+    });
+    await DB.updateReportSection(section.id, { title: appEl.querySelector('#f-title').value.trim() });
+    toast('Saved');
+    renderLocationMapReportSection(inspectionId, reportSectionId);
+  });
 }
 
-function openAutoSectionInfoSheet(inspectionId, section, onChanged) {
-  const descriptions = {
-    locationMap: 'Uses the map mode and scale set in Report Info — the same auto-generated or uploaded map used elsewhere.',
-    inspectionDetails: 'Generated automatically from this inspection\u2019s own details (date, inspector, weather, reference, etc.) — nothing to fill in here.',
-    elementSummary: 'Generated automatically as a table summarizing every element and finding across the whole inspection.'
-  };
-  const sheet = el(`
-    <div class="sheet-backdrop">
-      <div class="sheet">
-        <div class="sheet-handle"></div>
-        <h2>${REPORT_SECTION_TYPES[section.type].icon} ${REPORT_SECTION_TYPES[section.type].label}</h2>
-        <p class="muted" style="font-size:14px;">${descriptions[section.type] || ''}</p>
-        <div class="field"><label>Title (shown in the report)</label><input type="text" id="f-title" value="${esc(section.title)}"></div>
-        <button class="btn btn-primary btn-block" id="btn-save">Save</button>
-        ${section.type === 'locationMap' ? '<button class="btn btn-secondary btn-block" id="btn-open-info" style="margin-top:10px;">Open Report Info</button>' : ''}
-        <button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:10px;">Delete section</button>
-        <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
-      </div>
+async function renderBasicInfoReportSection(inspectionId, reportSectionId) {
+  const insp = await DB.get('inspections', inspectionId);
+  const section = await DB.get('reportSections', reportSectionId);
+  if (!insp || !section) { navigate(`#/inspection/${inspectionId}`); return; }
+
+  appEl.innerHTML = `
+    ${reportSectionPageHeader(section, inspectionId, insp)}
+    <div class="content">
+      <div class="field"><label>Section title</label><input type="text" id="f-title" value="${esc(section.title)}"></div>
+      <div class="field"><label>Structure name / project</label><input type="text" id="f-structureName" value="${esc(insp.structureName)}"></div>
+      <div class="field"><label>Structure ID</label><input type="text" id="f-structureId" value="${esc(insp.structureId)}"></div>
+      <div class="field"><label>Date</label><input type="date" id="f-date" value="${(insp.date || '').slice(0, 10)}"></div>
+      <div class="field"><label>Inspector</label><input type="text" id="f-inspector" value="${esc(insp.inspector)}"></div>
+      <div class="field"><label>Weather</label><input type="text" id="f-weather" value="${esc(insp.weather)}"></div>
+      ${locationFieldHTML(insp.location && insp.location.manual || '')}
+      <div class="field"><label>Report title</label><input type="text" id="f-reportTitle" value="${esc(insp.title)}"></div>
+      <div class="field"><label>Report subtitle</label><input type="text" id="f-subtitle" value="${esc(insp.subtitle)}"></div>
+      <div class="field"><label>General notes</label><textarea id="f-notes">${esc(insp.notes)}</textarea></div>
+      <button class="btn btn-primary btn-block" id="btn-save" style="margin-top:14px;">Save</button>
     </div>
-  `);
-  presentOverlay(sheet);
-  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
-  sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
-  sheet.querySelector('#btn-save').addEventListener('click', async () => {
-    await DB.updateReportSection(section.id, { title: sheet.querySelector('#f-title').value.trim() });
-    sheet.remove();
-    onChanged();
+  `;
+  wireReportSectionPageHeader(inspectionId, section);
+  const locationField = wireLocationField(appEl, insp.location);
+  document.getElementById('btn-save').addEventListener('click', async () => {
+    const coords = locationField.getCoords();
+    await DB.updateInspection(inspectionId, {
+      structureName: appEl.querySelector('#f-structureName').value.trim(),
+      structureId: appEl.querySelector('#f-structureId').value.trim(),
+      date: appEl.querySelector('#f-date').value,
+      inspector: appEl.querySelector('#f-inspector').value.trim(),
+      weather: appEl.querySelector('#f-weather').value.trim(),
+      location: { ...(coords || {}), manual: locationField.getManualText() },
+      title: appEl.querySelector('#f-reportTitle').value.trim(),
+      subtitle: appEl.querySelector('#f-subtitle').value.trim(),
+      notes: appEl.querySelector('#f-notes').value.trim()
+    });
+    await DB.updateReportSection(section.id, { title: appEl.querySelector('#f-title').value.trim() });
+    toast('Saved');
+    renderBasicInfoReportSection(inspectionId, reportSectionId);
   });
-  const infoBtn = sheet.querySelector('#btn-open-info');
-  if (infoBtn) infoBtn.addEventListener('click', () => { sheet.remove(); openReportInfoSheet(inspectionId); });
-  sheet.querySelector('#btn-delete').addEventListener('click', async () => {
-    if (!confirm('Delete this section?')) return;
-    await DB.deleteReportSectionCascade(section.id);
-    sheet.remove();
-    onChanged();
+}
+
+async function renderElementSummaryReportSection(inspectionId, reportSectionId) {
+  const insp = await DB.get('inspections', inspectionId);
+  const section = await DB.get('reportSections', reportSectionId);
+  if (!insp || !section) { navigate(`#/inspection/${inspectionId}`); return; }
+  const summary = await DB.getInspectionSummary(inspectionId);
+
+  appEl.innerHTML = `
+    ${reportSectionPageHeader(section, inspectionId, insp)}
+    <div class="content">
+      <div class="field"><label>Title</label><input type="text" id="f-title" value="${esc(section.title)}"></div>
+      <button class="btn btn-primary btn-block" id="btn-save">Save title</button>
+      <div class="section-header" style="margin-top:22px;"><h2>Live preview</h2></div>
+      <p class="muted" style="font-size:13px; margin-top:-8px;">Computed automatically from every element and finding in the inspection — nothing else to fill in here.</p>
+      ${summary.length ? summary.map((s) => `
+        <div class="list-item">
+          <div class="meta">
+            <h3>${esc(s.element.name)}</h3>
+            <p>${s.element.materialType ? esc(s.element.materialType) + ' · ' : ''}${s.findingCount} finding${s.findingCount === 1 ? '' : 's'}${s.worstSeverity ? ` · Worst: S${s.worstSeverity} ${s.worstExtent || ''}` : ''}</p>
+          </div>
+        </div>
+      `).join('') : `<p class="muted" style="font-size:13px;">No elements yet.</p>`}
+    </div>
+  `;
+  wireReportSectionPageHeader(inspectionId, section);
+  document.getElementById('btn-save').addEventListener('click', async () => {
+    await DB.updateReportSection(section.id, { title: appEl.querySelector('#f-title').value.trim() });
+    toast('Saved');
+    renderElementSummaryReportSection(inspectionId, reportSectionId);
+  });
+}
+
+async function renderInspectionFindingsReportSection(inspectionId, reportSectionId) {
+  const insp = await DB.get('inspections', inspectionId);
+  const section = await DB.get('reportSections', reportSectionId);
+  if (!insp || !section) { navigate(`#/inspection/${inspectionId}`); return; }
+  const structureSections = await DB.listStructureSections(inspectionId, reportSectionId);
+  const directElements = await DB.listDirectElements(inspectionId, reportSectionId);
+
+  appEl.innerHTML = `
+    ${reportSectionPageHeader(section, inspectionId, insp)}
+    <div class="content">
+      <div class="field"><label>Section title</label><input type="text" id="f-title" value="${esc(section.title)}"></div>
+      <button class="btn btn-primary btn-block" id="btn-save-title">Save title</button>
+
+      <p class="hint" style="margin-top:14px;">Use Structure Sections to split a structure into parts with their own elements — e.g. Span 1 / Span 2 on a twin-span bridge. For a simple single structure, just add elements directly below.</p>
+
+      <div class="section-header" style="margin-top:14px;"><h2>Structure Sections</h2><button class="small-btn" id="btn-add-structure-section">＋ Add</button></div>
+      ${structureSections.length ? structureSections.map((s) => `
+        <div class="list-item" data-ss="${s.id}">
+          <div class="meta"><h3>${esc(s.name)}</h3></div>
+          <span class="chevron">›</span>
+        </div>
+      `).join('') : `<p class="muted" style="font-size:13px; padding:0 2px;">None yet.</p>`}
+
+      <div class="section-header"><h2>Elements</h2><button class="small-btn" id="btn-add-element">＋ Add</button></div>
+      ${directElements.length ? directElements.map((e) => `
+        <div class="list-item" data-el="${e.id}">
+          <div class="meta"><h3>${esc(e.name)}</h3><p>${esc(e.materialType) || ''}</p></div>
+          <span class="chevron">›</span>
+        </div>
+      `).join('') : `<p class="muted" style="font-size:13px; padding:0 2px;">Elements not in a Structure Section appear here.</p>`}
+    </div>
+  `;
+  wireReportSectionPageHeader(inspectionId, section);
+  document.getElementById('btn-save-title').addEventListener('click', async () => {
+    await DB.updateReportSection(section.id, { title: appEl.querySelector('#f-title').value.trim() });
+    toast('Saved');
+    renderInspectionFindingsReportSection(inspectionId, reportSectionId);
+  });
+  appEl.querySelectorAll('[data-ss]').forEach((row) => {
+    row.addEventListener('click', () => navigate(`#/inspection/${inspectionId}/section/${row.dataset.ss}`));
+  });
+  appEl.querySelectorAll('[data-el]').forEach((row) => {
+    row.addEventListener('click', () => navigate(`#/inspection/${inspectionId}/element/${row.dataset.el}`));
+  });
+  document.getElementById('btn-add-structure-section').addEventListener('click', () => {
+    const nameSheet = el(`
+      <div class="sheet-backdrop">
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <h2>New Structure Section</h2>
+          <div class="field"><label>Name</label><input type="text" id="f-ss-name" placeholder="e.g. Span 1"></div>
+          <button class="btn btn-primary btn-block" id="btn-save-ss">Add</button>
+          <button class="btn btn-ghost btn-block" id="btn-cancel-ss">Cancel</button>
+        </div>
+      </div>
+    `);
+    presentOverlay(nameSheet);
+    nameSheet.addEventListener('click', (e) => { if (e.target === nameSheet) nameSheet.remove(); });
+    nameSheet.querySelector('#btn-cancel-ss').addEventListener('click', () => nameSheet.remove());
+    nameSheet.querySelector('#btn-save-ss').addEventListener('click', async () => {
+      const name = nameSheet.querySelector('#f-ss-name').value.trim();
+      if (!name) { toast('Enter a name'); return; }
+      const existing = await DB.listSections(inspectionId);
+      await DB.createStructureSection(inspectionId, reportSectionId, { name, order: existing.length });
+      nameSheet.remove();
+      renderInspectionFindingsReportSection(inspectionId, reportSectionId);
+    });
+  });
+  document.getElementById('btn-add-element').addEventListener('click', () => {
+    openAddElementSheet(inspectionId, null, {
+      reportSectionId,
+      onDone: () => renderInspectionFindingsReportSection(inspectionId, reportSectionId)
+    });
   });
 }
 
@@ -1422,6 +1624,13 @@ async function openReportInfoSheet(inspectionId) {
         <div class="field"><label>Reference / project no.</label><input type="text" id="f-reference" value="${esc(insp.reference)}" placeholder="e.g. PRJ-2026-014"></div>
         <div class="field"><label>Report date</label><input type="date" id="f-date" value="${(insp.date || '').slice(0, 10)}"></div>
 
+        <div class="section-header" style="margin-top:22px;"><h2>Inspection Type</h2></div>
+        <div class="field">
+          <select id="f-inspectionType">
+            ${INSPECTION_TYPES.map((t) => `<option value="${t}" ${insp.inspectionType === t ? 'selected' : ''}>${t}</option>`).join('')}
+          </select>
+        </div>
+
         <div class="section-header" style="margin-top:22px;"><h2>Currency</h2></div>
         <div class="severity-picker" id="currency-picker">
           <button class="chip ${(!insp.currency || insp.currency === 'USD') ? 'selected' : ''}" data-currency="USD" style="${(!insp.currency || insp.currency === 'USD') ? 'background:var(--ink);' : ''}">$ USD</button>
@@ -1502,6 +1711,7 @@ async function openReportInfoSheet(inspectionId) {
       client: sheet.querySelector('#f-client').value.trim(),
       reference: sheet.querySelector('#f-reference').value.trim(),
       date: sheet.querySelector('#f-date').value,
+      inspectionType: sheet.querySelector('#f-inspectionType').value,
       currency: currencyBtn ? currencyBtn.dataset.currency : 'USD',
       coverStyle: styleBtn ? styleBtn.dataset.style : 'basic',
       includeCoverPage: sheet.querySelector('#f-include-cover').checked,
@@ -2066,7 +2276,8 @@ function wireBciElementFields(sheet) {
   };
 }
 
-async function openAddElementSheet(inspectionId, sectionId) {
+async function openAddElementSheet(inspectionId, sectionId, opts = {}) {
+  const { reportSectionId = null, onDone = null } = opts;
   const templates = await DB.listTemplates();
   const insp = await DB.get('inspections', inspectionId);
   const isGiBridges = insp && insp.inspectionType === 'GI Bridges';
@@ -2102,6 +2313,11 @@ async function openAddElementSheet(inspectionId, sectionId) {
   sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
   const bciFields = isGiBridges ? wireBciElementFields(sheet) : null;
 
+  function goBack() {
+    if (onDone) { onDone(); return; }
+    if (sectionId) renderSection(inspectionId, sectionId); else renderInspection(inspectionId);
+  }
+
   sheet.querySelector('#btn-add-single').addEventListener('click', async () => {
     const name = sheet.querySelector('#f-name').value.trim();
     if (!name) { toast('Enter an element name'); return; }
@@ -2112,11 +2328,12 @@ async function openAddElementSheet(inspectionId, sectionId) {
     const elmt = await DB.createElement(inspectionId, {
       name,
       sectionId: sectionId || null,
+      reportSectionId,
       order: existing.length,
       ...extra
     });
     sheet.remove();
-    if (sectionId) renderSection(inspectionId, sectionId); else renderInspection(inspectionId);
+    goBack();
   });
 
   sheet.querySelectorAll('[data-tpl]').forEach((btn) => {
@@ -2124,7 +2341,7 @@ async function openAddElementSheet(inspectionId, sectionId) {
       await DB.applyTemplate(inspectionId, btn.dataset.tpl, sectionId || null);
       sheet.remove();
       toast('Template applied');
-      if (sectionId) renderSection(inspectionId, sectionId); else renderInspection(inspectionId);
+      goBack();
     });
   });
 }
