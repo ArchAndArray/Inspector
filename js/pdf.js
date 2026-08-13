@@ -849,6 +849,16 @@ function parseRichHtmlToParagraphs(html) {
       return;
     }
     if (tag === 'div' || tag === 'p') {
+      // Recurse into children looking for nested block content (lists, more divs) instead
+      // of assuming this is always a flat text paragraph — Safari's contenteditable
+      // routinely wraps a <ul> inside a <div> rather than leaving it as a direct sibling,
+      // and the old flat walkInline() call had no way to notice the list buried inside.
+      const blockTags = ['ul', 'ol', 'div', 'p'];
+      const hasBlockChild = Array.from(node.children || []).some((c) => blockTags.includes(c.tagName.toLowerCase()));
+      if (hasBlockChild) {
+        node.childNodes.forEach((child) => walkBlock(child));
+        return;
+      }
       const runs = [];
       walkInline(node, {}, runs);
       if (runs.length) paragraphs.push({ type: 'p', runs });
@@ -1594,16 +1604,34 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
     doc.addImage(data.url, 'JPEG', margin, iy, w, h, undefined, 'FAST');
   }
 
+  // Sections flow onto the same page as the one before them, one after another, rather
+  // than each always starting fresh — but never let a section's *heading* land in the
+  // bottom quarter of a page (it can still run content down into that space, just not
+  // start there), since a heading stranded a couple of lines above the page break reads
+  // badly. Drawing and Appendices sections are deliberately excluded from this — each of
+  // their items is a dedicated full-page image, which is a different pagination concern
+  // this doesn't touch.
+  doc.addPage();
+  let y = margin;
+  function ensureRoomForHeading(currentY) {
+    const bottomQuarterStart = margin + (pageH - margin * 2) * 0.75;
+    if (currentY > bottomQuarterStart) {
+      doc.addPage();
+      return margin;
+    }
+    return currentY;
+  }
+
   const reportSections = await DB.listReportSections(inspectionId);
 
   for (const section of reportSections) {
     if (section.type === 'text') {
       if (!section.textHtml) continue;
-      doc.addPage();
+      y = ensureRoomForHeading(y);
       tocEntries.push({ label: section.title || 'Text', page: doc.internal.getNumberOfPages() });
-      let y = margin;
       y = drawRefinedPageTitle(doc, section.title || 'Text', insp.structureName, y, { margin, contentW });
-      drawRichHtmlContent(doc, section.textHtml, y, { margin, contentW, pageH });
+      y = drawRichHtmlContent(doc, section.textHtml, y, { margin, contentW, pageH });
+      y += 24;
       continue;
     }
 
@@ -1616,28 +1644,29 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
           : `Could not generate the location map — "${section.title || 'Location Map'}" skipped`);
         continue;
       }
-      doc.addPage();
+      y = ensureRoomForHeading(y);
       tocEntries.push({ label: section.title || 'Location Map', page: doc.internal.getNumberOfPages() });
-      let y = margin;
       y = pageHeading(doc, section.title || 'Location Map', y);
       doc.addImage(mapResult.url, 'JPEG', margin, y, mapResult.w, mapResult.h, undefined, 'FAST');
+      y += mapResult.h + 24;
       continue;
     }
 
     if (section.type === 'inspectionDetails') {
-      doc.addPage();
+      y = ensureRoomForHeading(y);
       tocEntries.push({ label: section.title || 'Inspection Details', page: doc.internal.getNumberOfPages() });
-      let y = margin;
       y = pageHeading(doc, section.title || 'Inspection Details', y);
-      drawInspectionDetailsBlock(doc, insp, y, { margin, contentW });
+      y = drawInspectionDetailsBlock(doc, insp, y, { margin, contentW });
+      y += 24;
       continue;
     }
 
     if (section.type === 'elementSummary') {
       const allGroups = await buildAllElementGroups(inspectionId);
-      doc.addPage();
+      y = ensureRoomForHeading(y);
       tocEntries.push({ label: section.title || 'Element Summary', page: doc.internal.getNumberOfPages() });
-      drawElementSummaryTableForGroups(doc, allGroups, margin, { margin, contentW, pageH, title: section.title });
+      y = drawElementSummaryTableForGroups(doc, allGroups, y, { margin, contentW, pageH, title: section.title });
+      y += 24;
       continue;
     }
 
@@ -1660,13 +1689,19 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
 
       let firstGroup = true;
       for (const g of groups) {
-        doc.addPage();
         if (firstGroup) {
+          y = ensureRoomForHeading(y);
           tocEntries.push({ label: section.title || 'Inspection Findings', page: doc.internal.getNumberOfPages() });
           firstGroup = false;
+        } else {
+          // Additional Structure Sections within the same Inspection Findings section
+          // keep their own dedicated page each, same as before.
+          doc.addPage();
+          y = margin;
         }
-        drawGroupFindings(doc, insp, g, margin, { margin, contentW, pageH, pageW });
+        y = drawGroupFindings(doc, insp, g, y, { margin, contentW, pageH, pageW });
       }
+      y += 24;
       continue;
     }
 
@@ -1679,6 +1714,7 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
         addImageItemPage(item, data);
         if (firstPage) { tocEntries.push({ label: section.title || 'Drawings', page: doc.internal.getNumberOfPages() }); firstPage = false; }
       }
+      y = pageH; // force the next flowing section onto a fresh page rather than continuing after a full-page image
       continue;
     }
 
@@ -1715,6 +1751,7 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
           }
         }
       }
+      y = pageH; // force the next flowing section onto a fresh page rather than continuing after a full-page image
       continue;
     }
   }

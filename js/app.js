@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '3.1';
+const APP_VERSION = '3.2';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -436,6 +436,37 @@ function createBlankCanvasBlob(w = 1600, h = 1200) {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, w, h);
     canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.95);
+  });
+}
+
+// A4 portrait proportions (1:1.414, ~200dpi) rather than the generic 4:3 sketch canvas
+// above — for Drawing section sketches specifically, so they fill a report page properly
+// instead of looking squeezed or letterboxed.
+function createA4CanvasBlob() {
+  return createBlankCanvasBlob(1654, 2339);
+}
+
+// Prompts for a sketch's title before it's created, so it's genuinely print-ready in one
+// step rather than sitting as "Untitled" until edited later.
+function openSketchTitlePrompt(onConfirm) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Name this sketch</h2>
+        <div class="field"><label>Title</label><input type="text" id="f-sketch-title" placeholder="Untitled Sketch"></div>
+        <button class="btn btn-primary btn-block" id="btn-start-sketch">Start sketch</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel-sketch">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-cancel-sketch').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-start-sketch').addEventListener('click', () => {
+    const title = sheet.querySelector('#f-sketch-title').value.trim() || 'Untitled Sketch';
+    sheet.remove();
+    onConfirm(title);
   });
 }
 
@@ -961,6 +992,7 @@ async function renderBasicInfoReportSection(inspectionId, reportSectionId) {
   const insp = await DB.get('inspections', inspectionId);
   const section = await DB.get('reportSections', reportSectionId);
   if (!insp || !section) { navigate(`#/inspection/${inspectionId}`); return; }
+  const coverPhoto = await DB.getCoverPhoto(inspectionId);
 
   appEl.innerHTML = `
     ${reportSectionPageHeader(section, inspectionId, insp)}
@@ -975,11 +1007,39 @@ async function renderBasicInfoReportSection(inspectionId, reportSectionId) {
       <div class="field"><label>Report title</label><input type="text" id="f-reportTitle" value="${esc(insp.title)}"></div>
       <div class="field"><label>Report subtitle</label><input type="text" id="f-subtitle" value="${esc(insp.subtitle)}"></div>
       <div class="field"><label>General notes</label><textarea id="f-notes">${esc(insp.notes)}</textarea></div>
+
+      <div class="card">
+        <div class="link-row" style="margin-bottom:10px;"><strong style="font-size:15px;">Cover photo</strong>${!coverPhoto ? '<button class="small-btn" id="btn-add-cover">＋ Add</button>' : ''}</div>
+        ${coverPhoto
+          ? `<div class="photo-thumb" id="cover-thumb" style="width:120px; height:120px;"><img src="${blobUrl(coverPhoto.originalBlob)}">${coverPhoto.annotatedBlob ? '<div class="annotated-dot"></div>' : ''}</div>`
+          : `<p class="muted" style="font-size:13px; margin:0;">Used on the report cover page.</p>`}
+      </div>
+
       <button class="btn btn-primary btn-block" id="btn-save" style="margin-top:14px;">Save</button>
     </div>
   `;
   wireReportSectionPageHeader(inspectionId, section);
   const locationField = wireLocationField(appEl, insp.location);
+
+  const addCoverBtn = document.getElementById('btn-add-cover');
+  if (addCoverBtn) addCoverBtn.addEventListener('click', () => {
+    openPhotoSourceSheet({
+      onFiles: async (files) => {
+        const normalized = await normalizeImageFile(files[0]);
+        await DB.setCoverPhoto(inspectionId, normalized);
+        toast('Cover photo saved');
+        renderBasicInfoReportSection(inspectionId, reportSectionId);
+      }
+    });
+  });
+  const coverThumb = document.getElementById('cover-thumb');
+  if (coverThumb) coverThumb.addEventListener('click', () => {
+    openPhotoActionSheet(coverPhoto.id, {
+      onAnnotated: () => renderBasicInfoReportSection(inspectionId, reportSectionId),
+      onRemoved: () => renderBasicInfoReportSection(inspectionId, reportSectionId)
+    });
+  });
+
   document.getElementById('btn-save').addEventListener('click', async () => {
     const coords = locationField.getCoords();
     await DB.updateInspection(inspectionId, {
@@ -1168,6 +1228,7 @@ function openAddSectionDrawingSheet(inspectionId, reportSectionId, onAdded) {
         <button class="btn btn-primary btn-block" id="btn-camera">📷 Take photo</button>
         <button class="btn btn-secondary btn-block" id="btn-library" style="margin-top:10px;">🖼 Choose from library</button>
         <button class="btn btn-secondary btn-block" id="btn-pdf" style="margin-top:10px;">📄 Import PDF</button>
+        <button class="btn btn-secondary btn-block" id="btn-sketch" style="margin-top:10px;">✏️ Draw sketch</button>
         <button class="btn btn-ghost btn-block" id="btn-cancel" style="margin-top:16px;">Cancel</button>
         <input type="file" id="asd-camera-input" accept="image/*" capture="environment" style="display:none;">
         <input type="file" id="asd-library-input" accept="image/*" multiple style="display:none;">
@@ -1197,6 +1258,14 @@ function openAddSectionDrawingSheet(inspectionId, reportSectionId, onAdded) {
       (blob, title) => DB.addSectionDrawing(reportSectionId, inspectionId, blob, title),
       () => { toast('Import complete'); onAdded(); }
     );
+  });
+  sheet.querySelector('#btn-sketch').addEventListener('click', () => {
+    sheet.remove();
+    openSketchTitlePrompt(async (title) => {
+      const blank = await createA4CanvasBlob();
+      const drawing = await DB.addSectionDrawing(reportSectionId, inspectionId, blank, title);
+      await openAnnotator(drawing.id, onAdded);
+    });
   });
 }
 
@@ -3101,6 +3170,7 @@ function openAddDrawingSheet(inspectionId, onAdded) {
         <button class="btn btn-primary btn-block" id="btn-camera">📷 Take photo</button>
         <button class="btn btn-secondary btn-block" id="btn-library" style="margin-top:10px;">🖼 Choose from library</button>
         <button class="btn btn-secondary btn-block" id="btn-pdf" style="margin-top:10px;">📄 Import PDF</button>
+        <button class="btn btn-secondary btn-block" id="btn-sketch" style="margin-top:10px;">✏️ Draw sketch</button>
         <button class="btn btn-ghost btn-block" id="btn-cancel" style="margin-top:16px;">Cancel</button>
         <input type="file" id="ad-camera-input" accept="image/*" capture="environment" style="display:none;">
         <input type="file" id="ad-library-input" accept="image/*" multiple style="display:none;">
@@ -3127,6 +3197,14 @@ function openAddDrawingSheet(inspectionId, onAdded) {
   sheet.querySelector('#btn-pdf').addEventListener('click', () => {
     sheet.remove();
     openDrawingImportSheet(inspectionId, onAdded);
+  });
+  sheet.querySelector('#btn-sketch').addEventListener('click', () => {
+    sheet.remove();
+    openSketchTitlePrompt(async (title) => {
+      const blank = await createA4CanvasBlob();
+      const drawing = await DB.addDrawing(inspectionId, blank, title);
+      await openAnnotator(drawing.id, onAdded);
+    });
   });
 }
 
