@@ -247,21 +247,22 @@ async function buildAndSaveInspectionPDF(inspectionId) {
   const tocPageNum = doc.internal.getNumberOfPages();
   const tocEntries = [];
 
-  // ---------- Introduction / Summary ----------
+  // ---------- Introduction ----------
   if (insp.introduction) {
     doc.addPage();
-    tocEntries.push({ label: 'Introduction / Summary', page: doc.internal.getNumberOfPages(), group: 'report' });
+    tocEntries.push({ label: 'Introduction', page: doc.internal.getNumberOfPages(), group: 'report' });
     let iy = margin;
-    iy = drawRefinedPageTitle(doc, 'Introduction / Summary', insp.structureName, iy, { margin, contentW });
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(11);
-    doc.setTextColor(28, 31, 38);
-    const introLines = doc.splitTextToSize(insp.introduction, contentW);
-    for (const line of introLines) {
-      if (iy > pageH - margin) { doc.addPage(); iy = margin; }
-      doc.text(line, margin, iy);
-      iy += 15;
-    }
+    iy = drawRefinedPageTitle(doc, 'Introduction', insp.structureName, iy, { margin, contentW });
+    drawRichHtmlContent(doc, insp.introduction, iy, { margin, contentW, pageH });
+  }
+
+  // ---------- Summary ----------
+  if (insp.summary) {
+    doc.addPage();
+    tocEntries.push({ label: 'Summary', page: doc.internal.getNumberOfPages(), group: 'report' });
+    let sy = margin;
+    sy = drawRefinedPageTitle(doc, 'Summary', insp.structureName, sy, { margin, contentW });
+    drawRichHtmlContent(doc, insp.summary, sy, { margin, contentW, pageH });
   }
 
   // ---------- Location Map ----------
@@ -594,15 +595,7 @@ async function buildAndSaveInspectionPDF(inspectionId) {
     let cy = margin;
     if (insp.conclusion) {
       cy = drawRefinedPageTitle(doc, 'Conclusion', insp.structureName, cy, { margin, contentW });
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(11);
-      doc.setTextColor(28, 31, 38);
-      const lines = doc.splitTextToSize(insp.conclusion, contentW);
-      for (const line of lines) {
-        if (cy > pageH - margin) { doc.addPage(); cy = margin; }
-        doc.text(line, margin, cy);
-        cy += 15;
-      }
+      cy = drawRichHtmlContent(doc, insp.conclusion, cy, { margin, contentW, pageH });
     }
     if (insp.recommendations && insp.recommendations.length) {
       cy += 20;
@@ -620,66 +613,61 @@ async function buildAndSaveInspectionPDF(inspectionId) {
     }
   }
 
-  // ---------- Drawings appendix (only those marked "include in report") ----------
+  // ---------- Back matter: Drawings, named Appendices, and Risk Assessment — each gets its
+  // own lettered cover page ("Appendix A - Name"), computed live from position so it's
+  // always correct regardless of what's included. Each image item gets its own page sized
+  // to its native orientation (a landscape drawing gets a landscape page, not squeezed onto
+  // portrait), rather than flowing multiple items down a shared page. ----
+  const backMatterSections = [];
   const drawingsToInclude = (await DB.listDrawings(inspectionId)).filter((d) => d.includeInReport);
-  if (drawingsToInclude.length) {
-    doc.addPage();
-    tocEntries.push({ label: 'Drawings', page: doc.internal.getNumberOfPages(), group: 'appendix' });
-    let dy = margin;
-    dy = pageHeading(doc, 'Drawings', dy);
-    for (const d of drawingsToInclude) {
-      const data = await loadNormalizedImage(d.annotatedBlob || d.originalBlob);
-      const maxW = contentW;
-      const maxH = pageH - margin - dy - 20;
-      let w = maxW, h = (data.h / data.w) * w;
-      if (h > maxH) { h = maxH; w = (data.w / data.h) * h; }
-      if (dy + 20 + h > pageH - margin) { doc.addPage(); dy = margin; }
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(10.5);
-      doc.setTextColor(28, 31, 38);
-      doc.text(d.title || 'Untitled sheet', margin, dy);
-      dy += 14;
-      doc.addImage(data.url, 'JPEG', margin, dy, w, h, undefined, 'FAST');
-      dy += h + 24;
-      if (dy > pageH - margin - 40 && d !== drawingsToInclude[drawingsToInclude.length - 1]) { doc.addPage(); dy = margin; }
-    }
-  }
+  if (drawingsToInclude.length) backMatterSections.push({ type: 'images', title: 'Drawings', items: drawingsToInclude });
 
-  // ---------- Named Appendices ----------
   const appendices = await DB.listAppendices(inspectionId);
   for (const appendix of appendices) {
     const items = await DB.listAppendixItems(appendix.id);
-    if (!items.length) continue;
-    doc.addPage();
-    tocEntries.push({ label: appendix.name, page: doc.internal.getNumberOfPages(), group: 'appendix' });
-    let ay = margin;
-    ay = pageHeading(doc, appendix.name, ay);
-    for (const item of items) {
-      const data = await loadNormalizedImage(item.annotatedBlob || item.originalBlob);
-      const maxW = contentW;
-      const maxH = pageH - margin - ay - 20;
-      let w = maxW, h = (data.h / data.w) * w;
-      if (h > maxH) { h = maxH; w = (data.w / data.h) * h; }
-      if (ay + 20 + h > pageH - margin) { doc.addPage(); ay = margin; }
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(10.5);
-      doc.setTextColor(28, 31, 38);
-      doc.text(item.title || 'Untitled', margin, ay);
-      ay += 14;
-      doc.addImage(data.url, 'JPEG', margin, ay, w, h, undefined, 'FAST');
-      ay += h + 24;
-      if (ay > pageH - margin - 40 && item !== items[items.length - 1]) { doc.addPage(); ay = margin; }
-    }
+    if (items.length) backMatterSections.push({ type: 'images', title: appendix.name, items });
   }
 
-  // ---------- Risk Assessment as appendix (always last, if enabled) ----------
   if (insp.includeRiskAssessmentAppendix) {
     const ra = await DB.getRiskAssessment(inspectionId);
-    if (ra) {
-      const sigData = await loadRiskAssessmentSignatures(ra);
-      doc.addPage();
-      tocEntries.push({ label: 'Risk Assessment', page: doc.internal.getNumberOfPages(), group: 'appendix' });
-      drawRiskAssessmentContent(doc, insp, ra, sigData);
+    if (ra) backMatterSections.push({ type: 'riskAssessment', title: 'Risk Assessment', ra });
+  }
+
+  const APPENDIX_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  for (let i = 0; i < backMatterSections.length; i++) {
+    const section = backMatterSections[i];
+    const letter = APPENDIX_LETTERS[i] || String(i + 1);
+    const fullTitle = `Appendix ${letter} - ${section.title}`;
+
+    // Cover page
+    doc.addPage('a4', 'portrait');
+    tocEntries.push({ label: fullTitle, page: doc.internal.getNumberOfPages(), group: 'appendix' });
+    let cvy = margin;
+    drawRefinedPageTitle(doc, fullTitle, insp.structureName, cvy, { margin, contentW });
+
+    if (section.type === 'riskAssessment') {
+      doc.addPage('a4', 'portrait');
+      const sigData = await loadRiskAssessmentSignatures(section.ra);
+      drawRiskAssessmentContent(doc, insp, section.ra, sigData);
+    } else {
+      for (const item of section.items) {
+        const data = await loadNormalizedImage(item.annotatedBlob || item.originalBlob);
+        const isLandscape = data.w > data.h;
+        doc.addPage('a4', isLandscape ? 'landscape' : 'portrait');
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const cw2 = pw - margin * 2;
+        let iy = margin;
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(10.5);
+        doc.setTextColor(28, 31, 38);
+        doc.text(item.title || 'Untitled', margin, iy);
+        iy += 14;
+        const maxH = ph - margin - iy;
+        let w = cw2, h = (data.h / data.w) * w;
+        if (h > maxH) { h = maxH; w = (data.w / data.h) * h; }
+        doc.addImage(data.url, 'JPEG', margin, iy, w, h, undefined, 'FAST');
+      }
     }
   }
 
@@ -734,6 +722,170 @@ async function buildAndSaveInspectionPDF(inspectionId) {
 // together, unlike the old per-row-grid code which capped height but left width fixed,
 // squashing tall photos) at roughly half-page height with real margins, plus an optional
 // caption underneath. Used for both element reference photos and finding photos.
+// ---------- Rich text rendering (Introduction / Summary / Conclusion) ----------
+//
+// jsPDF's text() can only draw one plain style at a time — there's no built-in way to mix
+// bold/italic/color within a line. This walks the saved HTML into a flat list of "runs"
+// (a span of text plus its style), then lays those runs out word-by-word, wrapping lines
+// and drawing each run with its own font/color, rather than one plain text block.
+function colorNameToRgb(cssColor) {
+  if (!cssColor) return null;
+  const hexMatch = cssColor.match(/^#([0-9a-f]{6})$/i);
+  if (hexMatch) {
+    const n = parseInt(hexMatch[1], 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  const rgbMatch = cssColor.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+  if (rgbMatch) return [Number(rgbMatch[1]), Number(rgbMatch[2]), Number(rgbMatch[3])];
+  return null;
+}
+
+function parseRichHtmlToParagraphs(html) {
+  const container = document.createElement('div');
+  container.innerHTML = html || '';
+  const paragraphs = [];
+
+  function walkInline(node, style, runs) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      if (node.textContent) runs.push({ text: node.textContent, ...style });
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const tag = node.tagName.toLowerCase();
+    if (tag === 'br') { runs.push({ text: '\n', ...style }); return; }
+    const newStyle = { ...style };
+    if (tag === 'b' || tag === 'strong') newStyle.bold = true;
+    if (tag === 'i' || tag === 'em') newStyle.italic = true;
+    if (tag === 'u') newStyle.underline = true;
+    const elStyle = node.getAttribute && node.getAttribute('style');
+    if (elStyle) {
+      const colorMatch = elStyle.match(/(?:^|;)\s*color:\s*([^;]+)/i);
+      if (colorMatch) newStyle.color = colorMatch[1].trim();
+      const bgMatch = elStyle.match(/background-color:\s*([^;]+)/i);
+      if (bgMatch) newStyle.highlight = bgMatch[1].trim();
+    }
+    node.childNodes.forEach((child) => walkInline(child, newStyle, runs));
+  }
+
+  function walkBlock(node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      if (node.textContent.trim()) {
+        const runs = [];
+        walkInline(node, {}, runs);
+        paragraphs.push({ type: 'p', runs });
+      }
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const tag = node.tagName.toLowerCase();
+    if (tag === 'ul' || tag === 'ol') {
+      let index = 1;
+      node.querySelectorAll(':scope > li').forEach((li) => {
+        const runs = [];
+        walkInline(li, {}, runs);
+        paragraphs.push({ type: tag === 'ol' ? 'ol' : 'ul', runs, number: index });
+        index++;
+      });
+      return;
+    }
+    if (tag === 'div' || tag === 'p') {
+      const runs = [];
+      walkInline(node, {}, runs);
+      if (runs.length) paragraphs.push({ type: 'p', runs });
+      return;
+    }
+    const runs = [];
+    walkInline(node, {}, runs);
+    if (runs.length) paragraphs.push({ type: 'p', runs });
+  }
+
+  container.childNodes.forEach((node) => walkBlock(node));
+  return paragraphs;
+}
+
+function drawRichHtmlContent(doc, html, y, { margin, contentW, pageH }) {
+  const paragraphs = parseRichHtmlToParagraphs(html);
+  const fontSize = 11;
+  const lineHeight = 15;
+
+  paragraphs.forEach((para) => {
+    const indent = (para.type === 'ul' || para.type === 'ol') ? 18 : 0;
+    const bulletText = para.type === 'ul' ? '•' : para.type === 'ol' ? `${para.number}.` : '';
+    const availW = contentW - indent;
+
+    const words = [];
+    para.runs.forEach((run) => {
+      run.text.split('\n').forEach((part, idx) => {
+        if (idx > 0) words.push({ hardBreak: true });
+        part.split(/(\s+)/).filter(Boolean).forEach((w) => {
+          words.push({ text: w, bold: run.bold, italic: run.italic, underline: run.underline, color: run.color, highlight: run.highlight });
+        });
+      });
+    });
+
+    let line = [];
+    let lineW = 0;
+    let firstLineOfPara = true;
+
+    function fontStyleFor(w) { return w.bold && w.italic ? 'bolditalic' : w.bold ? 'bold' : w.italic ? 'italic' : 'normal'; }
+    function measureWord(w) {
+      doc.setFont('helvetica', fontStyleFor(w));
+      doc.setFontSize(fontSize);
+      return doc.getTextWidth(w.text);
+    }
+
+    function flushLine() {
+      if (line.length === 0 && !bulletText) return;
+      if (y > pageH - margin) { doc.addPage(); y = margin; }
+      let x = margin + indent;
+      if (firstLineOfPara && bulletText) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(fontSize);
+        doc.setTextColor(28, 31, 38);
+        doc.text(bulletText, margin + indent - 14, y);
+      }
+      line.forEach((w) => {
+        doc.setFont('helvetica', fontStyleFor(w));
+        doc.setFontSize(fontSize);
+        const wWidth = doc.getTextWidth(w.text);
+        if (w.highlight) {
+          const rgb = colorNameToRgb(w.highlight);
+          if (rgb) { doc.setFillColor(rgb[0], rgb[1], rgb[2]); doc.rect(x, y - fontSize + 2, wWidth, fontSize + 2, 'F'); }
+        }
+        const rgb = w.color ? colorNameToRgb(w.color) : null;
+        doc.setTextColor(rgb ? rgb[0] : 28, rgb ? rgb[1] : 31, rgb ? rgb[2] : 38);
+        doc.text(w.text, x, y);
+        if (w.underline) {
+          doc.setDrawColor(rgb ? rgb[0] : 28, rgb ? rgb[1] : 31, rgb ? rgb[2] : 38);
+          doc.setLineWidth(0.6);
+          doc.line(x, y + 2, x + wWidth, y + 2);
+        }
+        x += wWidth;
+      });
+      y += lineHeight;
+      line = [];
+      lineW = 0;
+      firstLineOfPara = false;
+    }
+
+    if (words.length === 0) {
+      flushLine(); // empty paragraph still takes a blank line, matching what was typed
+    } else {
+      words.forEach((w) => {
+        if (w.hardBreak) { flushLine(); return; }
+        const ww = measureWord(w);
+        if (lineW + ww > availW && line.length) flushLine();
+        line.push(w);
+        lineW += ww;
+      });
+      if (line.length) flushLine();
+    }
+    y += 6;
+  });
+
+  return y;
+}
+
 function drawPhotoBlock(doc, data, caption, y, { margin, contentW, pageH }) {
   const maxH = (pageH - margin * 2) * 0.42;
   let w = contentW, h = (data.h / data.w) * w;

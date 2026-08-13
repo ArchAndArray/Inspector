@@ -115,6 +115,16 @@ async function openAnnotator(photoId, onDone) {
           </svg>
         </button>
         <button class="tool-btn" id="btn-calibrate" title="Calibrate" style="width:auto; padding:0 12px; font-size:12px; font-weight:700;">Calibrate</button>
+        <button class="tool-btn" id="btn-crop" title="Crop" style="width:auto; padding:0 12px; font-size:12px; font-weight:700;">Crop</button>
+        <button class="tool-btn" id="btn-grid" title="Grid">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="3" y="3" width="18" height="18" stroke="currentColor" stroke-width="1.6" fill="none"/>
+            <line x1="9" y1="3" x2="9" y2="21" stroke="currentColor" stroke-width="1.3"/>
+            <line x1="15" y1="3" x2="15" y2="21" stroke="currentColor" stroke-width="1.3"/>
+            <line x1="3" y1="9" x2="21" y2="9" stroke="currentColor" stroke-width="1.3"/>
+            <line x1="3" y1="15" x2="21" y2="15" stroke="currentColor" stroke-width="1.3"/>
+          </svg>
+        </button>
         <div class="spacer"></div>
         <span class="muted" id="ruler-angle-readout" style="display:none; font-size:13px; font-weight:700; color:#fff;">0°</span>
         <span class="muted" id="ruler-hint" style="display:none; font-size:11.5px; color:#b8bcc4;">Two fingers: move &amp; rotate · pull the dot to resize</span>
@@ -126,16 +136,33 @@ async function openAnnotator(photoId, onDone) {
         <button class="tool-btn" id="btn-cal-accept" title="Accept" style="display:none; background:var(--sev-1);">✓</button>
         <button class="tool-btn" id="btn-cal-cancel" title="Cancel calibration">✕</button>
       </div>
+      <div class="annotate-toolbar" id="crop-toolbar" style="display:none; padding-top:0; padding-bottom:8px;">
+        <span style="color:#fff; font-size:13px; font-weight:600; flex:1;">Drag corners to resize, drag inside to move</span>
+        <button class="tool-btn" id="btn-crop-apply" title="Apply crop" style="background:var(--sev-1);">✓</button>
+        <button class="tool-btn" id="btn-crop-cancel" title="Cancel crop">✕</button>
+      </div>
       <div class="annotate-canvas-wrap" id="canvas-wrap">
         <div id="canvas-stack" style="position:relative;">
           <canvas id="photo-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%;"></canvas>
           <canvas id="mark-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%; position:absolute; top:0; left:0;"></canvas>
           <canvas id="preview-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%; position:absolute; top:0; left:0; pointer-events:none;"></canvas>
+          <div id="grid-visual" style="display:none; position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:2;"></div>
           <svg id="cal-line-svg" width="100%" height="100%" viewBox="0 0 ${cw} ${ch}" style="display:none; position:absolute; top:0; left:0; pointer-events:none; z-index:5;" preserveAspectRatio="none">
             <line id="cal-line" x1="0" y1="0" x2="0" y2="0" stroke="#e0a72e" stroke-width="3" stroke-dasharray="10,7"/>
           </svg>
           <div id="ruler-visual" style="display:none; position:absolute; opacity:0.5; pointer-events:none;"></div>
           <div id="ruler-handle" style="display:none; position:absolute; width:26px; height:26px; margin:-13px; border-radius:50%; background:#c81e1e; border:2.5px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.35); touch-action:none; z-index:7;"></div>
+          <div id="crop-visual" style="display:none; position:absolute; top:0; left:0; width:100%; height:100%; z-index:9;">
+            <div id="crop-dim-top" style="position:absolute; background:rgba(0,0,0,0.55); pointer-events:none;"></div>
+            <div id="crop-dim-bottom" style="position:absolute; background:rgba(0,0,0,0.55); pointer-events:none;"></div>
+            <div id="crop-dim-left" style="position:absolute; background:rgba(0,0,0,0.55); pointer-events:none;"></div>
+            <div id="crop-dim-right" style="position:absolute; background:rgba(0,0,0,0.55); pointer-events:none;"></div>
+            <div id="crop-border" style="position:absolute; border:2px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.5); touch-action:none;"></div>
+            <div class="crop-handle" data-corner="tl" style="position:absolute; width:24px; height:24px; margin:-12px; border-radius:50%; background:#c81e1e; border:2.5px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.35); touch-action:none;"></div>
+            <div class="crop-handle" data-corner="tr" style="position:absolute; width:24px; height:24px; margin:-12px; border-radius:50%; background:#c81e1e; border:2.5px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.35); touch-action:none;"></div>
+            <div class="crop-handle" data-corner="bl" style="position:absolute; width:24px; height:24px; margin:-12px; border-radius:50%; background:#c81e1e; border:2.5px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.35); touch-action:none;"></div>
+            <div class="crop-handle" data-corner="br" style="position:absolute; width:24px; height:24px; margin:-12px; border-radius:50%; background:#c81e1e; border:2.5px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.35); touch-action:none;"></div>
+          </div>
         </div>
       </div>
       <div class="annotate-toolbar">
@@ -153,6 +180,7 @@ async function openAnnotator(photoId, onDone) {
   const previewCtx = previewCanvas.getContext('2d');
   const rulerVisual = view.querySelector('#ruler-visual');
   const rulerHandle = view.querySelector('#ruler-handle');
+  const gridVisual = view.querySelector('#grid-visual');
   const stackEl = view.querySelector('#canvas-stack');
   markCanvas.style.touchAction = 'none';
   const photoCtx = photoCanvas.getContext('2d');
@@ -253,6 +281,180 @@ async function openAnnotator(photoId, onDone) {
     fitCanvas();
     updateRulerVisual();
     updateRulerHandle();
+    if (gridEnabled) updateGridVisual();
+    if (cropMode) { cropRect = { x: cw * 0.1, y: ch * 0.1, w: cw * 0.8, h: ch * 0.8 }; updateCropVisual(); }
+  });
+
+  // ---- Grid: a pure visual alignment aid, drawn on its own overlay layer that's never
+  // part of the mark canvas — so it's never baked into the saved image or the exported
+  // report, same principle as the ruler. ----
+  let gridEnabled = false;
+  function updateGridVisual() {
+    const spacing = 100;
+    let svg = `<svg width="100%" height="100%" viewBox="0 0 ${cw} ${ch}" preserveAspectRatio="none" style="display:block;">`;
+    for (let x = spacing; x < cw; x += spacing) {
+      svg += `<line x1="${x}" y1="0" x2="${x}" y2="${ch}" stroke="#000000" stroke-width="1" opacity="0.18"/>`;
+    }
+    for (let y = spacing; y < ch; y += spacing) {
+      svg += `<line x1="0" y1="${y}" x2="${cw}" y2="${y}" stroke="#000000" stroke-width="1" opacity="0.18"/>`;
+    }
+    svg += `</svg>`;
+    gridVisual.innerHTML = svg;
+  }
+  view.querySelector('#btn-grid').addEventListener('click', (e) => {
+    gridEnabled = !gridEnabled;
+    e.currentTarget.classList.toggle('active', gridEnabled);
+    gridVisual.style.display = gridEnabled ? 'block' : 'none';
+    if (gridEnabled) updateGridVisual();
+  });
+
+  // ---- Crop: drag the corner handles to resize the crop rectangle, drag inside it to
+  // reposition. Applying it resizes both canvas layers the same way Rotate already does —
+  // recreate at the new dimensions, redraw the cropped region into them. Like Rotate, this
+  // becomes the new permanent version once saved (no separate "revert to original"), and
+  // calibration survives it correctly since pixels-per-unit doesn't change from selecting a
+  // subregion at 1:1 — only the canvas's own extent shrinks. ----
+  let cropMode = false;
+  let cropRect = null;
+  let cropDragCorner = null, cropDragPointerId = null, cropAnchor = null;
+  let cropMovePointerId = null, cropMoveStart = null, cropRectStart = null;
+  const CROP_MIN_SIZE = 40;
+
+  function updateCropVisual() {
+    if (!cropRect) return;
+    const leftPct = (cropRect.x / cw) * 100, topPct = (cropRect.y / ch) * 100;
+    const rightPct = ((cropRect.x + cropRect.w) / cw) * 100, bottomPct = ((cropRect.y + cropRect.h) / ch) * 100;
+    const widthPct = (cropRect.w / cw) * 100, heightPct = (cropRect.h / ch) * 100;
+
+    view.querySelector('#crop-dim-top').style.cssText += `left:0%; top:0%; width:100%; height:${topPct}%;`;
+    view.querySelector('#crop-dim-bottom').style.cssText += `left:0%; top:${bottomPct}%; width:100%; height:${100 - bottomPct}%;`;
+    view.querySelector('#crop-dim-left').style.cssText += `left:0%; top:${topPct}%; width:${leftPct}%; height:${heightPct}%;`;
+    view.querySelector('#crop-dim-right').style.cssText += `left:${rightPct}%; top:${topPct}%; width:${100 - rightPct}%; height:${heightPct}%;`;
+
+    const border = view.querySelector('#crop-border');
+    border.style.left = leftPct + '%'; border.style.top = topPct + '%';
+    border.style.width = widthPct + '%'; border.style.height = heightPct + '%';
+
+    const corners = {
+      tl: { x: cropRect.x, y: cropRect.y },
+      tr: { x: cropRect.x + cropRect.w, y: cropRect.y },
+      bl: { x: cropRect.x, y: cropRect.y + cropRect.h },
+      br: { x: cropRect.x + cropRect.w, y: cropRect.y + cropRect.h }
+    };
+    view.querySelectorAll('.crop-handle').forEach((h) => {
+      const p = corners[h.dataset.corner];
+      h.style.left = (p.x / cw) * 100 + '%';
+      h.style.top = (p.y / ch) * 100 + '%';
+    });
+  }
+
+  function enterCropMode() {
+    deactivateOtherModes(null);
+    cropMode = true;
+    cropRect = { x: cw * 0.1, y: ch * 0.1, w: cw * 0.8, h: ch * 0.8 };
+    view.querySelector('#main-toolbar').style.display = 'none';
+    view.querySelector('#ruler-toolbar').style.display = 'none';
+    view.querySelector('#crop-toolbar').style.display = '';
+    view.querySelector('#crop-visual').style.display = 'block';
+    updateCropVisual();
+  }
+  function exitCropMode() {
+    cropMode = false;
+    view.querySelector('#main-toolbar').style.display = '';
+    view.querySelector('#ruler-toolbar').style.display = '';
+    view.querySelector('#crop-toolbar').style.display = 'none';
+    view.querySelector('#crop-visual').style.display = 'none';
+  }
+  view.querySelector('#btn-crop').addEventListener('click', () => {
+    if (cropMode) exitCropMode(); else enterCropMode();
+  });
+  view.querySelector('#btn-crop-cancel').addEventListener('click', exitCropMode);
+
+  const anchorCornerFor = { tl: 'br', tr: 'bl', bl: 'tr', br: 'tl' };
+  function cornerPoint(corner) {
+    if (corner === 'tl') return { x: cropRect.x, y: cropRect.y };
+    if (corner === 'tr') return { x: cropRect.x + cropRect.w, y: cropRect.y };
+    if (corner === 'bl') return { x: cropRect.x, y: cropRect.y + cropRect.h };
+    return { x: cropRect.x + cropRect.w, y: cropRect.y + cropRect.h };
+  }
+  view.querySelectorAll('.crop-handle').forEach((h) => {
+    h.addEventListener('pointerdown', (e) => {
+      cropDragCorner = h.dataset.corner;
+      cropDragPointerId = e.pointerId;
+      cropAnchor = cornerPoint(anchorCornerFor[cropDragCorner]);
+      try { h.setPointerCapture(e.pointerId); } catch (err) {}
+      e.preventDefault(); e.stopPropagation();
+    });
+    h.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== cropDragPointerId) return;
+      const p = canvasPoint(e);
+      let px = Math.max(0, Math.min(cw, p.x));
+      let py = Math.max(0, Math.min(ch, p.y));
+      if (cropDragCorner === 'tl' || cropDragCorner === 'bl') px = Math.min(px, cropAnchor.x - CROP_MIN_SIZE);
+      else px = Math.max(px, cropAnchor.x + CROP_MIN_SIZE);
+      if (cropDragCorner === 'tl' || cropDragCorner === 'tr') py = Math.min(py, cropAnchor.y - CROP_MIN_SIZE);
+      else py = Math.max(py, cropAnchor.y + CROP_MIN_SIZE);
+      cropRect.x = Math.min(px, cropAnchor.x);
+      cropRect.y = Math.min(py, cropAnchor.y);
+      cropRect.w = Math.abs(px - cropAnchor.x);
+      cropRect.h = Math.abs(py - cropAnchor.y);
+      updateCropVisual();
+      e.preventDefault(); e.stopPropagation();
+    });
+    function endHandleDrag(e) { if (e.pointerId === cropDragPointerId) { cropDragCorner = null; cropDragPointerId = null; } }
+    h.addEventListener('pointerup', endHandleDrag);
+    h.addEventListener('pointercancel', endHandleDrag);
+  });
+
+  const cropBorderEl = view.querySelector('#crop-border');
+  cropBorderEl.addEventListener('pointerdown', (e) => {
+    cropMovePointerId = e.pointerId;
+    cropMoveStart = canvasPoint(e);
+    cropRectStart = { ...cropRect };
+    try { cropBorderEl.setPointerCapture(e.pointerId); } catch (err) {}
+    e.preventDefault(); e.stopPropagation();
+  });
+  cropBorderEl.addEventListener('pointermove', (e) => {
+    if (e.pointerId !== cropMovePointerId) return;
+    const p = canvasPoint(e);
+    const dx = p.x - cropMoveStart.x, dy = p.y - cropMoveStart.y;
+    cropRect.x = Math.max(0, Math.min(cw - cropRectStart.w, cropRectStart.x + dx));
+    cropRect.y = Math.max(0, Math.min(ch - cropRectStart.h, cropRectStart.y + dy));
+    updateCropVisual();
+    e.preventDefault(); e.stopPropagation();
+  });
+  function endBorderDrag(e) { if (e.pointerId === cropMovePointerId) cropMovePointerId = null; }
+  cropBorderEl.addEventListener('pointerup', endBorderDrag);
+  cropBorderEl.addEventListener('pointercancel', endBorderDrag);
+
+  view.querySelector('#btn-crop-apply').addEventListener('click', () => {
+    const { x, y, w, h } = cropRect;
+    const newCw = Math.max(1, Math.round(w)), newCh = Math.max(1, Math.round(h));
+
+    const croppedPhoto = document.createElement('canvas');
+    croppedPhoto.width = newCw; croppedPhoto.height = newCh;
+    croppedPhoto.getContext('2d').drawImage(photoCanvas, x, y, w, h, 0, 0, newCw, newCh);
+
+    const croppedMark = document.createElement('canvas');
+    croppedMark.width = newCw; croppedMark.height = newCh;
+    croppedMark.getContext('2d').drawImage(markCanvas, x, y, w, h, 0, 0, newCw, newCh);
+
+    cw = newCw; ch = newCh;
+    photoCanvas.width = cw; photoCanvas.height = ch;
+    markCanvas.width = cw; markCanvas.height = ch;
+    previewCanvas.width = cw; previewCanvas.height = ch;
+    view.querySelector('#cal-line-svg').setAttribute('viewBox', `0 0 ${cw} ${ch}`);
+    photoCtx.drawImage(croppedPhoto, 0, 0);
+    ctx.drawImage(croppedMark, 0, 0);
+
+    undoStack = [];
+    ruler.cx = cw / 2; ruler.cy = ch / 2;
+    resetViewTransform();
+    fitCanvas();
+    updateRulerVisual();
+    updateRulerHandle();
+    if (gridEnabled) updateGridVisual();
+    exitCropMode();
   });
 
   // ---- Ruler: looks like a real ruler (ticks + numbers), the pen/eraser are constrained
@@ -462,6 +664,9 @@ async function openAnnotator(photoId, onDone) {
       textMode = false;
       view.querySelector('#btn-text-tool').classList.remove('active');
       textPressPoint = null;
+    }
+    if (except !== 'crop' && cropMode) {
+      exitCropMode();
     }
     view.querySelector('#ruler-hint').style.display = except === 'ruler' ? '' : 'none';
     view.querySelector('#zoom-hint').style.display = except === 'ruler' ? 'none' : '';
@@ -984,6 +1189,7 @@ async function openAnnotator(photoId, onDone) {
   const touches = new Map(); // pointerId -> {cx, cy, x, y}
 
   markCanvas.addEventListener('pointerdown', (e) => {
+    if (cropMode) { e.preventDefault(); return; } // crop handles/border have their own listeners with stopPropagation
     if (calibrating) {
       if (e.pointerType === 'touch') {
         const p = canvasPoint(e);
@@ -1048,6 +1254,7 @@ async function openAnnotator(photoId, onDone) {
   });
 
   markCanvas.addEventListener('pointermove', (e) => {
+    if (cropMode) { e.preventDefault(); return; }
     if (calibrating) {
       if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
         const p = canvasPoint(e);

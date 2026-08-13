@@ -6,7 +6,15 @@ const EXTENT_LABELS = { A: 'None', B: 'Slight (≤5%)', C: 'Moderate (5–20%)',
 const PRIORITY_COLORS = { High: '#c81e1e', Medium: '#e0672e', Low: '#4f9d5c', Monitor: '#1e7dc8' };
 const CURRENCY_SYMBOLS = { USD: '$', GBP: '£', EUR: '€' };
 const INSPECTION_TYPES = ['Safety Inspection', 'Detailed', 'Special', 'Follow-up', 'GI Bridges'];
-const APP_VERSION = '2.2';
+
+// Computes the letter for an appendix by its live position (A, B, C…, falling back to a
+// number past Z) — never stored, always derived fresh so it stays correct if appendices
+// are added, removed, or reordered.
+function appendixLetter(index) {
+  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  return letters[index] || String(index + 1);
+}
+const APP_VERSION = '2.3';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -866,7 +874,8 @@ async function openReportInfoSheet(inspectionId) {
         </div>
 
         <div class="section-header" style="margin-top:22px;"><h2>Report content</h2></div>
-        <button class="btn btn-secondary btn-block" id="btn-intro">📝 Introduction / Summary${insp.introduction ? ' — added' : ''}</button>
+        <button class="btn btn-secondary btn-block" id="btn-intro">📝 Introduction${insp.introduction ? ' — added' : ''}</button>
+        <button class="btn btn-secondary btn-block" id="btn-summary" style="margin-top:10px;">📝 Summary${insp.summary ? ' — added' : ''}</button>
         <button class="btn btn-secondary btn-block" id="btn-conclusion" style="margin-top:10px;">📋 Conclusion &amp; Recommendations${(insp.conclusion || (insp.recommendations && insp.recommendations.length)) ? ' — added' : ''}</button>
 
         <button class="btn btn-primary btn-block" id="btn-save" style="margin-top:22px;">Save</button>
@@ -900,7 +909,12 @@ async function openReportInfoSheet(inspectionId) {
   sheet.querySelector('#btn-intro').addEventListener('click', async () => {
     await persistFields();
     sheet.remove();
-    openIntroSheet(inspectionId);
+    openRichTextFieldSheet(inspectionId, 'introduction', 'Introduction');
+  });
+  sheet.querySelector('#btn-summary').addEventListener('click', async () => {
+    await persistFields();
+    sheet.remove();
+    openRichTextFieldSheet(inspectionId, 'summary', 'Summary');
   });
   sheet.querySelector('#btn-conclusion').addEventListener('click', async () => {
     await persistFields();
@@ -967,9 +981,9 @@ async function openReportInfoSheet(inspectionId) {
       list.innerHTML = `<p class="muted" style="font-size:13px; padding:0 2px;">No appendices yet.</p>`;
       return;
     }
-    list.innerHTML = appendices.map((a) => `
+    list.innerHTML = appendices.map((a, i) => `
       <div class="tpl-row" data-appendix="${a.id}" style="cursor:pointer;">
-        <span>${esc(a.name)}</span>
+        <span>Appendix ${appendixLetter(i)} - ${esc(a.name)}</span>
         <span class="chevron">›</span>
       </div>
     `).join('');
@@ -983,12 +997,20 @@ async function openReportInfoSheet(inspectionId) {
   }
   renderAppendixList();
   sheet.querySelector('#btn-add-appendix').addEventListener('click', () => {
+    const letter = appendixLetter(appendices.length);
     const nameSheet = el(`
       <div class="sheet-backdrop">
         <div class="sheet">
           <div class="sheet-handle"></div>
           <h2>New appendix</h2>
-          <div class="field"><label>Name</label><input type="text" id="f-appendix-name" placeholder="e.g. Appendix A — Site Photos"></div>
+          <div class="field">
+            <label>Name</label>
+            <div class="link-row">
+              <span style="font-weight:700; color:var(--ink-soft); margin-right:6px; white-space:nowrap;">Appendix ${letter} -</span>
+              <input type="text" id="f-appendix-name" placeholder="e.g. Site Photos" style="flex:1;">
+            </div>
+          </div>
+          <p class="hint">The letter updates automatically if appendices are added, removed, or reordered later.</p>
           <button class="btn btn-primary btn-block" id="btn-save-appendix">Add</button>
           <button class="btn btn-ghost btn-block" id="btn-cancel-appendix">Cancel</button>
         </div>
@@ -1054,26 +1076,97 @@ async function openReportInfoSheet(inspectionId) {
   });
 }
 
-function openIntroSheet(inspectionId) {
+// ---------- Rich text editor (Introduction / Summary / Conclusion only) ----------
+// A lightweight contenteditable-based editor using document.execCommand — deliberately not
+// a full library, since the scope here is bounded (bold/italic/underline, text/highlight
+// color, lists/indent — no alignment, no tables). Stores each field's value as an HTML
+// string; existing plain-text values from before this feature are auto-converted on load.
+
+function looksLikeHtml(value) {
+  return /<\/?[a-z][\s\S]*>/i.test(value || '');
+}
+function plainTextToHtml(text) {
+  if (!text) return '';
+  return text.split('\n').map((line) => `<div>${esc(line) || '<br>'}</div>`).join('');
+}
+
+function richTextToolbarHTML(idPrefix) {
+  return `
+    <div class="rt-toolbar">
+      <button type="button" class="rt-btn" id="${idPrefix}-bold" title="Bold" style="font-weight:800;">B</button>
+      <button type="button" class="rt-btn" id="${idPrefix}-italic" title="Italic" style="font-style:italic;">I</button>
+      <button type="button" class="rt-btn" id="${idPrefix}-underline" title="Underline" style="text-decoration:underline;">U</button>
+      <button type="button" class="rt-btn" id="${idPrefix}-color" title="Text color">A</button>
+      <input type="color" id="${idPrefix}-color-input" style="display:none;" value="#c81e1e">
+      <button type="button" class="rt-btn" id="${idPrefix}-highlight" title="Highlight">🖍</button>
+      <input type="color" id="${idPrefix}-highlight-input" style="display:none;" value="#fff3a3">
+      <button type="button" class="rt-btn" id="${idPrefix}-ul" title="Bulleted list">•≡</button>
+      <button type="button" class="rt-btn" id="${idPrefix}-ol" title="Numbered list">1≡</button>
+      <button type="button" class="rt-btn" id="${idPrefix}-outdent" title="Outdent">⇤</button>
+      <button type="button" class="rt-btn" id="${idPrefix}-indent" title="Indent">⇥</button>
+    </div>
+  `;
+}
+
+// Wires up a rich text toolbar + its contenteditable editor. `container` must already
+// contain the toolbar HTML (from richTextToolbarHTML) and an element with id `${idPrefix}-editor`.
+function wireRichTextEditor(container, idPrefix, initialValue) {
+  const editor = container.querySelector(`#${idPrefix}-editor`);
+  editor.innerHTML = looksLikeHtml(initialValue) ? initialValue : plainTextToHtml(initialValue);
+
+  function cmd(command, value) {
+    editor.focus();
+    document.execCommand(command, false, value);
+  }
+  container.querySelector(`#${idPrefix}-bold`).addEventListener('click', () => cmd('bold'));
+  container.querySelector(`#${idPrefix}-italic`).addEventListener('click', () => cmd('italic'));
+  container.querySelector(`#${idPrefix}-underline`).addEventListener('click', () => cmd('underline'));
+  container.querySelector(`#${idPrefix}-ul`).addEventListener('click', () => cmd('insertUnorderedList'));
+  container.querySelector(`#${idPrefix}-ol`).addEventListener('click', () => cmd('insertOrderedList'));
+  container.querySelector(`#${idPrefix}-indent`).addEventListener('click', () => cmd('indent'));
+  container.querySelector(`#${idPrefix}-outdent`).addEventListener('click', () => cmd('outdent'));
+
+  const colorBtn = container.querySelector(`#${idPrefix}-color`);
+  const colorInput = container.querySelector(`#${idPrefix}-color-input`);
+  colorBtn.addEventListener('click', () => colorInput.click());
+  colorInput.addEventListener('input', (e) => cmd('foreColor', e.target.value));
+
+  const highlightBtn = container.querySelector(`#${idPrefix}-highlight`);
+  const highlightInput = container.querySelector(`#${idPrefix}-highlight-input`);
+  highlightBtn.addEventListener('click', () => highlightInput.click());
+  highlightInput.addEventListener('input', (e) => {
+    editor.focus();
+    // Safari has historically preferred backColor over hiliteColor for contenteditable
+    // highlighting; fall back if hiliteColor isn't reported as supported.
+    const supported = document.queryCommandSupported && document.queryCommandSupported('hiliteColor');
+    document.execCommand(supported ? 'hiliteColor' : 'backColor', false, e.target.value);
+  });
+
+  return { getHTML: () => editor.innerHTML };
+}
+
+function openRichTextFieldSheet(inspectionId, fieldKey, label) {
   DB.get('inspections', inspectionId).then((insp) => {
     const sheet = el(`
       <div class="sheet-backdrop">
         <div class="sheet">
           <div class="sheet-handle"></div>
-          <h2>Introduction / Summary</h2>
-          <div class="field"><textarea id="f-intro" style="min-height:220px;" placeholder="Summarize the purpose and scope of this inspection…">${esc(insp.introduction)}</textarea></div>
-          <button class="btn btn-primary btn-block" id="btn-save">Save</button>
+          <h2>${esc(label)}</h2>
+          ${richTextToolbarHTML('rtf')}
+          <div class="rt-editor" id="rtf-editor" contenteditable="true"></div>
+          <button class="btn btn-primary btn-block" id="btn-save" style="margin-top:14px;">Save</button>
           <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
         </div>
       </div>
     `);
     presentOverlay(sheet);
+    const editorApi = wireRichTextEditor(sheet, 'rtf', insp[fieldKey]);
     sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
     sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
     sheet.querySelector('#btn-save').addEventListener('click', async () => {
-      await DB.updateInspection(inspectionId, { introduction: sheet.querySelector('#f-intro').value.trim() });
+      await DB.updateInspection(inspectionId, { [fieldKey]: editorApi.getHTML() });
       sheet.remove();
-      toast('Introduction saved');
+      toast(`${label} saved`);
       openReportInfoSheet(inspectionId);
     });
   });
@@ -1090,7 +1183,8 @@ function openConclusionSheet(inspectionId) {
           <h2>Conclusion &amp; Recommendations</h2>
           <div class="field">
             <label>Conclusion</label>
-            <textarea id="f-conclusion" style="min-height:180px;" placeholder="Overall condition assessment and conclusion…">${esc(insp.conclusion)}</textarea>
+            ${richTextToolbarHTML('rtc')}
+            <div class="rt-editor" id="rtc-editor" contenteditable="true"></div>
           </div>
           <div class="field">
             <label>Recommendations</label>
@@ -1103,6 +1197,7 @@ function openConclusionSheet(inspectionId) {
       </div>
     `);
     presentOverlay(sheet);
+    const editorApi = wireRichTextEditor(sheet, 'rtc', insp.conclusion);
 
     function renderRecoList() {
       const list = sheet.querySelector('#reco-list');
@@ -1136,7 +1231,7 @@ function openConclusionSheet(inspectionId) {
     sheet.querySelector('#btn-save').addEventListener('click', async () => {
       const cleaned = recommendations.map((r) => r.trim()).filter(Boolean);
       await DB.updateInspection(inspectionId, {
-        conclusion: sheet.querySelector('#f-conclusion').value.trim(),
+        conclusion: editorApi.getHTML(),
         recommendations: cleaned
       });
       sheet.remove();
@@ -2271,15 +2366,17 @@ async function renderAppendix(inspectionId, appendixId) {
   const insp = await DB.get('inspections', inspectionId);
   if (!insp) { navigate('#/'); return; }
   const appendices = await DB.listAppendices(inspectionId);
-  const appendix = appendices.find((a) => a.id === appendixId);
+  const appendixIndex = appendices.findIndex((a) => a.id === appendixId);
+  const appendix = appendices[appendixIndex];
   if (!appendix) { navigate(`#/inspection/${inspectionId}`); return; }
+  const fullTitle = `Appendix ${appendixLetter(appendixIndex)} - ${appendix.name}`;
   let items = await DB.listAppendixItems(appendixId);
 
   appEl.innerHTML = `
     <div class="topbar">
       <button class="icon-btn" id="btn-back">‹</button>
       <div style="flex:1; min-width:0;">
-        <h1 style="font-size:17px;">${esc(appendix.name)}</h1>
+        <h1 style="font-size:17px;">${esc(fullTitle)}</h1>
         <span class="sub">${esc(insp.structureName)}</span>
       </div>
       <button class="text-btn" id="btn-rename-appendix">Edit</button>
@@ -2288,7 +2385,7 @@ async function renderAppendix(inspectionId, appendixId) {
     <button class="fab" id="btn-add-item">＋</button>
   `;
   document.getElementById('btn-back').addEventListener('click', () => navigate(`#/inspection/${inspectionId}`));
-  document.getElementById('btn-rename-appendix').addEventListener('click', () => openEditAppendixSheet(inspectionId, appendix));
+  document.getElementById('btn-rename-appendix').addEventListener('click', () => openEditAppendixSheet(inspectionId, appendix, appendixIndex));
   document.getElementById('btn-add-item').addEventListener('click', () => openAddAppendixItemSheet(inspectionId, appendixId, () => renderAppendix(inspectionId, appendixId)));
 
   function renderList() {
@@ -2324,13 +2421,20 @@ async function renderAppendix(inspectionId, appendixId) {
   renderList();
 }
 
-function openEditAppendixSheet(inspectionId, appendix) {
+function openEditAppendixSheet(inspectionId, appendix, appendixIndex) {
+  const letter = appendixLetter(appendixIndex);
   const sheet = el(`
     <div class="sheet-backdrop">
       <div class="sheet">
         <div class="sheet-handle"></div>
         <h2>Edit appendix</h2>
-        <div class="field"><label>Name</label><input type="text" id="f-name" value="${esc(appendix.name)}"></div>
+        <div class="field">
+          <label>Name</label>
+          <div class="link-row">
+            <span style="font-weight:700; color:var(--ink-soft); margin-right:6px; white-space:nowrap;">Appendix ${letter} -</span>
+            <input type="text" id="f-name" value="${esc(appendix.name)}" style="flex:1;">
+          </div>
+        </div>
         <button class="btn btn-primary btn-block" id="btn-save">Save</button>
         <button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:8px;">Delete appendix</button>
         <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>

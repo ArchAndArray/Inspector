@@ -129,6 +129,7 @@ const DB = {
       locationMapScale: data.locationMapScale || 2500,
       includeRiskAssessmentAppendix: !!data.includeRiskAssessmentAppendix,
       introduction: data.introduction || '',
+      summary: data.summary || '',
       conclusion: data.conclusion || '',
       recommendations: data.recommendations || [],
       location: data.location || { lat: null, lng: null, manual: '' },

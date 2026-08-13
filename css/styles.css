@@ -271,6 +271,25 @@ button {
 }
 .chip .chip-label { display: block; font-size: 10px; font-weight: 600; margin-top: 2px; text-transform: none; }
 
+/* Rich text editor (Introduction / Summary / Conclusion) — buttons styled like .chip since
+   this always sits on a light sheet background; the dark .tool-btn style (used in the
+   annotator's fullscreen toolbar) was invisible here in an earlier build. */
+.rt-toolbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.rt-btn {
+  min-width: 34px; height: 34px; padding: 0 8px;
+  border-radius: 8px; border: 1.5px solid var(--line);
+  background: var(--paper); color: var(--ink);
+  font-size: 14px; font-weight: 700;
+}
+.rt-editor {
+  min-height: 160px; max-height: 320px; overflow-y: auto;
+  border: 1.5px solid var(--line); border-radius: 10px;
+  padding: 12px; font-size: 15px; line-height: 1.5;
+  background: #fff; color: var(--ink);
+}
+.rt-editor:focus { outline: none; border-color: var(--ink); }
+.rt-editor ul, .rt-editor ol { padding-left: 22px; margin: 6px 0; }
+
 /* Photo grid */
 .photo-grid {
   display: grid;
