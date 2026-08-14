@@ -1843,10 +1843,12 @@ async function openAnnotator(photoId, onDone) {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     applyLineStyle();
+    ctx.lineDashOffset = -strokeDashDistance;
     ctx.beginPath();
     ctx.moveTo(fromX, fromY);
     ctx.lineTo(toX, toY);
     ctx.stroke();
+    strokeDashDistance += Math.hypot(toX - fromX, toY - fromY);
     resetLineStyle();
   }
 
@@ -1866,10 +1868,12 @@ async function openAnnotator(photoId, onDone) {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     applyLineStyle();
+    ctx.lineDashOffset = -strokeDashDistance;
     ctx.beginPath();
     ctx.moveTo(midA.x, midA.y);
     ctx.quadraticCurveTo(p1.x, p1.y, midB.x, midB.y);
     ctx.stroke();
+    strokeDashDistance += Math.hypot(midB.x - midA.x, midB.y - midA.y);
     resetLineStyle();
   }
 
@@ -1879,6 +1883,14 @@ async function openAnnotator(photoId, onDone) {
   let preStrokeSnapshot = null;
   let holdStraightenTimer = null;
   const HOLD_STRAIGHTEN_MS = 1000;
+
+  // A freehand stroke is built from many short segments (one per coalesced pointer event,
+  // often just a few pixels each) rather than one continuous path — without this, a dash
+  // pattern set fresh on each tiny segment always restarts at its "on" phase and never
+  // reaches the "gap" before the segment ends, so the whole stroke renders solid regardless
+  // of the selected style. Tracking cumulative distance and offsetting the dash phase by it
+  // makes the pattern continue seamlessly across segments instead.
+  let strokeDashDistance = 0;
 
   function clearHoldStraightenTimer() {
     if (holdStraightenTimer) { clearTimeout(holdStraightenTimer); holdStraightenTimer = null; }
@@ -1906,10 +1918,12 @@ async function openAnnotator(photoId, onDone) {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     applyLineStyle();
+    ctx.lineDashOffset = -strokeDashDistance;
     ctx.beginPath();
     ctx.moveTo(fromX, fromY);
     ctx.lineTo(toX, toY);
     ctx.stroke();
+    strokeDashDistance += Math.hypot(toX - fromX, toY - fromY);
     resetLineStyle();
   }
 
@@ -1922,6 +1936,7 @@ async function openAnnotator(photoId, onDone) {
     const p = projectOntoRuler(canvasPoint(e));
     lastX = p.x; lastY = p.y;
     strokeStartPoint = { x: p.x, y: p.y };
+    strokeDashDistance = 0;
     smoothPoints = [p];
     const pressure = e.pressure && e.pressure > 0 ? e.pressure : 0.5;
     const w = eraseMode ? currentWidth * 3 : currentWidth * (0.5 + pressure);

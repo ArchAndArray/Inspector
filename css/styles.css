@@ -447,6 +447,12 @@ button {
 .hidden { display: none !important; }
 .link-row { display:flex; align-items:center; justify-content:space-between; padding: 4px 0; }
 .small-btn { font-size: 13px; font-weight: 600; color: var(--red); background: none; border: none; padding: 6px; }
+.pdfed-btn {
+  font-size: 15px; font-weight: 600; color: var(--ink); background: var(--paper);
+  border: 1.5px solid var(--line); border-radius: 9px; padding: 10px 16px;
+}
+.pdfed-btn:active { background: #f0f0f2; }
+.pdfed-btn.pdfed-btn-danger { color: #c81e1e; border-color: #f0c8c8; }
 
 @media (min-width: 700px) {
   .content { padding-top: 24px; }

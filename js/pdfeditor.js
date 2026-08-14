@@ -145,7 +145,11 @@ async function pdfEdRebuildThumbnails() {
   const newPages = [];
   for (let i = 1; i <= pdfJsDoc.numPages; i++) {
     const page = await pdfJsDoc.getPage(i);
-    const viewport = page.getViewport({ scale: 0.35 });
+    // Bumped from the original 0.35 — that was reasonable for the small sidebar thumbnails
+    // alone, but is now also used for the enlarged main preview (and its zoom), where it
+    // would look visibly soft. Higher resolution costs more memory for very long documents,
+    // a tradeoff worth knowing about for very large PDFs specifically.
+    const viewport = page.getViewport({ scale: 1.0 });
     const canvas = document.createElement('canvas');
     canvas.width = viewport.width;
     canvas.height = viewport.height;
@@ -165,22 +169,22 @@ function renderPdfEdBody() {
 
   const body = document.getElementById('pdfed-body');
   body.innerHTML = `
-    <div class="annotate-toolbar" style="background:var(--paper); color:var(--ink); border-bottom:1px solid var(--line); flex-wrap:wrap; flex-shrink:0;" id="pdfed-toolbar">
-      <button class="small-btn" id="btn-pdfed-rotate-l" title="Rotate left">↺</button>
-      <button class="small-btn" id="btn-pdfed-rotate-r" title="Rotate right">↻</button>
-      <button class="small-btn" id="btn-pdfed-duplicate">Duplicate</button>
-      <button class="small-btn" id="btn-pdfed-delete" style="color:#c81e1e;">Delete</button>
-      <button class="small-btn" id="btn-pdfed-extract">Extract</button>
+    <div class="annotate-toolbar" style="background:var(--paper); border-bottom:1px solid var(--line); flex-wrap:wrap; flex-shrink:0; gap:8px; padding-top:12px;" id="pdfed-toolbar">
+      <button class="pdfed-btn" id="btn-pdfed-rotate-l" title="Rotate left">↺</button>
+      <button class="pdfed-btn" id="btn-pdfed-rotate-r" title="Rotate right">↻</button>
+      <button class="pdfed-btn" id="btn-pdfed-duplicate">Duplicate</button>
+      <button class="pdfed-btn pdfed-btn-danger" id="btn-pdfed-delete">Delete</button>
+      <button class="pdfed-btn" id="btn-pdfed-extract">Extract</button>
       <div class="spacer"></div>
-      <button class="small-btn" id="btn-pdfed-insert">Insert PDF</button>
-      <button class="small-btn" id="btn-pdfed-append">Append PDF</button>
-      <button class="small-btn" id="btn-pdfed-split">Split</button>
-      <button class="small-btn" id="btn-pdfed-rename">Rename</button>
+      <button class="pdfed-btn" id="btn-pdfed-insert">Insert PDF</button>
+      <button class="pdfed-btn" id="btn-pdfed-append">Append PDF</button>
+      <button class="pdfed-btn" id="btn-pdfed-split">Split</button>
+      <button class="pdfed-btn" id="btn-pdfed-rename">Rename</button>
     </div>
     <div style="display:flex; flex:1; min-height:0;">
       <div id="pdfed-sidebar" style="width:150px; flex-shrink:0; overflow-y:auto; background:#f0f0f2; border-right:1px solid var(--line); padding:10px;"></div>
-      <div id="pdfed-preview-wrap" style="flex:1; min-width:0; overflow:auto; display:flex; align-items:flex-start; justify-content:center; background:#e4e4e7; padding:20px;">
-        <div class="empty-state"><p class="muted">Select a page to preview</p></div>
+      <div id="pdfed-preview-wrap" style="flex:1; min-width:0; overflow:auto; background:#c8c8cd; touch-action:pan-y;">
+        <div id="pdfed-preview-stack" style="padding:20px; display:flex; flex-direction:column; align-items:center; gap:20px;"></div>
       </div>
     </div>
     <div class="annotate-toolbar" style="background:var(--paper); color:var(--ink); border-top:1px solid var(--line); flex-shrink:0;">
@@ -192,6 +196,7 @@ function renderPdfEdBody() {
   `;
   pdfEdRenderSidebar();
   pdfEdRenderPreview();
+  pdfEdWirePreviewZoom();
   pdfEdWireToolbar();
 }
 
@@ -219,7 +224,8 @@ function pdfEdRenderSidebar() {
     el2.addEventListener('click', () => {
       pdfEdPreviewId = el2.dataset.id;
       pdfEdRenderSidebarActiveOnly();
-      pdfEdRenderPreview();
+      const target = document.getElementById(`pdfed-page-${pdfEdPreviewId}`);
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
   });
 
@@ -276,11 +282,88 @@ function pdfEdRenderSidebarActiveOnly() {
   });
 }
 
+// Renders every page as one continuous scrollable list, rather than showing only a single
+// selected page — clicking a sidebar thumbnail scrolls this list to that page (see the
+// click handler above) instead of swapping out an exclusive single-page view.
 function pdfEdRenderPreview() {
+  const stack = document.getElementById('pdfed-preview-stack');
+  stack.innerHTML = pdfEdPages.map((p, i) => `
+    <div id="pdfed-page-${p.id}" class="pdfed-preview-page" data-id="${p.id}" style="box-shadow:0 4px 20px rgba(0,0,0,0.25); background:#fff;">
+      <img src="${p.thumbUrl}" style="display:block; width:100%;">
+    </div>
+  `).join('');
+  stack.querySelectorAll('.pdfed-preview-page').forEach((el2) => {
+    el2.addEventListener('click', () => {
+      pdfEdPreviewId = el2.dataset.id;
+      pdfEdRenderSidebarActiveOnly();
+    });
+  });
+}
+
+// Pinch-to-zoom for the preview pane. Deliberately uses a real CSS width change on each
+// page (triggering actual browser reflow) rather than a transform:scale() — a transform
+// doesn't reliably expand a scroll container's scrollable bounds the same way across
+// browsers, which a CSS-transform-only first attempt at this ran into. A real width change
+// means wrap.scrollWidth/scrollHeight always correctly reflect the new content size
+// afterward, which is what the pinch-point anchoring below relies on — verified against a
+// worked example before shipping. Single-finger scrolling stays entirely native
+// (touch-action:pan-y on the wrapper); only an actual two-finger gesture is intercepted.
+function pdfEdWirePreviewZoom() {
   const wrap = document.getElementById('pdfed-preview-wrap');
-  const page = pdfEdPages.find((p) => p.id === pdfEdPreviewId);
-  if (!page) { wrap.innerHTML = `<div class="empty-state"><p class="muted">Select a page to preview</p></div>`; return; }
-  wrap.innerHTML = `<img src="${page.thumbUrl}" style="max-width:100%; box-shadow:0 4px 20px rgba(0,0,0,0.25); background:#fff;">`;
+  let scale = 1;
+  // Fills most of the available preview width by default (this was the "too small" part
+  // of the complaint) rather than a fixed size, capped so it doesn't become unreasonably
+  // large on a very wide display.
+  const baseWidthPx = Math.min(950, Math.max(320, wrap.clientWidth - 40));
+
+  function applyScale() {
+    document.querySelectorAll('.pdfed-preview-page').forEach((el2) => {
+      el2.style.width = (baseWidthPx * scale) + 'px';
+    });
+  }
+  applyScale();
+
+  const touchPts = new Map();
+  let pinchState = null;
+
+  wrap.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch') return;
+    touchPts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (touchPts.size >= 2) pinchState = null; // reset so the next move re-establishes a clean baseline
+  });
+  wrap.addEventListener('pointermove', (e) => {
+    if (e.pointerType !== 'touch' || !touchPts.has(e.pointerId)) return;
+    touchPts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (touchPts.size < 2) return;
+    e.preventDefault(); // only suppress native behavior for the actual two-finger gesture
+    const pts = Array.from(touchPts.values());
+    const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+    const mid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+    if (!pinchState) { pinchState = { startDist: dist, startScale: scale }; return; }
+
+    // Capture the pinch point's position as a fraction of the total (pre-resize) scrollable
+    // content, then after resizing, restore scroll so that same fraction lands back under
+    // the same screen point — standard technique for anchored zoom on a real (reflowing) resize.
+    const wrapRect = wrap.getBoundingClientRect();
+    const beforeScrollW = wrap.scrollWidth, beforeScrollH = wrap.scrollHeight;
+    const fracX = (wrap.scrollLeft + (mid.x - wrapRect.left)) / beforeScrollW;
+    const fracY = (wrap.scrollTop + (mid.y - wrapRect.top)) / beforeScrollH;
+
+    scale = Math.min(4, Math.max(1, pinchState.startScale * (dist / pinchState.startDist)));
+    applyScale();
+
+    requestAnimationFrame(() => {
+      wrap.scrollLeft = fracX * wrap.scrollWidth - (mid.x - wrapRect.left);
+      wrap.scrollTop = fracY * wrap.scrollHeight - (mid.y - wrapRect.top);
+    });
+  });
+  function clearTouch(e) {
+    if (e.pointerType !== 'touch') return;
+    touchPts.delete(e.pointerId);
+    if (touchPts.size < 2) pinchState = null;
+  }
+  wrap.addEventListener('pointerup', clearTouch);
+  wrap.addEventListener('pointercancel', clearTouch);
 }
 
 // Reorders the actual pdf-lib document to match a new thumbnail order — rebuilt via
