@@ -357,6 +357,20 @@ const DB = {
     const existing = await this.get('photos', photoId);
     if (!existing) throw new Error('Photo not found');
     existing.annotatedBlob = blob;
+    // Committing a flattened save clears any previously saved editable layer — from this
+    // point the marks are permanently part of the image, matching "Flatten & commit".
+    existing.editableMarkBlob = null;
+    return this.put('photos', existing);
+  },
+  // "Save, keep editable" — stores the flattened result for display/export (same as
+  // setAnnotatedBlob) but also keeps the raw, unflattened mark layer so a later visit to
+  // the annotator can reload it and continue editing individual marks rather than starting
+  // from an image with everything already baked in.
+  async saveEditableAnnotation(photoId, mergedBlob, markBlob) {
+    const existing = await this.get('photos', photoId);
+    if (!existing) throw new Error('Photo not found');
+    existing.annotatedBlob = mergedBlob;
+    existing.editableMarkBlob = markBlob;
     return this.put('photos', existing);
   },
   async listPhotosForFinding(findingId) {

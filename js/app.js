@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '3.5';
+const APP_VERSION = '3.8';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -226,6 +226,24 @@ function loadPdfJs() {
   return pdfJsLoadPromise;
 }
 
+// pdf-lib: structural PDF editing (rotate/delete/reorder/merge pages while preserving
+// their actual content) — a different job from jsPDF (creates new PDFs) and pdf.js
+// (renders pages as images), used only by the PDF Editor tool.
+let pdfLibLoadPromise = null;
+function loadPdfLib() {
+  if (window.PDFLib) return Promise.resolve();
+  if (pdfLibLoadPromise) return pdfLibLoadPromise;
+  pdfLibLoadPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js';
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Failed to load PDF editing library'));
+    document.head.appendChild(script);
+  });
+  return pdfLibLoadPromise;
+}
+
+
 async function openMapPickerSheet(initialCoords, onConfirm) {
   toast('Loading map…');
   try {
@@ -353,6 +371,7 @@ async function route() {
     else if (p[0] === 'inspection' && p[1] && !p[2]) await renderInspection(p[1]);
     else if (p[0] === 'templates') await renderTemplates();
     else if (p[0] === 'scale-annotate') await renderScaleAnnotate();
+    else if (p[0] === 'pdf-editor') await renderPdfEditor();
     else await renderHome();
   } catch (err) {
     console.error(err);
@@ -594,6 +613,7 @@ async function renderHome() {
       <button class="icon-btn" id="btn-backup" title="Backup & restore">💾</button>
       <button class="icon-btn" id="btn-scale-annotate" title="Scale / Annotate">📐</button>
       <button class="icon-btn" id="btn-new-sketch" title="New sketch">✏️</button>
+      <button class="icon-btn" id="btn-pdf-editor" title="PDF Editor">📄</button>
       <button class="icon-btn" id="btn-templates" title="Element templates">☰</button>
     </div>
     <div class="content">
@@ -614,6 +634,7 @@ async function renderHome() {
   document.getElementById('btn-update').addEventListener('click', forceUpdate);
   document.getElementById('btn-backup').addEventListener('click', openBackupRestoreSheet);
   document.getElementById('btn-scale-annotate').addEventListener('click', () => navigate('#/scale-annotate'));
+  document.getElementById('btn-pdf-editor').addEventListener('click', () => navigate('#/pdf-editor'));
   document.getElementById('btn-new-sketch').addEventListener('click', async () => {
     const blank = await createBlankCanvasBlob();
     const rec = await DB.addStandaloneAnnotation(blank, 'Sketch', 'image');

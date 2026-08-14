@@ -60,7 +60,12 @@ function formatWithCommas(value) {
 async function openAnnotator(photoId, onDone) {
   const photo = await DB.get('photos', photoId);
   if (!photo) return;
-  const sourceBlob = photo.annotatedBlob || photo.originalBlob;
+  // If an editable mark layer was saved previously (via "Save, keep editable" rather than
+  // "Flatten & commit"), load the pristine original photo plus that separate mark layer,
+  // so marks are still individually undo-able/erasable — not the flattened result, which
+  // would make previously-drawn marks indistinguishable from the photo itself.
+  const hasEditableMark = !!photo.editableMarkBlob;
+  const sourceBlob = hasEditableMark ? photo.originalBlob : (photo.annotatedBlob || photo.originalBlob);
   const img = await loadBitmapCorrected(sourceBlob);
   const naturalW = img.width || img.naturalWidth;
   const naturalH = img.height || img.naturalHeight;
@@ -78,67 +83,79 @@ async function openAnnotator(photoId, onDone) {
   const view = el(`
     <div class="fullscreen" id="annotate-view">
       <div class="annotate-toolbar" id="main-toolbar">
-        <button class="tool-btn" id="btn-undo" title="Undo">↺</button>
-        <button class="tool-btn" id="btn-rotate" title="Rotate">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M4 12a8 8 0 1 1 2.6 5.9" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>
-            <path d="M4 17v-5h5" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </button>
-        <div class="spacer"></div>
-        <button class="tool-btn pen-type-btn active" data-pentype="pen" title="Pen">✏️</button>
-        <button class="tool-btn pen-type-btn" data-pentype="airbrush" title="Airbrush">💨</button>
-        <button class="tool-btn pen-type-btn" data-pentype="fountain" title="Fountain pen">🖋️</button>
-        <button class="tool-btn pen-type-btn" data-pentype="smoothing" title="Smoothing pen">〰️</button>
-        <div class="spacer"></div>
-        <button class="tool-btn" id="w-thin" title="Thin">•</button>
-        <button class="tool-btn active" id="w-medium" title="Medium">●</button>
-        <button class="tool-btn" id="w-thick" title="Thick">⬤</button>
-        <button class="tool-btn" id="w-custom" title="Custom width — tap to use, hold to change">⚙</button>
-        <button class="tool-btn" id="btn-erase" title="Eraser">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="3" y="12" width="14" height="8" rx="1.2" transform="rotate(-32 3 12)" fill="currentColor"/>
-            <path d="M9.5 5.5 L19 15 L15 19 L5.5 9.5 Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
-          </svg>
-        </button>
-      </div>
-      <div class="annotate-toolbar annotate-color-row" id="color-row-fixed">
-        ${ANNOTATE_COLORS.map((c, i) => `<div class="color-dot ${i === 0 ? 'active' : ''}" data-color="${c}" style="background:${c};"></div>`).join('')}
-      </div>
-      <div class="annotate-toolbar annotate-color-row" id="color-row-custom">
-        ${[0, 1, 2, 3, 4].map((i) => `<div class="color-dot color-dot-custom" data-custom-index="${i}" style="background:#e8e9ec; border:1.5px dashed #b8bcc4;"></div>`).join('')}
+        <div class="atb-row">
+          <div class="atb-left">
+            <button class="tool-btn tool-btn-text" id="btn-undo" title="Undo">Undo</button>
+            <button class="tool-btn tool-btn-text" id="btn-rotate" title="Rotate">Rotate</button>
+            <button class="tool-btn tool-btn-text" id="btn-crop" title="Crop">Crop</button>
+            <button class="tool-btn tool-btn-text" id="btn-calibrate" title="Calibrate">Calibrate</button>
+            <button class="tool-btn tool-btn-text" id="btn-grid" title="Grid">Grid</button>
+          </div>
+          <div class="atb-mid" id="color-row-fixed">
+            ${ANNOTATE_COLORS.map((c, i) => `<div class="color-dot ${i === 0 ? 'active' : ''}" data-color="${c}" style="background:${c};"></div>`).join('')}
+          </div>
+          <div class="atb-right">
+            <button class="tool-btn" id="btn-line-style" title="Line style — tap to choose">
+              <svg width="20" height="16" viewBox="0 0 24 16" xmlns="http://www.w3.org/2000/svg">
+                <line x1="2" y1="8" x2="22" y2="8" stroke="currentColor" stroke-width="2.4" stroke-dasharray="5,3.5" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <button class="tool-btn" id="w-thin" title="Thin">•</button>
+            <button class="tool-btn active" id="w-medium" title="Medium">●</button>
+            <button class="tool-btn" id="w-thick" title="Thick">⬤</button>
+            <button class="tool-btn" id="w-custom" title="Custom width — tap to use, hold to change">
+              <svg width="18" height="18" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                <rect x="3" y="5" width="18" height="1.5" fill="currentColor"/>
+                <rect x="3" y="11" width="18" height="3.5" fill="currentColor"/>
+                <rect x="3" y="17.5" width="18" height="5.5" fill="currentColor"/>
+              </svg>
+            </button>
+            <button class="tool-btn" id="btn-erase" title="Eraser">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="3" y="12" width="14" height="8" rx="1.2" transform="rotate(-32 3 12)" fill="currentColor"/>
+                <path d="M9.5 5.5 L19 15 L15 19 L5.5 9.5 Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+        </div>
       </div>
       <div class="annotate-toolbar" id="ruler-toolbar" style="padding-top:0; padding-bottom:8px;">
-        <button class="tool-btn" id="btn-ruler" title="Ruler">📏</button>
-        <button class="tool-btn" id="btn-ruler-snap" title="Snap / Free rotation" style="display:none; width:auto; padding:0 12px; font-size:12px; font-weight:700;">Snap</button>
-        <button class="tool-btn" id="btn-measure" title="Measure">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <line x1="3" y1="12" x2="21" y2="12" stroke="currentColor" stroke-width="2"/>
-            <path d="M3 12 L8 8 M3 12 L8 16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M21 12 L16 8 M21 12 L16 16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </button>
-        <button class="tool-btn" id="btn-text-tool" title="Text">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="2" y="4" width="20" height="16" rx="2" stroke="currentColor" stroke-width="1.6" fill="none"/>
-            <path d="M7 9h10M7 13h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-          </svg>
-        </button>
-        <button class="tool-btn" id="btn-calibrate" title="Calibrate" style="width:auto; padding:0 12px; font-size:12px; font-weight:700;">Calibrate</button>
-        <button class="tool-btn" id="btn-crop" title="Crop" style="width:auto; padding:0 12px; font-size:12px; font-weight:700;">Crop</button>
-        <button class="tool-btn" id="btn-grid" title="Grid">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="3" y="3" width="18" height="18" stroke="currentColor" stroke-width="1.6" fill="none"/>
-            <line x1="9" y1="3" x2="9" y2="21" stroke="currentColor" stroke-width="1.3"/>
-            <line x1="15" y1="3" x2="15" y2="21" stroke="currentColor" stroke-width="1.3"/>
-            <line x1="3" y1="9" x2="21" y2="9" stroke="currentColor" stroke-width="1.3"/>
-            <line x1="3" y1="15" x2="21" y2="15" stroke="currentColor" stroke-width="1.3"/>
-          </svg>
-        </button>
-        <div class="spacer"></div>
-        <span class="muted" id="ruler-angle-readout" style="display:none; font-size:13px; font-weight:700; color:#fff;">0°</span>
-        <span class="muted" id="ruler-hint" style="display:none; font-size:11.5px; color:#b8bcc4;">Two fingers: move &amp; rotate · pull the dot to resize</span>
-        <span class="muted" id="zoom-hint" style="font-size:11.5px; color:#b8bcc4;">Pinch to zoom</span>
+        <div class="atb-row">
+          <div class="atb-left">
+            <button class="tool-btn" id="btn-ruler" title="Ruler">📏</button>
+            <button class="tool-btn" id="btn-ruler-snap" title="Snap / Free rotation" style="display:none; width:auto; padding:0 12px; font-size:12px; font-weight:700;">Snap</button>
+            <button class="tool-btn" id="btn-measure" title="Measure">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <line x1="3" y1="12" x2="21" y2="12" stroke="currentColor" stroke-width="2"/>
+                <path d="M3 12 L8 8 M3 12 L8 16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M21 12 L16 8 M21 12 L16 16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+            <button class="tool-btn" id="btn-text-tool" title="Text">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="2" y="4" width="20" height="16" rx="2" stroke="currentColor" stroke-width="1.6" fill="none"/>
+                <path d="M7 9h10M7 13h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <button class="tool-btn" id="btn-arc" title="Curved line">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M4 18 Q12 4 20 18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <button class="tool-btn pen-type-btn active" data-pentype="pen" title="Pen">✏️</button>
+            <button class="tool-btn pen-type-btn" data-pentype="airbrush" title="Airbrush">💨</button>
+            <button class="tool-btn pen-type-btn" data-pentype="fountain" title="Fountain pen">🖋️</button>
+            <button class="tool-btn pen-type-btn" data-pentype="smoothing" title="Smoothing pen">〰️</button>
+          </div>
+          <div class="atb-mid" id="color-row-custom">
+            ${[0, 1, 2, 3, 4].map((i) => `<div class="color-dot color-dot-custom" data-custom-index="${i}" style="background:#e8e9ec; border:1.5px dashed #b8bcc4;"></div>`).join('')}
+          </div>
+          <div class="atb-right">
+            <span class="muted" id="ruler-angle-readout" style="display:none; font-size:13px; font-weight:700; color:#fff;">0°</span>
+            <span class="muted" id="ruler-hint" style="display:none; font-size:11.5px; color:#b8bcc4;">Two fingers: move &amp; rotate · pull the dot to resize</span>
+            <span class="muted" id="zoom-hint" style="font-size:11.5px; color:#b8bcc4;">Pinch to zoom</span>
+          </div>
+        </div>
       </div>
       <div class="annotate-toolbar" id="cal-toolbar" style="display:none; padding-top:0; padding-bottom:8px;">
         <span id="cal-instruction" style="color:#fff; font-size:13px; font-weight:600; flex:1;"></span>
@@ -150,6 +167,11 @@ async function openAnnotator(photoId, onDone) {
         <span style="color:#fff; font-size:13px; font-weight:600; flex:1;">Drag corners to resize, drag inside to move</span>
         <button class="tool-btn" id="btn-crop-apply" title="Apply crop" style="background:var(--sev-1);">✓</button>
         <button class="tool-btn" id="btn-crop-cancel" title="Cancel crop">✕</button>
+      </div>
+      <div class="annotate-toolbar" id="adjust-toolbar" style="display:none; padding-top:0; padding-bottom:8px;">
+        <span style="color:#fff; font-size:13px; font-weight:600; flex:1;">Drag to reposition, then confirm</span>
+        <button class="tool-btn" id="btn-adjust-done" title="Confirm" style="background:var(--sev-1);">✓</button>
+        <button class="tool-btn" id="btn-adjust-cancel" title="Discard">✕</button>
       </div>
       <div class="annotate-canvas-wrap" id="canvas-wrap">
         <div id="canvas-stack" style="position:relative;">
@@ -173,12 +195,17 @@ async function openAnnotator(photoId, onDone) {
             <div class="crop-handle" data-corner="bl" style="position:absolute; width:24px; height:24px; margin:-12px; border-radius:50%; background:#c81e1e; border:2.5px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.35); touch-action:none;"></div>
             <div class="crop-handle" data-corner="br" style="position:absolute; width:24px; height:24px; margin:-12px; border-radius:50%; background:#c81e1e; border:2.5px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.35); touch-action:none;"></div>
           </div>
+          <div id="adjust-box-area" style="display:none; position:absolute; border:2px dashed #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.5); touch-action:none; z-index:11;"></div>
+          <div id="adjust-handle-1" class="adjust-handle" style="display:none; position:absolute; width:26px; height:26px; margin:-13px; border-radius:50%; background:#c81e1e; border:2.5px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.35); touch-action:none; z-index:12;"></div>
+          <div id="adjust-handle-2" class="adjust-handle" style="display:none; position:absolute; width:26px; height:26px; margin:-13px; border-radius:50%; background:#1e7dc8; border:2.5px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.35); touch-action:none; z-index:12;"></div>
+          <div id="adjust-handle-3" class="adjust-handle" style="display:none; position:absolute; width:24px; height:24px; margin:-12px; border-radius:50%; background:#e0a72e; border:2.5px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.35); touch-action:none; z-index:12;"></div>
         </div>
       </div>
       <div class="annotate-toolbar">
         <button class="btn btn-ghost" id="btn-cancel">Cancel</button>
         <div class="spacer"></div>
-        <button class="btn btn-primary" id="btn-save">Save markup</button>
+        <button class="btn btn-secondary" id="btn-save-editable" title="Saves your progress but keeps every mark individually editable if you come back to it">Save (editable)</button>
+        <button class="btn btn-primary" id="btn-save" style="margin-left:8px;" title="Permanently merges the marks into the image">Flatten &amp; save</button>
       </div>
     </div>
   `);
@@ -198,6 +225,11 @@ async function openAnnotator(photoId, onDone) {
 
   photoCtx.drawImage(img, 0, 0, cw, ch);
   if (img.close) img.close();
+  if (hasEditableMark) {
+    const markImg = await loadBitmapCorrected(photo.editableMarkBlob);
+    ctx.drawImage(markImg, 0, 0, cw, ch);
+    if (markImg.close) markImg.close();
+  }
 
   // ---- View transform (pinch-zoom / pan) ----
   let viewScale = 1, viewTx = 0, viewTy = 0;
@@ -231,6 +263,55 @@ async function openAnnotator(photoId, onDone) {
   let currentWidth = ANNOTATE_WIDTHS.medium;
   let eraseMode = false;
   let currentPenType = 'pen'; // 'pen' | 'airbrush' | 'fountain' | 'smoothing'
+
+  // ---- Line style (dash pattern) — applies broadly to any stroked line: Pen, Fountain,
+  // Smoothing, Measure, and the Arc tool. Not Airbrush, which is dab-based rather than a
+  // stroked path, so a dash pattern has no meaningful effect on it. ----
+  const LINE_STYLES = {
+    solid: [],
+    dots: [2, 5],
+    smallDashes: [6, 5],
+    dashDot: [10, 5, 2, 5],
+    largeDashes: [16, 7]
+  };
+  let currentLineStyle = 'solid';
+  function applyLineStyle() {
+    ctx.setLineDash(LINE_STYLES[currentLineStyle] || []);
+  }
+  function resetLineStyle() {
+    ctx.setLineDash([]);
+  }
+
+  view.querySelector('#btn-line-style').addEventListener('click', () => {
+    const options = [
+      ['solid', 'Solid'], ['dots', 'Dots'], ['smallDashes', 'Small dashes'],
+      ['dashDot', 'Dots and dashes'], ['largeDashes', 'Large dashes']
+    ];
+    const sheet = el(`
+      <div class="sheet-backdrop">
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <h2>Line style</h2>
+          ${options.map(([key, label]) => `
+            <button class="btn btn-secondary btn-block line-style-option" data-style="${key}" style="margin-top:8px; display:flex; align-items:center; gap:12px; ${key === currentLineStyle ? 'border-color:var(--ink); background:#f0f0f2;' : ''}">
+              <svg width="60" height="14" viewBox="0 0 60 14"><line x1="2" y1="7" x2="58" y2="7" stroke="#1c1f26" stroke-width="2.4" stroke-dasharray="${LINE_STYLES[key].join(',')}"/></svg>
+              <span>${label}</span>
+            </button>
+          `).join('')}
+          <button class="btn btn-ghost btn-block" id="btn-cancel-linestyle" style="margin-top:16px;">Close</button>
+        </div>
+      </div>
+    `);
+    presentOverlay(sheet);
+    sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+    sheet.querySelector('#btn-cancel-linestyle').addEventListener('click', () => sheet.remove());
+    sheet.querySelectorAll('.line-style-option').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        currentLineStyle = btn.dataset.style;
+        sheet.remove();
+      });
+    });
+  });
 
   // ---- Persistent custom colors (5 user-saveable slots, survive across sessions) ----
   const CUSTOM_COLORS_KEY = 'inspector_custom_colors';
@@ -469,16 +550,20 @@ async function openAnnotator(photoId, onDone) {
     fitCanvas();
     updateRulerVisual();
     updateRulerHandle();
-    if (gridEnabled) updateGridVisual();
+    if (gridState) updateGridVisual();
     if (cropMode) { cropRect = { x: cw * 0.1, y: ch * 0.1, w: cw * 0.8, h: ch * 0.8 }; updateCropVisual(); }
   });
 
   // ---- Grid: a pure visual alignment aid, drawn on its own overlay layer that's never
   // part of the mark canvas — so it's never baked into the saved image or the exported
   // report, same principle as the ruler. ----
-  let gridEnabled = false;
+  // Cycles through Off -> Normal -> Dense (half the spacing) -> Off, rather than a separate
+  // button, keeping the already-busy toolbar from growing further.
+  let gridState = 0; // 0 = off, 1 = normal, 2 = dense
+  const GRID_SPACING = { 1: 100, 2: 50 };
   function updateGridVisual() {
-    const spacing = 100;
+    if (!gridState) return;
+    const spacing = GRID_SPACING[gridState];
     let svg = `<svg width="100%" height="100%" viewBox="0 0 ${cw} ${ch}" preserveAspectRatio="none" style="display:block;">`;
     for (let x = spacing; x < cw; x += spacing) {
       svg += `<line x1="${x}" y1="0" x2="${x}" y2="${ch}" stroke="#000000" stroke-width="1" opacity="0.18"/>`;
@@ -490,10 +575,11 @@ async function openAnnotator(photoId, onDone) {
     gridVisual.innerHTML = svg;
   }
   view.querySelector('#btn-grid').addEventListener('click', (e) => {
-    gridEnabled = !gridEnabled;
-    e.currentTarget.classList.toggle('active', gridEnabled);
-    gridVisual.style.display = gridEnabled ? 'block' : 'none';
-    if (gridEnabled) updateGridVisual();
+    gridState = (gridState + 1) % 3;
+    e.currentTarget.textContent = gridState === 2 ? 'Grid ••' : gridState === 1 ? 'Grid •' : 'Grid';
+    e.currentTarget.classList.toggle('active', gridState > 0);
+    gridVisual.style.display = gridState > 0 ? 'block' : 'none';
+    if (gridState > 0) updateGridVisual();
   });
 
   // ---- Crop: drag the corner handles to resize the crop rectangle, drag inside it to
@@ -652,7 +738,7 @@ async function openAnnotator(photoId, onDone) {
     fitCanvas();
     updateRulerVisual();
     updateRulerHandle();
-    if (gridEnabled) updateGridVisual();
+    if (gridState) updateGridVisual();
     exitCropMode();
   });
 
@@ -859,6 +945,11 @@ async function openAnnotator(photoId, onDone) {
       view.querySelector('#btn-measure').classList.remove('active');
       measureStart = null;
     }
+    if (except !== 'arc' && arcMode) {
+      arcMode = false;
+      view.querySelector('#btn-arc').classList.remove('active');
+      arcStart = null;
+    }
     if (except !== 'text' && textMode) {
       textMode = false;
       view.querySelector('#btn-text-tool').classList.remove('active');
@@ -873,6 +964,257 @@ async function openAnnotator(photoId, onDone) {
     pinchState = null;
     clearPreview();
   }
+
+  // ---- Adjust mode: after placing a Measure arrow or a Text box, it stays live and
+  // draggable (rather than committing to pixels immediately) until explicitly confirmed —
+  // giving one more chance to nudge it into place. No auto-timeout, matching how every
+  // other confirmation in this app works (deliberate, not implicit). ----
+  let adjustMode = null; // null | 'measure' | 'text' | 'arc'
+  let adjustP1 = null, adjustP2 = null; // measure mode's two endpoints, also arc mode's two endpoints
+  let adjustTextAnchor = null, adjustTextArrow = null, adjustTextResult = null; // text mode
+  let adjustArcMid = null; // arc mode's bulge point — where the curve is dragged to pass through
+  let adjustDragTarget = null; // 'p1' | 'p2' | 'p3' | 'arrow' | 'box'
+  let adjustDragPointerId = null;
+  let adjustDragBoxOffset = null;
+
+  let adjustTextBoxRect = null;
+  function redrawAdjustPreview() {
+    clearPreview();
+    const boxArea = view.querySelector('#adjust-box-area');
+    if (adjustMode === 'measure') {
+      boxArea.style.display = 'none';
+      drawMeasureArrowOn(previewCtx, adjustP1.x, adjustP1.y, adjustP2.x, adjustP2.y);
+      positionAdjustHandle('#adjust-handle-1', adjustP1);
+      positionAdjustHandle('#adjust-handle-2', adjustP2);
+      positionAdjustHandle('#adjust-handle-3', null);
+    } else if (adjustMode === 'arc') {
+      boxArea.style.display = 'none';
+      drawArcOn(previewCtx, adjustP1, adjustP2, adjustArcMid);
+      positionAdjustHandle('#adjust-handle-1', adjustP1);
+      positionAdjustHandle('#adjust-handle-2', adjustP2);
+      positionAdjustHandle('#adjust-handle-3', adjustArcMid);
+    } else if (adjustMode === 'text') {
+      const box = drawTextBoxOn(previewCtx, adjustTextAnchor.x, adjustTextAnchor.y, adjustTextResult.text, adjustTextResult);
+      adjustTextBoxRect = box; // remembered so the leader handle knows its starting position
+      boxArea.style.display = 'block';
+      boxArea.style.left = (box.x / cw) * 100 + '%';
+      boxArea.style.top = (box.y / ch) * 100 + '%';
+      boxArea.style.width = (box.w / cw) * 100 + '%';
+      boxArea.style.height = (box.h / ch) * 100 + '%';
+      positionAdjustHandle('#adjust-handle-1', null);
+      if (adjustTextArrow) {
+        const start = rectEdgeIntersection(box.centerX, box.centerY, box.w, box.h, adjustTextArrow.x, adjustTextArrow.y);
+        const { headSize, lineWidth } = measureArrowSizing();
+        const lineEnd = pullBackForArrowhead(start.x, start.y, adjustTextArrow.x, adjustTextArrow.y, headSize);
+        previewCtx.save();
+        previewCtx.strokeStyle = currentColor;
+        previewCtx.fillStyle = currentColor;
+        previewCtx.lineWidth = lineWidth;
+        previewCtx.beginPath();
+        previewCtx.moveTo(start.x, start.y);
+        previewCtx.lineTo(lineEnd.x, lineEnd.y);
+        previewCtx.stroke();
+        drawArrowheadOn(previewCtx, start.x, start.y, adjustTextArrow.x, adjustTextArrow.y, headSize);
+        previewCtx.restore();
+        positionAdjustHandle('#adjust-handle-2', adjustTextArrow);
+      } else {
+        // No leader yet — a small handle sits at the box's corner as the affordance to
+        // create one by dragging it outward. Leaving it untouched and tapping Done gives
+        // "just a text box" with no leader at all.
+        positionAdjustHandle('#adjust-handle-2', { x: box.x + box.w, y: box.y + box.h });
+      }
+      positionAdjustHandle('#adjust-handle-3', null);
+    }
+  }
+
+  function positionAdjustHandle(selector, pt) {
+    const handle = view.querySelector(selector);
+    if (!pt) { handle.style.display = 'none'; return; }
+    handle.style.display = 'block';
+    handle.style.left = (pt.x / cw) * 100 + '%';
+    handle.style.top = (pt.y / ch) * 100 + '%';
+  }
+
+  // For a quadratic bezier, the curve's own midpoint is NOT the control point — it's
+  // (start + 2*control + end) / 4. Solving that for control means the point the user drags
+  // is exactly where the curve visually passes through, rather than an abstract "control
+  // point" that doesn't match what's being dragged on screen.
+  function computeQuadraticControl(p1, p2, bulgePt) {
+    return {
+      x: 2 * bulgePt.x - (p1.x + p2.x) / 2,
+      y: 2 * bulgePt.y - (p1.y + p2.y) / 2
+    };
+  }
+
+  function drawArcOn(targetCtx, p1, p2, bulgePt) {
+    const control = computeQuadraticControl(p1, p2, bulgePt);
+    targetCtx.save();
+    targetCtx.strokeStyle = currentColor;
+    targetCtx.lineWidth = currentWidth;
+    targetCtx.lineCap = 'round';
+    targetCtx.setLineDash(LINE_STYLES[currentLineStyle] || []);
+    targetCtx.beginPath();
+    targetCtx.moveTo(p1.x, p1.y);
+    targetCtx.quadraticCurveTo(control.x, control.y, p2.x, p2.y);
+    targetCtx.stroke();
+    targetCtx.restore();
+  }
+
+  function exitAdjustMode() {
+    adjustMode = null;
+    adjustP1 = null; adjustP2 = null;
+    adjustTextAnchor = null; adjustTextArrow = null; adjustTextResult = null;
+    adjustArcMid = null;
+    adjustDragTarget = null; adjustDragPointerId = null;
+    clearPreview();
+    hideMagnifier();
+    view.querySelector('#main-toolbar').style.display = '';
+    view.querySelector('#ruler-toolbar').style.display = '';
+    const adjustToolbar = view.querySelector('#adjust-toolbar');
+    adjustToolbar.style.display = 'none';
+    adjustToolbar.style.paddingTop = '0';
+    view.querySelector('#adjust-handle-1').style.display = 'none';
+    view.querySelector('#adjust-handle-2').style.display = 'none';
+    view.querySelector('#adjust-handle-3').style.display = 'none';
+    view.querySelector('#adjust-box-area').style.display = 'none';
+  }
+
+  function enterAdjustModeCommon() {
+    deactivateOtherModes(null);
+    view.querySelector('#main-toolbar').style.display = 'none';
+    view.querySelector('#ruler-toolbar').style.display = 'none';
+    const adjustToolbar = view.querySelector('#adjust-toolbar');
+    adjustToolbar.style.display = '';
+    // Same fix as the calibration/crop toolbars: this row skips its own top padding
+    // normally (it sits below the main toolbar, which already reserves that space), but
+    // hiding that row here makes this one the topmost, so it needs the clearance itself.
+    adjustToolbar.style.paddingTop = 'calc(10px + var(--safe-top))';
+  }
+
+  function enterMeasureAdjustMode(p1, p2) {
+    enterAdjustModeCommon();
+    adjustMode = 'measure';
+    adjustP1 = { x: p1.x, y: p1.y };
+    adjustP2 = { x: p2.x, y: p2.y };
+    redrawAdjustPreview();
+  }
+
+  function enterTextAdjustMode(boxAnchor, arrowTarget, result) {
+    enterAdjustModeCommon();
+    adjustMode = 'text';
+    adjustTextAnchor = { x: boxAnchor.x, y: boxAnchor.y };
+    adjustTextArrow = arrowTarget ? { x: arrowTarget.x, y: arrowTarget.y } : null;
+    adjustTextResult = result;
+    redrawAdjustPreview();
+  }
+
+  function enterArcAdjustMode(p1, p2) {
+    enterAdjustModeCommon();
+    adjustMode = 'arc';
+    adjustP1 = { x: p1.x, y: p1.y };
+    adjustP2 = { x: p2.x, y: p2.y };
+    adjustArcMid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }; // starts as a straight line — zero bulge
+    redrawAdjustPreview();
+  }
+
+  // Commits whatever's currently pending in adjust mode to the real canvas — shared by the
+  // Done button and by the annotator's own outer Save button, so tapping Save while an item
+  // is still mid-adjustment (only ever drawn on the preview layer, not the real one) can
+  // never silently lose it.
+  function confirmPendingAdjust() {
+    if (adjustMode === 'measure') {
+      finalizeMeasureArrow(adjustP1.x, adjustP1.y, adjustP2.x, adjustP2.y);
+    } else if (adjustMode === 'arc') {
+      pushUndo();
+      drawArcOn(ctx, adjustP1, adjustP2, adjustArcMid);
+    } else if (adjustMode === 'text') {
+      pushUndo();
+      const box = drawTextBoxOn(ctx, adjustTextAnchor.x, adjustTextAnchor.y, adjustTextResult.text, adjustTextResult);
+      if (adjustTextArrow) {
+        const start = rectEdgeIntersection(box.centerX, box.centerY, box.w, box.h, adjustTextArrow.x, adjustTextArrow.y);
+        const { headSize, lineWidth } = measureArrowSizing();
+        const lineEnd = pullBackForArrowhead(start.x, start.y, adjustTextArrow.x, adjustTextArrow.y, headSize);
+        ctx.save();
+        ctx.strokeStyle = currentColor;
+        ctx.fillStyle = currentColor;
+        ctx.lineWidth = lineWidth;
+        ctx.beginPath();
+        ctx.moveTo(start.x, start.y);
+        ctx.lineTo(lineEnd.x, lineEnd.y);
+        ctx.stroke();
+        drawArrowheadOn(ctx, start.x, start.y, adjustTextArrow.x, adjustTextArrow.y, headSize);
+        ctx.restore();
+      }
+    }
+    exitAdjustMode();
+  }
+
+  view.querySelector('#btn-adjust-cancel').addEventListener('click', exitAdjustMode);
+  view.querySelector('#btn-adjust-done').addEventListener('click', confirmPendingAdjust);
+
+  function wireAdjustHandle(selector, measureTarget) {
+    const handle = view.querySelector(selector);
+    handle.addEventListener('pointerdown', (e) => {
+      adjustDragTarget = measureTarget;
+      adjustDragPointerId = e.pointerId;
+      try { handle.setPointerCapture(e.pointerId); } catch (err) {}
+      const p = canvasPoint(e);
+      showMagnifier(p, e.clientX, e.clientY);
+      e.preventDefault(); e.stopPropagation();
+    });
+    handle.addEventListener('pointermove', (e) => {
+      if (adjustDragTarget !== measureTarget || e.pointerId !== adjustDragPointerId) return;
+      const p = canvasPoint(e);
+      if (adjustMode === 'measure') {
+        if (measureTarget === 'p1') adjustP1 = p; else adjustP2 = p;
+      } else if (adjustMode === 'arc') {
+        if (measureTarget === 'p1') adjustP1 = p;
+        else if (measureTarget === 'p2') adjustP2 = p;
+        else if (measureTarget === 'p3') adjustArcMid = p;
+      } else if (adjustMode === 'text') {
+        adjustTextArrow = p;
+      }
+      showMagnifier(p, e.clientX, e.clientY);
+      redrawAdjustPreview();
+      e.preventDefault(); e.stopPropagation();
+    });
+    function endDrag(e) {
+      if (adjustDragTarget !== measureTarget || e.pointerId !== adjustDragPointerId) return;
+      adjustDragTarget = null; adjustDragPointerId = null;
+      hideMagnifier();
+    }
+    handle.addEventListener('pointerup', endDrag);
+    handle.addEventListener('pointercancel', endDrag);
+  }
+  wireAdjustHandle('#adjust-handle-1', 'p1');
+  wireAdjustHandle('#adjust-handle-2', 'p2');
+  wireAdjustHandle('#adjust-handle-3', 'p3');
+
+  const adjustBoxArea = view.querySelector('#adjust-box-area');
+  adjustBoxArea.addEventListener('pointerdown', (e) => {
+    adjustDragTarget = 'box';
+    adjustDragPointerId = e.pointerId;
+    try { adjustBoxArea.setPointerCapture(e.pointerId); } catch (err) {}
+    const p = canvasPoint(e);
+    adjustDragBoxOffset = { x: p.x - adjustTextAnchor.x, y: p.y - adjustTextAnchor.y };
+    showMagnifier(p, e.clientX, e.clientY);
+    e.preventDefault(); e.stopPropagation();
+  });
+  adjustBoxArea.addEventListener('pointermove', (e) => {
+    if (adjustDragTarget !== 'box' || e.pointerId !== adjustDragPointerId) return;
+    const p = canvasPoint(e);
+    adjustTextAnchor = { x: p.x - adjustDragBoxOffset.x, y: p.y - adjustDragBoxOffset.y };
+    showMagnifier(p, e.clientX, e.clientY);
+    redrawAdjustPreview();
+    e.preventDefault(); e.stopPropagation();
+  });
+  function endBoxDrag(e) {
+    if (adjustDragTarget !== 'box' || e.pointerId !== adjustDragPointerId) return;
+    adjustDragTarget = null; adjustDragPointerId = null;
+    hideMagnifier();
+  }
+  adjustBoxArea.addEventListener('pointerup', endBoxDrag);
+  adjustBoxArea.addEventListener('pointercancel', endBoxDrag);
 
   view.querySelector('#btn-ruler').addEventListener('click', (e) => {
     rulerEnabled = !rulerEnabled;
@@ -1179,6 +1521,7 @@ async function openAnnotator(photoId, onDone) {
     targetCtx.fillStyle = currentColor;
     targetCtx.lineWidth = lineWidth;
     targetCtx.lineCap = 'round';
+    targetCtx.setLineDash(LINE_STYLES[currentLineStyle] || []); // restore() below cleans this up automatically
     // On a very short arrow, pulling back both ends could make them cross — in that case
     // the two arrowheads alone (drawn below regardless) are enough at this scale, so the
     // connecting line is skipped rather than drawing a glitchy backwards segment.
@@ -1213,6 +1556,26 @@ async function openAnnotator(photoId, onDone) {
     touches.clear();
     pinchState = null;
     measureStart = null;
+    clearPreview();
+  });
+
+  // ---- Arc tool: press-drag-release places a plain curved line between two points (no
+  // arrowhead, no label), then enters adjust mode with a third handle controlling how far
+  // the curve bulges from the straight line between the two endpoints. ----
+  let arcMode = false;
+  let arcStart = null;
+  let arcPointerId = null;
+  view.querySelector('#btn-arc').addEventListener('click', (e) => {
+    arcMode = !arcMode;
+    if (arcMode) {
+      deactivateOtherModes('arc');
+      e.currentTarget.classList.add('active');
+    } else {
+      e.currentTarget.classList.remove('active');
+    }
+    touches.clear();
+    pinchState = null;
+    arcStart = null;
     clearPreview();
   });
 
@@ -1348,28 +1711,12 @@ async function openAnnotator(photoId, onDone) {
     });
   }
 
-  function finalizeTextPlacement(pressPt, releasePt) {
-    const dragged = Math.hypot(releasePt.x - pressPt.x, releasePt.y - pressPt.y) > 12;
-    const arrowTarget = dragged ? pressPt : null;
-    const boxAnchor = dragged ? releasePt : pressPt;
+  // Text placement is now a simple tap: box position is the release point, and a leader
+  // (if wanted at all) is added afterward from within adjust mode — see the leader handle
+  // wired into redrawAdjustPreview / wireAdjustHandle below.
+  function finalizeTextPlacement(releasePt) {
     openTextEntrySheet((result) => {
-      pushUndo();
-      const box = drawTextBoxOn(ctx, boxAnchor.x, boxAnchor.y, result.text, result);
-      if (arrowTarget) {
-        const start = rectEdgeIntersection(box.centerX, box.centerY, box.w, box.h, arrowTarget.x, arrowTarget.y);
-        const { headSize, lineWidth } = measureArrowSizing();
-        const lineEnd = pullBackForArrowhead(start.x, start.y, arrowTarget.x, arrowTarget.y, headSize);
-        ctx.save();
-        ctx.strokeStyle = currentColor;
-        ctx.fillStyle = currentColor;
-        ctx.lineWidth = lineWidth;
-        ctx.beginPath();
-        ctx.moveTo(start.x, start.y);
-        ctx.lineTo(lineEnd.x, lineEnd.y);
-        ctx.stroke();
-        drawArrowheadOn(ctx, start.x, start.y, arrowTarget.x, arrowTarget.y, headSize);
-        ctx.restore();
-      }
+      enterTextAdjustMode(releasePt, null, result);
     });
   }
 
@@ -1440,24 +1787,35 @@ async function openAnnotator(photoId, onDone) {
     ctx.lineWidth = w;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
+    applyLineStyle();
     ctx.beginPath();
     ctx.moveTo(fromX, fromY);
     ctx.lineTo(toX, toY);
     ctx.stroke();
+    resetLineStyle();
   }
 
   let smoothPoints = [];
-  function drawSmoothingSegment(p) {
+  function drawSmoothingSegment(p, width) {
     smoothPoints.push(p);
     if (smoothPoints.length > 3) smoothPoints.shift();
     if (smoothPoints.length < 3) return;
     const [p0, p1, p2] = smoothPoints;
     const midA = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
     const midB = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+    // Previously relied on whatever strokeStyle/lineWidth the canvas context happened to
+    // still be set to from an unrelated prior operation, rather than the currently
+    // selected color/width — set explicitly here instead.
+    ctx.strokeStyle = currentColor;
+    ctx.lineWidth = width;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    applyLineStyle();
     ctx.beginPath();
     ctx.moveTo(midA.x, midA.y);
     ctx.quadraticCurveTo(p1.x, p1.y, midB.x, midB.y);
     ctx.stroke();
+    resetLineStyle();
   }
 
   // ---- Hold-to-straighten: holding the pen still for ~1s while drawing redraws the whole
@@ -1487,15 +1845,17 @@ async function openAnnotator(photoId, onDone) {
     const w = currentWidth * (0.5 + pressure);
     if (currentPenType === 'airbrush') { drawAirbrushSegment(fromX, fromY, toX, toY, w); return; }
     if (currentPenType === 'fountain') { drawFountainSegment(fromX, fromY, toX, toY); return; }
-    if (currentPenType === 'smoothing') { drawSmoothingSegment({ x: toX, y: toY }); return; }
+    if (currentPenType === 'smoothing') { drawSmoothingSegment({ x: toX, y: toY }, w); return; }
     ctx.strokeStyle = currentColor;
     ctx.lineWidth = w;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
+    applyLineStyle();
     ctx.beginPath();
     ctx.moveTo(fromX, fromY);
     ctx.lineTo(toX, toY);
     ctx.stroke();
+    resetLineStyle();
   }
 
   function startStroke(e) {
@@ -1530,6 +1890,7 @@ async function openAnnotator(photoId, onDone) {
         ctx.lineWidth = w;
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
+        ctx.setLineDash([]); // erasing should always be a complete stroke, never dashed, regardless of the selected line style
         ctx.beginPath();
         ctx.moveTo(lastX, lastY);
         ctx.lineTo(p.x, p.y);
@@ -1546,6 +1907,7 @@ async function openAnnotator(photoId, onDone) {
 
   markCanvas.addEventListener('pointerdown', (e) => {
     if (cropMode) { e.preventDefault(); return; } // crop handles/border have their own listeners with stopPropagation
+    if (adjustMode) { e.preventDefault(); return; } // adjust handles/box-area have their own listeners with stopPropagation
     if (calibrating) {
       if (e.pointerType === 'touch') {
         const p = canvasPoint(e);
@@ -1569,6 +1931,19 @@ async function openAnnotator(photoId, onDone) {
       measureStart = canvasPoint(e);
       measurePointerId = e.pointerId;
       showMagnifier(measureStart, e.clientX, e.clientY);
+      e.preventDefault();
+      return;
+    }
+
+    if (arcMode) {
+      if (e.pointerType === 'touch') {
+        const p = canvasPoint(e);
+        touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
+        if (touches.size >= 2) { arcStart = null; clearPreview(); updatePinch(); e.preventDefault(); return; }
+      }
+      arcStart = canvasPoint(e);
+      arcPointerId = e.pointerId;
+      showMagnifier(arcStart, e.clientX, e.clientY);
       e.preventDefault();
       return;
     }
@@ -1611,6 +1986,7 @@ async function openAnnotator(photoId, onDone) {
 
   markCanvas.addEventListener('pointermove', (e) => {
     if (cropMode) { e.preventDefault(); return; }
+    if (adjustMode) { e.preventDefault(); return; }
     if (calibrating) {
       if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
         const p = canvasPoint(e);
@@ -1642,6 +2018,31 @@ async function openAnnotator(photoId, onDone) {
       return;
     }
 
+    if (arcMode) {
+      if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
+        const p = canvasPoint(e);
+        touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
+        if (touches.size >= 2) { updatePinch(); e.preventDefault(); return; }
+      }
+      if (arcStart && e.pointerId === arcPointerId) {
+        const p = canvasPoint(e);
+        clearPreview();
+        previewCtx.save();
+        previewCtx.strokeStyle = currentColor;
+        previewCtx.lineWidth = currentWidth;
+        previewCtx.lineCap = 'round';
+        previewCtx.setLineDash([8, 6]);
+        previewCtx.beginPath();
+        previewCtx.moveTo(arcStart.x, arcStart.y);
+        previewCtx.lineTo(p.x, p.y);
+        previewCtx.stroke();
+        previewCtx.restore();
+        showMagnifier(p, e.clientX, e.clientY);
+      }
+      e.preventDefault();
+      return;
+    }
+
     if (textMode) {
       if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
         const p = canvasPoint(e);
@@ -1650,18 +2051,6 @@ async function openAnnotator(photoId, onDone) {
       }
       if (textPressPoint && e.pointerId === textPointerId) {
         const p = canvasPoint(e);
-        clearPreview();
-        if (Math.hypot(p.x - textPressPoint.x, p.y - textPressPoint.y) > 12) {
-          previewCtx.save();
-          previewCtx.strokeStyle = currentColor;
-          previewCtx.lineWidth = 2.5;
-          previewCtx.setLineDash([8, 6]);
-          previewCtx.beginPath();
-          previewCtx.moveTo(textPressPoint.x, textPressPoint.y);
-          previewCtx.lineTo(p.x, p.y);
-          previewCtx.stroke();
-          previewCtx.restore();
-        }
         showMagnifier(p, e.clientX, e.clientY);
       }
       e.preventDefault();
@@ -1695,14 +2084,25 @@ async function openAnnotator(photoId, onDone) {
     if (measureMode && measureStart && e.pointerId === measurePointerId) {
       const p = canvasPoint(e);
       clearPreview();
-      finalizeMeasureArrow(measureStart.x, measureStart.y, p.x, p.y);
+      if (Math.hypot(p.x - measureStart.x, p.y - measureStart.y) >= 4) {
+        enterMeasureAdjustMode(measureStart, p);
+      }
       measureStart = null;
       measurePointerId = null;
+    }
+    if (arcMode && arcStart && e.pointerId === arcPointerId) {
+      const p = canvasPoint(e);
+      clearPreview();
+      if (Math.hypot(p.x - arcStart.x, p.y - arcStart.y) >= 4) {
+        enterArcAdjustMode(arcStart, p);
+      }
+      arcStart = null;
+      arcPointerId = null;
     }
     if (textMode && textPressPoint && e.pointerId === textPointerId) {
       const p = canvasPoint(e);
       clearPreview();
-      finalizeTextPlacement(textPressPoint, p);
+      finalizeTextPlacement(p);
       textPressPoint = null;
       textPointerId = null;
     }
@@ -1728,29 +2128,57 @@ async function openAnnotator(photoId, onDone) {
     view.remove();
   });
 
-  view.querySelector('#btn-save').addEventListener('click', () => {
-    const mergeCanvas = document.createElement('canvas');
-    mergeCanvas.width = cw;
-    mergeCanvas.height = ch;
-    const mergeCtx = mergeCanvas.getContext('2d');
-    mergeCtx.drawImage(photoCanvas, 0, 0);
-    mergeCtx.drawImage(markCanvas, 0, 0);
-    mergeCanvas.toBlob(async (blob) => {
-      if (!blob) {
-        toast('Could not prepare the image to save — nothing was lost, please try again');
-        return;
-      }
+  function buildMergedBlob() {
+    return new Promise((resolve) => {
+      const mergeCanvas = document.createElement('canvas');
+      mergeCanvas.width = cw;
+      mergeCanvas.height = ch;
+      const mergeCtx = mergeCanvas.getContext('2d');
+      mergeCtx.drawImage(photoCanvas, 0, 0);
+      mergeCtx.drawImage(markCanvas, 0, 0);
+      mergeCanvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.92);
+    });
+  }
+
+  view.querySelector('#btn-save-editable').addEventListener('click', async () => {
+    if (adjustMode) confirmPendingAdjust();
+    const mergedBlob = await buildMergedBlob();
+    if (!mergedBlob) { toast('Could not prepare the image to save — nothing was lost, please try again'); return; }
+    // PNG specifically, not JPEG — this layer needs to keep its transparency (including
+    // areas removed with the eraser) intact for when it's reloaded and edited further.
+    markCanvas.toBlob(async (markBlob) => {
+      if (!markBlob) { toast('Could not prepare the image to save — nothing was lost, please try again'); return; }
       try {
-        await DB.setAnnotatedBlob(photoId, blob);
+        await DB.saveEditableAnnotation(photoId, mergedBlob, markBlob);
       } catch (err) {
         console.error('Save failed', err);
         toast('Save failed — your edits are still here, please try again');
-        return; // keep the annotator open rather than losing the user's work
+        return;
       }
       window.removeEventListener('resize', fitCanvas);
       removeMagnifierEl();
       view.remove();
       if (onDone) onDone();
-    }, 'image/jpeg', 0.92);
+    }, 'image/png');
+  });
+
+  view.querySelector('#btn-save').addEventListener('click', async () => {
+    if (adjustMode) confirmPendingAdjust(); // never leave a pending measure/text item unsaved
+    const blob = await buildMergedBlob();
+    if (!blob) {
+      toast('Could not prepare the image to save — nothing was lost, please try again');
+      return;
+    }
+    try {
+      await DB.setAnnotatedBlob(photoId, blob);
+    } catch (err) {
+      console.error('Save failed', err);
+      toast('Save failed — your edits are still here, please try again');
+      return; // keep the annotator open rather than losing the user's work
+    }
+    window.removeEventListener('resize', fitCanvas);
+    removeMagnifierEl();
+    view.remove();
+    if (onDone) onDone();
   });
 }
