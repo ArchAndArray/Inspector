@@ -97,6 +97,12 @@ button {
   font-weight: 600;
   padding: 8px 4px;
 }
+.home-btn-row { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 20px 14px; background: var(--ink); }
+.home-btn {
+  background: rgba(255,255,255,0.12); border: none; color: #fff;
+  font-size: 13.5px; font-weight: 600; padding: 9px 14px; border-radius: 20px;
+}
+.home-btn:active { background: rgba(255,255,255,0.22); }
 
 .text-btn.muted { color: #b8bcc4; font-weight: 500; }
 

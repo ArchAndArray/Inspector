@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '4.0';
+const APP_VERSION = '4.2';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -609,12 +609,14 @@ async function renderHome() {
         <h1>Inspector</h1>
         <span class="sub">by Arch&amp;Array · v${APP_VERSION}</span>
       </div>
-      <button class="icon-btn" id="btn-update" title="Check for updates">⟳</button>
-      <button class="icon-btn" id="btn-backup" title="Backup & restore">💾</button>
-      <button class="icon-btn" id="btn-scale-annotate" title="Scale / Annotate">📐</button>
-      <button class="icon-btn" id="btn-new-sketch" title="New sketch">✏️</button>
-      <button class="icon-btn" id="btn-pdf-editor" title="PDF Editor">📄</button>
-      <button class="icon-btn" id="btn-templates" title="Element templates">☰</button>
+    </div>
+    <div class="home-btn-row">
+      <button class="home-btn" id="btn-update">Check Updates</button>
+      <button class="home-btn" id="btn-backup">Backup &amp; Restore</button>
+      <button class="home-btn" id="btn-scale-annotate">Scale/Annotate</button>
+      <button class="home-btn" id="btn-new-sketch">Sketch</button>
+      <button class="home-btn" id="btn-pdf-editor">PDF Editor</button>
+      <button class="home-btn" id="btn-templates">Element Templates</button>
     </div>
     <div class="content">
       ${inspections.length ? rows : `

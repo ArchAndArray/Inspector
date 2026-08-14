@@ -95,7 +95,7 @@ async function openAnnotator(photoId, onDone) {
             ${ANNOTATE_COLORS.map((c, i) => `<div class="color-dot ${i === 0 ? 'active' : ''}" data-color="${c}" style="background:${c};"></div>`).join('')}
           </div>
           <div class="atb-right">
-            <button class="tool-btn" id="btn-line-style" title="Line style — tap to choose">
+            <button class="tool-btn" id="btn-line-style" title="Line style — tap to choose" style="display:none;">
               <svg width="20" height="16" viewBox="0 0 24 16" xmlns="http://www.w3.org/2000/svg">
                 <line x1="2" y1="8" x2="22" y2="8" stroke="currentColor" stroke-width="2.4" stroke-dasharray="5,3.5" stroke-linecap="round"/>
               </svg>
@@ -140,6 +140,11 @@ async function openAnnotator(photoId, onDone) {
             <button class="tool-btn" id="btn-arc" title="Curved line">
               <svg width="19" height="19" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <path d="M4 18 Q12 4 20 18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <button class="tool-btn" id="btn-straight-line" title="Straight line">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <line x1="4" y1="20" x2="20" y2="4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
               </svg>
             </button>
             <button class="tool-btn pen-type-btn active" data-pentype="pen" title="Pen">✏️</button>
@@ -272,9 +277,12 @@ async function openAnnotator(photoId, onDone) {
   let eraseMode = false;
   let currentPenType = 'pen'; // 'pen' | 'airbrush' | 'fountain' | 'smoothing'
 
-  // ---- Line style (dash pattern) — applies broadly to any stroked line: Pen, Fountain,
-  // Smoothing, Measure, and the Arc tool. Not Airbrush, which is dab-based rather than a
-  // stroked path, so a dash pattern has no meaningful effect on it.
+  // ---- Line style (dash pattern) — restricted to the Arc and Straight Line tools only.
+  // Freehand drawing (any pen type) builds a stroke from many short segments (one per
+  // pointer event), and even with the dash phase correctly tracked across segments, a
+  // dashed pattern on a wobbly hand-drawn line doesn't render as cleanly as on a single
+  // smooth path — Arc and Straight Line both draw in one continuous stroke, where dashes
+  // render correctly and cleanly, so line style only applies to those two.
   //
   // Dash sizes are computed relative to the canvas's own resolution and the current pen
   // width (same technique as measureArrowSizing) rather than fixed pixel counts — a photo
@@ -292,6 +300,7 @@ async function openAnnotator(photoId, onDone) {
   let currentLineStyle = 'solid';
   function getLineDashArray() {
     if (currentLineStyle === 'solid') return [];
+    if (!arcMode && !straightLineMode) return [];
     const ref = Math.min(cw, ch);
     const unit = Math.max(8, ref * 0.012, currentWidth * 1.8);
     const patterns = {
@@ -307,6 +316,13 @@ async function openAnnotator(photoId, onDone) {
   }
   function resetLineStyle() {
     ctx.setLineDash([]);
+  }
+  // Line style only means anything for Arc/Straight Line — hide the button entirely rather
+  // than leave it selectable-but-inert for every other tool, which would just be confusing
+  // (pick a style, draw with the Pen, see no effect, wonder why).
+  function updateLineStyleButtonVisibility() {
+    const btn = view.querySelector('#btn-line-style');
+    btn.style.display = (arcMode || straightLineMode) ? '' : 'none';
   }
 
   view.querySelector('#btn-line-style').addEventListener('click', () => {
@@ -1005,6 +1021,11 @@ async function openAnnotator(photoId, onDone) {
       view.querySelector('#btn-arc').classList.remove('active');
       arcStart = null;
     }
+    if (except !== 'straightLine' && straightLineMode) {
+      straightLineMode = false;
+      view.querySelector('#btn-straight-line').classList.remove('active');
+      straightLineStart = null;
+    }
     if (except !== 'text' && textMode) {
       textMode = false;
       view.querySelector('#btn-text-tool').classList.remove('active');
@@ -1018,6 +1039,7 @@ async function openAnnotator(photoId, onDone) {
     touches.clear();
     pinchState = null;
     clearPreview();
+    updateLineStyleButtonVisibility();
   }
 
   // ---- Adjust mode: after placing a Measure arrow or a Text box, it stays live and
@@ -1632,6 +1654,41 @@ async function openAnnotator(photoId, onDone) {
     pinchState = null;
     arcStart = null;
     clearPreview();
+    updateLineStyleButtonVisibility();
+  });
+
+  // ---- Straight Line tool: press-drag-release draws a plain straight line directly —
+  // unlike Measure/Arc/Text, it commits immediately on release with no adjust step and no
+  // confirmation, by design (it's meant to be quick and doesn't need repositioning after
+  // the fact the way a labeled arrow or placed text box does). ----
+  let straightLineMode = false;
+  let straightLineStart = null;
+  let straightLinePointerId = null;
+  function drawStraightLineOn(targetCtx, x1, y1, x2, y2) {
+    targetCtx.save();
+    targetCtx.strokeStyle = currentColor;
+    targetCtx.lineWidth = currentWidth;
+    targetCtx.lineCap = 'round';
+    targetCtx.setLineDash(getLineDashArray());
+    targetCtx.beginPath();
+    targetCtx.moveTo(x1, y1);
+    targetCtx.lineTo(x2, y2);
+    targetCtx.stroke();
+    targetCtx.restore();
+  }
+  view.querySelector('#btn-straight-line').addEventListener('click', (e) => {
+    straightLineMode = !straightLineMode;
+    if (straightLineMode) {
+      deactivateOtherModes('straightLine');
+      e.currentTarget.classList.add('active');
+    } else {
+      e.currentTarget.classList.remove('active');
+    }
+    touches.clear();
+    pinchState = null;
+    straightLineStart = null;
+    clearPreview();
+    updateLineStyleButtonVisibility();
   });
 
   // ---- Text tool: tap to drop a white multi-line text box (bold/underline/size
@@ -2018,6 +2075,19 @@ async function openAnnotator(photoId, onDone) {
       return;
     }
 
+    if (straightLineMode) {
+      if (e.pointerType === 'touch') {
+        const p = canvasPoint(e);
+        touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
+        if (touches.size >= 2) { straightLineStart = null; clearPreview(); updatePinch(); e.preventDefault(); return; }
+      }
+      straightLineStart = canvasPoint(e);
+      straightLinePointerId = e.pointerId;
+      showMagnifier(straightLineStart, e.clientX, e.clientY);
+      e.preventDefault();
+      return;
+    }
+
     if (textMode) {
       if (e.pointerType === 'touch') {
         const p = canvasPoint(e);
@@ -2113,6 +2183,25 @@ async function openAnnotator(photoId, onDone) {
       return;
     }
 
+    if (straightLineMode) {
+      if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
+        const p = canvasPoint(e);
+        touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
+        if (touches.size >= 2) { updatePinch(); e.preventDefault(); return; }
+      }
+      if (straightLineStart && e.pointerId === straightLinePointerId) {
+        const p = canvasPoint(e);
+        clearPreview();
+        // Shows the actual line style live while dragging, since this tool commits
+        // directly on release with no adjust step — reusing the same draw function the
+        // final bake uses guarantees the preview always matches the real result exactly.
+        drawStraightLineOn(previewCtx, straightLineStart.x, straightLineStart.y, p.x, p.y);
+        showMagnifier(p, e.clientX, e.clientY);
+      }
+      e.preventDefault();
+      return;
+    }
+
     if (textMode) {
       if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
         const p = canvasPoint(e);
@@ -2168,6 +2257,17 @@ async function openAnnotator(photoId, onDone) {
       }
       arcStart = null;
       arcPointerId = null;
+    }
+    if (straightLineMode && straightLineStart && e.pointerId === straightLinePointerId) {
+      const p = canvasPoint(e);
+      clearPreview();
+      hideMagnifier();
+      if (Math.hypot(p.x - straightLineStart.x, p.y - straightLineStart.y) >= 4) {
+        pushUndo();
+        drawStraightLineOn(ctx, straightLineStart.x, straightLineStart.y, p.x, p.y);
+      }
+      straightLineStart = null;
+      straightLinePointerId = null;
     }
     if (textMode && textPressPoint && e.pointerId === textPointerId) {
       const p = canvasPoint(e);
