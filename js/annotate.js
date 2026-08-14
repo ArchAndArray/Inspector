@@ -86,17 +86,27 @@ async function openAnnotator(photoId, onDone) {
           </svg>
         </button>
         <div class="spacer"></div>
-        ${ANNOTATE_COLORS.map((c, i) => `<div class="color-dot ${i === 0 ? 'active' : ''}" data-color="${c}" style="background:${c};"></div>`).join('')}
+        <button class="tool-btn pen-type-btn active" data-pentype="pen" title="Pen">✏️</button>
+        <button class="tool-btn pen-type-btn" data-pentype="airbrush" title="Airbrush">💨</button>
+        <button class="tool-btn pen-type-btn" data-pentype="fountain" title="Fountain pen">🖋️</button>
+        <button class="tool-btn pen-type-btn" data-pentype="smoothing" title="Smoothing pen">〰️</button>
         <div class="spacer"></div>
         <button class="tool-btn" id="w-thin" title="Thin">•</button>
         <button class="tool-btn active" id="w-medium" title="Medium">●</button>
         <button class="tool-btn" id="w-thick" title="Thick">⬤</button>
+        <button class="tool-btn" id="w-custom" title="Custom width — tap to use, hold to change">⚙</button>
         <button class="tool-btn" id="btn-erase" title="Eraser">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
             <rect x="3" y="12" width="14" height="8" rx="1.2" transform="rotate(-32 3 12)" fill="currentColor"/>
             <path d="M9.5 5.5 L19 15 L15 19 L5.5 9.5 Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
           </svg>
         </button>
+      </div>
+      <div class="annotate-toolbar annotate-color-row" id="color-row-fixed">
+        ${ANNOTATE_COLORS.map((c, i) => `<div class="color-dot ${i === 0 ? 'active' : ''}" data-color="${c}" style="background:${c};"></div>`).join('')}
+      </div>
+      <div class="annotate-toolbar annotate-color-row" id="color-row-custom">
+        ${[0, 1, 2, 3, 4].map((i) => `<div class="color-dot color-dot-custom" data-custom-index="${i}" style="background:#e8e9ec; border:1.5px dashed #b8bcc4;"></div>`).join('')}
       </div>
       <div class="annotate-toolbar" id="ruler-toolbar" style="padding-top:0; padding-bottom:8px;">
         <button class="tool-btn" id="btn-ruler" title="Ruler">📏</button>
@@ -220,25 +230,203 @@ async function openAnnotator(photoId, onDone) {
   let currentColor = ANNOTATE_COLORS[0];
   let currentWidth = ANNOTATE_WIDTHS.medium;
   let eraseMode = false;
+  let currentPenType = 'pen'; // 'pen' | 'airbrush' | 'fountain' | 'smoothing'
 
-  view.querySelectorAll('.color-dot').forEach((dot) => {
-    dot.addEventListener('click', () => {
-      currentColor = dot.dataset.color;
-      eraseMode = false;
-      view.querySelectorAll('.color-dot').forEach((d) => d.classList.remove('active'));
-      dot.classList.add('active');
-      view.querySelector('#btn-erase').classList.remove('active');
+  // ---- Persistent custom colors (5 user-saveable slots, survive across sessions) ----
+  const CUSTOM_COLORS_KEY = 'inspector_custom_colors';
+  function loadCustomColors() {
+    try {
+      const raw = localStorage.getItem(CUSTOM_COLORS_KEY);
+      const arr = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(arr) && arr.length === 5) return arr;
+    } catch (err) { /* ignore malformed/unavailable storage */ }
+    return [null, null, null, null, null];
+  }
+  function saveCustomColors(arr) {
+    try { localStorage.setItem(CUSTOM_COLORS_KEY, JSON.stringify(arr)); } catch (err) { /* ignore quota/unavailable storage */ }
+  }
+  let customColors = loadCustomColors();
+
+  function renderCustomColorRow() {
+    view.querySelectorAll('.color-dot-custom').forEach((dot) => {
+      const i = Number(dot.dataset.customIndex);
+      const c = customColors[i];
+      dot.style.background = c || '#e8e9ec';
+      dot.style.border = c ? 'none' : '1.5px dashed #b8bcc4';
+    });
+  }
+  renderCustomColorRow();
+
+  function selectColor(dot, colorValue) {
+    if (!colorValue) return; // an unset custom slot has nothing to select yet
+    currentColor = colorValue;
+    eraseMode = false;
+    view.querySelectorAll('.color-dot').forEach((d) => d.classList.remove('active'));
+    dot.classList.add('active');
+    view.querySelector('#btn-erase').classList.remove('active');
+  }
+
+  // Shared tap-vs-hold detection: a short press selects, a ~500ms hold opens the editor —
+  // used identically for the custom color slots and the custom width button.
+  function wireTapAndHold(el2, onTap, onHold) {
+    let holdTimer = null;
+    let holdFired = false;
+    el2.addEventListener('pointerdown', (e) => {
+      holdFired = false;
+      holdTimer = setTimeout(() => { holdFired = true; onHold(e); }, 500);
+    });
+    function clearHold() { if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; } }
+    el2.addEventListener('pointerup', (e) => {
+      clearHold();
+      if (!holdFired) onTap(e);
+    });
+    el2.addEventListener('pointerleave', clearHold);
+    el2.addEventListener('pointercancel', clearHold);
+  }
+
+  view.querySelectorAll('#color-row-fixed .color-dot').forEach((dot) => {
+    dot.addEventListener('click', () => selectColor(dot, dot.dataset.color));
+  });
+  view.querySelectorAll('.color-dot-custom').forEach((dot) => {
+    const i = Number(dot.dataset.customIndex);
+    wireTapAndHold(dot,
+      () => selectColor(dot, customColors[i]),
+      () => openColorEditSheet(customColors[i] || '#c81e1e', (newColor) => {
+        customColors[i] = newColor;
+        saveCustomColors(customColors);
+        renderCustomColorRow();
+        selectColor(dot, newColor);
+      })
+    );
+  });
+
+  function openColorEditSheet(initialColor, onSave) {
+    const sheet = el(`
+      <div class="sheet-backdrop">
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <h2>Custom color</h2>
+          <input type="color" id="f-custom-color" value="${initialColor}" style="width:100%; height:60px; border:none; border-radius:10px;">
+          <button class="btn btn-primary btn-block" id="btn-save-color" style="margin-top:14px;">Save</button>
+          <button class="btn btn-ghost btn-block" id="btn-cancel-color">Cancel</button>
+        </div>
+      </div>
+    `);
+    presentOverlay(sheet);
+    sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+    sheet.querySelector('#btn-cancel-color').addEventListener('click', () => sheet.remove());
+    sheet.querySelector('#btn-save-color').addEventListener('click', () => {
+      onSave(sheet.querySelector('#f-custom-color').value);
+      sheet.remove();
+    });
+  }
+
+  // ---- Pen type (Pen / Airbrush / Fountain / Smoothing) ----
+  view.querySelectorAll('.pen-type-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      currentPenType = btn.dataset.pentype;
+      view.querySelectorAll('.pen-type-btn').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
     });
   });
 
-  function setWidth(key, btnId) {
+  // ---- Width: 3 fixed presets plus a Custom slot (session-only, tap to use / hold to change) ----
+  let customWidthValue = 10;
+  let fountainAvgWidth = 8;
+  let fountainMaxWidth = 22;
+
+  function setWidth(key, btnEl) {
     currentWidth = ANNOTATE_WIDTHS[key];
-    view.querySelectorAll('#w-thin,#w-medium,#w-thick').forEach((b) => b.classList.remove('active'));
-    view.querySelector(btnId).classList.add('active');
+    view.querySelectorAll('#w-thin,#w-medium,#w-thick,#w-custom').forEach((b) => b.classList.remove('active'));
+    btnEl.classList.add('active');
   }
-  view.querySelector('#w-thin').addEventListener('click', () => setWidth('thin', '#w-thin'));
-  view.querySelector('#w-medium').addEventListener('click', () => setWidth('medium', '#w-medium'));
-  view.querySelector('#w-thick').addEventListener('click', () => setWidth('thick', '#w-thick'));
+  view.querySelector('#w-thin').addEventListener('click', (e) => setWidth('thin', e.currentTarget));
+  view.querySelector('#w-medium').addEventListener('click', (e) => setWidth('medium', e.currentTarget));
+  view.querySelector('#w-thick').addEventListener('click', (e) => setWidth('thick', e.currentTarget));
+
+  function selectCustomWidth() {
+    currentWidth = currentPenType === 'fountain' ? fountainAvgWidth : customWidthValue;
+    view.querySelectorAll('#w-thin,#w-medium,#w-thick,#w-custom').forEach((b) => b.classList.remove('active'));
+    view.querySelector('#w-custom').classList.add('active');
+  }
+  wireTapAndHold(view.querySelector('#w-custom'),
+    selectCustomWidth,
+    () => {
+      if (currentPenType === 'fountain') {
+        openFountainWidthEditSheet(fountainAvgWidth, fountainMaxWidth, (avg, max) => {
+          fountainAvgWidth = avg; fountainMaxWidth = max;
+          selectCustomWidth();
+        });
+      } else {
+        openWidthEditSheet(customWidthValue, (val) => {
+          customWidthValue = val;
+          selectCustomWidth();
+        });
+      }
+    }
+  );
+
+  function openWidthEditSheet(initialValue, onSave) {
+    const sheet = el(`
+      <div class="sheet-backdrop">
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <h2>Custom width</h2>
+          <div class="field">
+            <input type="range" id="f-width" min="1" max="60" step="1" value="${initialValue}" style="width:100%;">
+            <p class="hint" id="width-readout" style="text-align:center;">${initialValue}px</p>
+          </div>
+          <button class="btn btn-primary btn-block" id="btn-save-width">Save</button>
+          <button class="btn btn-ghost btn-block" id="btn-cancel-width">Cancel</button>
+        </div>
+      </div>
+    `);
+    presentOverlay(sheet);
+    sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+    sheet.querySelector('#f-width').addEventListener('input', (e) => {
+      sheet.querySelector('#width-readout').textContent = `${e.target.value}px`;
+    });
+    sheet.querySelector('#btn-cancel-width').addEventListener('click', () => sheet.remove());
+    sheet.querySelector('#btn-save-width').addEventListener('click', () => {
+      onSave(Number(sheet.querySelector('#f-width').value));
+      sheet.remove();
+    });
+  }
+
+  function openFountainWidthEditSheet(initialAvg, initialMax, onSave) {
+    const sheet = el(`
+      <div class="sheet-backdrop">
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <h2>Fountain pen width</h2>
+          <p class="muted" style="font-size:13px; margin-top:-8px;">Fountain pen width varies with stroke direction, between these two values.</p>
+          <div class="field">
+            <label>Average / normal width</label>
+            <input type="range" id="f-avg" min="1" max="40" step="1" value="${initialAvg}" style="width:100%;">
+            <p class="hint" id="avg-readout" style="text-align:center;">${initialAvg}px</p>
+          </div>
+          <div class="field">
+            <label>Maximum width</label>
+            <input type="range" id="f-max" min="1" max="60" step="1" value="${initialMax}" style="width:100%;">
+            <p class="hint" id="max-readout" style="text-align:center;">${initialMax}px</p>
+          </div>
+          <button class="btn btn-primary btn-block" id="btn-save-fountain">Save</button>
+          <button class="btn btn-ghost btn-block" id="btn-cancel-fountain">Cancel</button>
+        </div>
+      </div>
+    `);
+    presentOverlay(sheet);
+    sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+    sheet.querySelector('#f-avg').addEventListener('input', (e) => { sheet.querySelector('#avg-readout').textContent = `${e.target.value}px`; });
+    sheet.querySelector('#f-max').addEventListener('input', (e) => { sheet.querySelector('#max-readout').textContent = `${e.target.value}px`; });
+    sheet.querySelector('#btn-cancel-fountain').addEventListener('click', () => sheet.remove());
+    sheet.querySelector('#btn-save-fountain').addEventListener('click', () => {
+      const avg = Number(sheet.querySelector('#f-avg').value);
+      const max = Number(sheet.querySelector('#f-max').value);
+      onSave(Math.min(avg, max), Math.max(avg, max));
+      sheet.remove();
+    });
+  }
 
   view.querySelector('#btn-erase').addEventListener('click', (e) => {
     eraseMode = !eraseMode;
@@ -864,6 +1052,19 @@ async function openAnnotator(photoId, onDone) {
     targetCtx.fill();
   }
 
+  // A line drawn at constant width all the way to an arrowhead's exact tip pokes out past
+  // the tapering triangle near the point, since the arrowhead narrows to zero width right
+  // where the line stays full width — this pulls the line's endpoint back to sit at the
+  // arrowhead's base instead, where the triangle is already wide enough to cover it.
+  function pullBackForArrowhead(fromX, fromY, toX, toY, headSize) {
+    const dx = toX - fromX, dy = toY - fromY;
+    const dist = Math.hypot(dx, dy);
+    if (dist <= headSize) return { x: fromX, y: fromY };
+    const pullback = headSize * 0.85;
+    const t = (dist - pullback) / dist;
+    return { x: fromX + dx * t, y: fromY + dy * t };
+  }
+
   function clearPreview() { previewCtx.clearRect(0, 0, cw, ch); }
 
   // ---- Magnifier loupe: shown while a finger is actively placing a point (calibration,
@@ -879,7 +1080,7 @@ async function openAnnotator(photoId, onDone) {
   function ensureMagnifier() {
     if (magnifierEl) return;
     magnifierEl = document.createElement('div');
-    magnifierEl.style.cssText = `position:fixed; width:${MAGNIFIER_SIZE}px; height:${MAGNIFIER_SIZE}px; border-radius:50%; border:3px solid #fff; box-shadow:0 4px 16px rgba(0,0,0,0.4); overflow:hidden; pointer-events:none; z-index:80; display:none;`;
+    magnifierEl.style.cssText = `position:fixed; width:${MAGNIFIER_SIZE}px; height:${MAGNIFIER_SIZE}px; border-radius:50%; border:3px solid #fff; box-shadow:0 4px 16px rgba(0,0,0,0.4); overflow:hidden; pointer-events:none; z-index:99999; display:none;`;
     magnifierCanvas = document.createElement('canvas');
     magnifierCanvas.width = MAGNIFIER_SIZE * 2;
     magnifierCanvas.height = MAGNIFIER_SIZE * 2;
@@ -970,16 +1171,25 @@ async function openAnnotator(photoId, onDone) {
 
   function drawMeasureArrowOn(targetCtx, x1, y1, x2, y2) {
     const { headSize, lineWidth } = measureArrowSizing();
+    const totalDist = Math.hypot(x2 - x1, y2 - y1);
+    const pullbackEach = headSize * 0.85;
     targetCtx.save();
     targetCtx.globalCompositeOperation = 'source-over';
     targetCtx.strokeStyle = currentColor;
     targetCtx.fillStyle = currentColor;
     targetCtx.lineWidth = lineWidth;
     targetCtx.lineCap = 'round';
-    targetCtx.beginPath();
-    targetCtx.moveTo(x1, y1);
-    targetCtx.lineTo(x2, y2);
-    targetCtx.stroke();
+    // On a very short arrow, pulling back both ends could make them cross — in that case
+    // the two arrowheads alone (drawn below regardless) are enough at this scale, so the
+    // connecting line is skipped rather than drawing a glitchy backwards segment.
+    if (totalDist > pullbackEach * 2) {
+      const lineStart = pullBackForArrowhead(x2, y2, x1, y1, headSize);
+      const lineEnd = pullBackForArrowhead(x1, y1, x2, y2, headSize);
+      targetCtx.beginPath();
+      targetCtx.moveTo(lineStart.x, lineStart.y);
+      targetCtx.lineTo(lineEnd.x, lineEnd.y);
+      targetCtx.stroke();
+    }
     drawArrowheadOn(targetCtx, x2, y2, x1, y1, headSize); // tip at start
     drawArrowheadOn(targetCtx, x1, y1, x2, y2, headSize); // tip at end
     targetCtx.restore();
@@ -1148,13 +1358,14 @@ async function openAnnotator(photoId, onDone) {
       if (arrowTarget) {
         const start = rectEdgeIntersection(box.centerX, box.centerY, box.w, box.h, arrowTarget.x, arrowTarget.y);
         const { headSize, lineWidth } = measureArrowSizing();
+        const lineEnd = pullBackForArrowhead(start.x, start.y, arrowTarget.x, arrowTarget.y, headSize);
         ctx.save();
         ctx.strokeStyle = currentColor;
         ctx.fillStyle = currentColor;
         ctx.lineWidth = lineWidth;
         ctx.beginPath();
         ctx.moveTo(start.x, start.y);
-        ctx.lineTo(arrowTarget.x, arrowTarget.y);
+        ctx.lineTo(lineEnd.x, lineEnd.y);
         ctx.stroke();
         drawArrowheadOn(ctx, start.x, start.y, arrowTarget.x, arrowTarget.y, headSize);
         ctx.restore();
@@ -1187,13 +1398,116 @@ async function openAnnotator(photoId, onDone) {
     return true; // mouse, for desktop testing
   }
 
+  // ---- Pen type rendering ----
+  function hexToRgb(hex) {
+    const m = /^#([0-9a-f]{6})$/i.exec(hex);
+    if (!m) return [28, 31, 38];
+    const n = parseInt(m[1], 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  function drawAirbrushSegment(fromX, fromY, toX, toY, width) {
+    const dist = Math.hypot(toX - fromX, toY - fromY);
+    const steps = Math.max(1, Math.round(dist / 3));
+    const rgb = hexToRgb(currentColor);
+    const radius = Math.max(4, width);
+    for (let i = 0; i <= steps; i++) {
+      const t = steps === 0 ? 0 : i / steps;
+      const cx = fromX + (toX - fromX) * t + (Math.random() - 0.5) * radius * 0.6;
+      const cy = fromY + (toY - fromY) * t + (Math.random() - 0.5) * radius * 0.6;
+      const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+      grad.addColorStop(0, `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0.22)`);
+      grad.addColorStop(1, `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0)`);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function fountainWidthsForCurrent() {
+    const customActive = view.querySelector('#w-custom').classList.contains('active');
+    if (customActive) return { avg: fountainAvgWidth, max: fountainMaxWidth };
+    return { avg: currentWidth, max: currentWidth * 2.5 };
+  }
+
+  function drawFountainSegment(fromX, fromY, toX, toY) {
+    const { avg, max } = fountainWidthsForCurrent();
+    const nibAngle = Math.PI / 4; // fixed 45° nib, classic calligraphy variation
+    const angle = Math.atan2(toY - fromY, toX - fromX);
+    const w = avg + (max - avg) * Math.abs(Math.sin(angle - nibAngle));
+    ctx.strokeStyle = currentColor;
+    ctx.lineWidth = w;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(fromX, fromY);
+    ctx.lineTo(toX, toY);
+    ctx.stroke();
+  }
+
+  let smoothPoints = [];
+  function drawSmoothingSegment(p) {
+    smoothPoints.push(p);
+    if (smoothPoints.length > 3) smoothPoints.shift();
+    if (smoothPoints.length < 3) return;
+    const [p0, p1, p2] = smoothPoints;
+    const midA = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
+    const midB = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+    ctx.beginPath();
+    ctx.moveTo(midA.x, midA.y);
+    ctx.quadraticCurveTo(p1.x, p1.y, midB.x, midB.y);
+    ctx.stroke();
+  }
+
+  // ---- Hold-to-straighten: holding the pen still for ~1s while drawing redraws the whole
+  // stroke as a single straight line from where it started to the held point. ----
+  let strokeStartPoint = null;
+  let preStrokeSnapshot = null;
+  let holdStraightenTimer = null;
+  const HOLD_STRAIGHTEN_MS = 1000;
+
+  function clearHoldStraightenTimer() {
+    if (holdStraightenTimer) { clearTimeout(holdStraightenTimer); holdStraightenTimer = null; }
+  }
+  function resetHoldStraightenTimer() {
+    clearHoldStraightenTimer();
+    if (eraseMode || !strokeStartPoint) return;
+    holdStraightenTimer = setTimeout(() => {
+      if (!drawing || !strokeStartPoint || !preStrokeSnapshot) return;
+      ctx.putImageData(preStrokeSnapshot, 0, 0);
+      drawStrokeSegment(strokeStartPoint.x, strokeStartPoint.y, lastX, lastY, 0.6);
+      smoothPoints = [strokeStartPoint, { x: lastX, y: lastY }];
+    }, HOLD_STRAIGHTEN_MS);
+  }
+
+  // Draws one segment using whichever pen type is currently active — shared by normal
+  // drawing and by the hold-to-straighten redraw above.
+  function drawStrokeSegment(fromX, fromY, toX, toY, pressure) {
+    const w = currentWidth * (0.5 + pressure);
+    if (currentPenType === 'airbrush') { drawAirbrushSegment(fromX, fromY, toX, toY, w); return; }
+    if (currentPenType === 'fountain') { drawFountainSegment(fromX, fromY, toX, toY); return; }
+    if (currentPenType === 'smoothing') { drawSmoothingSegment({ x: toX, y: toY }); return; }
+    ctx.strokeStyle = currentColor;
+    ctx.lineWidth = w;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(fromX, fromY);
+    ctx.lineTo(toX, toY);
+    ctx.stroke();
+  }
+
   function startStroke(e) {
     try { markCanvas.setPointerCapture(e.pointerId); } catch (err) {}
+    preStrokeSnapshot = ctx.getImageData(0, 0, cw, ch);
     pushUndo();
     drawing = true;
     drawingPointerId = e.pointerId;
     const p = projectOntoRuler(canvasPoint(e));
     lastX = p.x; lastY = p.y;
+    strokeStartPoint = { x: p.x, y: p.y };
+    smoothPoints = [p];
     const pressure = e.pressure && e.pressure > 0 ? e.pressure : 0.5;
     const w = eraseMode ? currentWidth * 3 : currentWidth * (0.5 + pressure);
     ctx.globalCompositeOperation = eraseMode ? 'destination-out' : 'source-over';
@@ -1201,6 +1515,7 @@ async function openAnnotator(photoId, onDone) {
     ctx.beginPath();
     ctx.arc(p.x, p.y, w / 2, 0, Math.PI * 2);
     ctx.fill();
+    resetHoldStraightenTimer();
   }
 
   function continueStroke(e) {
@@ -1208,18 +1523,23 @@ async function openAnnotator(photoId, onDone) {
     for (const ev of events) {
       const p = projectOntoRuler(canvasPoint(ev));
       const pressure = ev.pressure && ev.pressure > 0 ? ev.pressure : 0.5;
-      const w = eraseMode ? currentWidth * 3 : currentWidth * (0.5 + pressure);
       ctx.globalCompositeOperation = eraseMode ? 'destination-out' : 'source-over';
-      ctx.strokeStyle = currentColor;
-      ctx.lineWidth = w;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.beginPath();
-      ctx.moveTo(lastX, lastY);
-      ctx.lineTo(p.x, p.y);
-      ctx.stroke();
+      if (eraseMode) {
+        const w = currentWidth * 3;
+        ctx.strokeStyle = currentColor;
+        ctx.lineWidth = w;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(lastX, lastY);
+        ctx.lineTo(p.x, p.y);
+        ctx.stroke();
+      } else {
+        drawStrokeSegment(lastX, lastY, p.x, p.y, pressure);
+      }
       lastX = p.x; lastY = p.y;
     }
+    resetHoldStraightenTimer();
   }
 
   const touches = new Map(); // pointerId -> {cx, cy, x, y}
@@ -1389,6 +1709,9 @@ async function openAnnotator(photoId, onDone) {
     if (e.pointerId !== drawingPointerId) return;
     drawing = false;
     drawingPointerId = null;
+    clearHoldStraightenTimer();
+    strokeStartPoint = null;
+    preStrokeSnapshot = null;
     try { markCanvas.releasePointerCapture(e.pointerId); } catch (err) {}
   }
   markCanvas.addEventListener('pointerup', endStroke);

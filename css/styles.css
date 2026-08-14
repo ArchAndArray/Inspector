@@ -397,6 +397,9 @@ button {
   border: 2px solid rgba(255,255,255,0.3);
 }
 .color-dot.active { border-color: #fff; }
+.annotate-color-row { padding: 0 14px 8px; gap: 8px; justify-content: center; }
+.annotate-color-row .color-dot { width: 26px; height: 26px; flex-shrink: 0; }
+.color-dot-custom { position: relative; }
 .tool-btn {
   background: rgba(255,255,255,0.12);
   border: none; color: #fff;
