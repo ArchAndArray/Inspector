@@ -333,8 +333,8 @@ const DB = {
 
   // --- Photos ---
   // photo: { id, kind: 'cover'|'logo'|'element'|'finding'|'signature'|'drawing'|'standalone'|'appendixItem', findingId, elementId,
-  //          inspectionId, riskAssessmentId, appendixId, role, originalBlob, annotatedBlob, order, createdAt }
-  async addPhoto({ kind = 'finding', findingId = null, elementId = null, inspectionId = null, riskAssessmentId = null, appendixId = null, originalBlob, order = 0, role = null, title = '' }) {
+  //          inspectionId, riskAssessmentId, appendixId, reportSectionId, role, originalBlob, annotatedBlob, order, createdAt }
+  async addPhoto({ kind = 'finding', findingId = null, elementId = null, inspectionId = null, riskAssessmentId = null, appendixId = null, reportSectionId = null, originalBlob, order = 0, role = null, title = '' }) {
     const photo = {
       id: uid(),
       kind,
@@ -343,6 +343,7 @@ const DB = {
       inspectionId,
       riskAssessmentId,
       appendixId,
+      reportSectionId,
       role,
       title,
       originalBlob,
