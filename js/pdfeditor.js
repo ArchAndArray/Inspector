@@ -9,7 +9,7 @@
 
 let pdfEdWorkingDoc = null;   // pdf-lib PDFDocument — the current working state, single source of truth
 let pdfEdFilename = 'document';
-let pdfEdPages = [];          // ordered descriptors: { id, thumbUrl, cssRotation }
+let pdfEdPages = [];          // ordered descriptors: { id, thumbUrl } — rotation is baked directly into the thumbnail's own pixels, not a separate display transform
 let pdfEdSelected = new Set();
 let pdfEdPreviewId = null;
 let pdfEdDragId = null;
@@ -18,23 +18,50 @@ function pdfEdFindIndex(id) {
   return pdfEdPages.findIndex((p) => p.id === id);
 }
 
+// Rotates a thumbnail image's actual pixels rather than using a CSS transform — a CSS
+// rotate() on an <img> spins the content but leaves the element's own box dimensions
+// unchanged, so a 90°/270° rotation visually overflows/clips within what's still a
+// portrait-shaped (or landscape-shaped) box. Baking the rotation into real pixel data on a
+// correctly-swapped-dimension canvas avoids that entirely.
+function pdfEdRotateImageDataUrl(dataUrl, degrees) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const sideways = degrees === 90 || degrees === 270;
+      const w = sideways ? img.height : img.width;
+      const h = sideways ? img.width : img.height;
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const c = canvas.getContext('2d');
+      c.translate(w / 2, h / 2);
+      c.rotate((degrees * Math.PI) / 180);
+      c.drawImage(img, -img.width / 2, -img.height / 2);
+      resolve(canvas.toDataURL('image/jpeg', 0.72));
+    };
+    img.src = dataUrl;
+  });
+}
+
 async function renderPdfEditor() {
   appEl.innerHTML = `
-    <div class="topbar">
-      <button class="icon-btn" id="btn-back">‹</button>
-      <div style="flex:1; min-width:0;">
-        <h1 style="font-size:17px;" id="pdfed-title">📄 PDF Editor</h1>
-        <span class="sub" id="pdfed-subtitle">No document open</span>
+    <div class="fullscreen" id="pdfed-view">
+      <div class="topbar">
+        <button class="icon-btn" id="btn-back">‹</button>
+        <div style="flex:1; min-width:0;">
+          <h1 style="font-size:17px;" id="pdfed-title">📄 PDF Editor</h1>
+          <span class="sub" id="pdfed-subtitle">No document open</span>
+        </div>
+        <button class="text-btn" id="btn-pdfed-open">Open</button>
       </div>
-      <button class="text-btn" id="btn-pdfed-open">Open</button>
-    </div>
-    <div id="pdfed-body" class="content" style="padding:0; display:flex; flex-direction:column; height:100%;">
-      <div class="empty-state">
-        <div class="glyph">📄</div>
-        <h3>No PDF open</h3>
-        <p>Tap Open to load a PDF, or Combine to merge several into one.</p>
-        <button class="btn btn-primary" id="btn-pdfed-open-2" style="margin-top:14px;">Open a PDF</button>
-        <button class="btn btn-secondary" id="btn-pdfed-combine-2" style="margin-top:10px;">Combine multiple PDFs</button>
+      <div id="pdfed-body" style="display:flex; flex-direction:column; flex:1; min-height:0;">
+        <div class="empty-state">
+          <div class="glyph">📄</div>
+          <h3>No PDF open</h3>
+          <p>Tap Open to load a PDF, or Combine to merge several into one.</p>
+          <button class="btn btn-primary" id="btn-pdfed-open-2" style="margin-top:14px;">Open a PDF</button>
+          <button class="btn btn-secondary" id="btn-pdfed-combine-2" style="margin-top:10px;">Combine multiple PDFs</button>
+        </div>
       </div>
     </div>
     <input type="file" id="pdfed-file-input" accept="application/pdf" style="display:none;">
@@ -126,8 +153,7 @@ async function pdfEdRebuildThumbnails() {
     const existing = pdfEdPages[i - 1];
     newPages.push({
       id: existing ? existing.id : uid(),
-      thumbUrl: canvas.toDataURL('image/jpeg', 0.72),
-      cssRotation: 0
+      thumbUrl: canvas.toDataURL('image/jpeg', 0.72)
     });
   }
   pdfEdPages = newPages;
@@ -138,15 +164,8 @@ function renderPdfEdBody() {
   document.getElementById('pdfed-subtitle').textContent = `${pdfEdPages.length} page${pdfEdPages.length === 1 ? '' : 's'}${pdfEdSelected.size ? ` · ${pdfEdSelected.size} selected` : ''}`;
 
   const body = document.getElementById('pdfed-body');
-  body.style.padding = '0';
   body.innerHTML = `
-    <div style="display:flex; flex:1; min-height:0;">
-      <div id="pdfed-sidebar" style="width:150px; flex-shrink:0; overflow-y:auto; background:#f0f0f2; border-right:1px solid var(--line); padding:10px;"></div>
-      <div id="pdfed-preview-wrap" style="flex:1; min-width:0; overflow:auto; display:flex; align-items:flex-start; justify-content:center; background:#e4e4e7; padding:20px;">
-        <div class="empty-state"><p class="muted">Select a page to preview</p></div>
-      </div>
-    </div>
-    <div class="annotate-toolbar" style="background:var(--paper); color:var(--ink); border-top:1px solid var(--line); flex-wrap:wrap;" id="pdfed-toolbar">
+    <div class="annotate-toolbar" style="background:var(--paper); color:var(--ink); border-bottom:1px solid var(--line); flex-wrap:wrap; flex-shrink:0;" id="pdfed-toolbar">
       <button class="small-btn" id="btn-pdfed-rotate-l" title="Rotate left">↺</button>
       <button class="small-btn" id="btn-pdfed-rotate-r" title="Rotate right">↻</button>
       <button class="small-btn" id="btn-pdfed-duplicate">Duplicate</button>
@@ -158,7 +177,13 @@ function renderPdfEdBody() {
       <button class="small-btn" id="btn-pdfed-split">Split</button>
       <button class="small-btn" id="btn-pdfed-rename">Rename</button>
     </div>
-    <div class="annotate-toolbar" style="background:var(--paper); color:var(--ink); border-top:1px solid var(--line); padding-top:8px;">
+    <div style="display:flex; flex:1; min-height:0;">
+      <div id="pdfed-sidebar" style="width:150px; flex-shrink:0; overflow-y:auto; background:#f0f0f2; border-right:1px solid var(--line); padding:10px;"></div>
+      <div id="pdfed-preview-wrap" style="flex:1; min-width:0; overflow:auto; display:flex; align-items:flex-start; justify-content:center; background:#e4e4e7; padding:20px;">
+        <div class="empty-state"><p class="muted">Select a page to preview</p></div>
+      </div>
+    </div>
+    <div class="annotate-toolbar" style="background:var(--paper); color:var(--ink); border-top:1px solid var(--line); flex-shrink:0;">
       <button class="btn btn-ghost" id="btn-pdfed-close">Close document</button>
       <div class="spacer"></div>
       <button class="btn btn-secondary" id="btn-pdfed-save">Save</button>
@@ -175,7 +200,7 @@ function pdfEdRenderSidebar() {
   sidebar.innerHTML = pdfEdPages.map((p, i) => `
     <div class="pdfed-thumb-wrap" data-id="${p.id}" style="margin-bottom:14px; position:relative;">
       <div class="pdfed-thumb ${pdfEdPreviewId === p.id ? 'pdfed-thumb-active' : ''}" data-id="${p.id}" style="border:2px solid ${pdfEdPreviewId === p.id ? 'var(--ink)' : 'var(--line)'}; border-radius:8px; overflow:hidden; background:#fff; cursor:pointer;">
-        <img src="${p.thumbUrl}" style="width:100%; display:block; transform:rotate(${p.cssRotation}deg);">
+        <img src="${p.thumbUrl}" style="width:100%; display:block;">
       </div>
       <div class="pdfed-check" data-id="${p.id}" style="position:absolute; top:4px; left:4px; width:22px; height:22px; border-radius:50%; background:${pdfEdSelected.has(p.id) ? 'var(--ink)' : 'rgba(255,255,255,0.85)'}; border:1.5px solid var(--line); display:flex; align-items:center; justify-content:center; font-size:12px; color:#fff; cursor:pointer;">${pdfEdSelected.has(p.id) ? '✓' : ''}</div>
       <p class="muted" style="font-size:11px; text-align:center; margin:4px 0 0;">Page ${i + 1}</p>
@@ -255,7 +280,7 @@ function pdfEdRenderPreview() {
   const wrap = document.getElementById('pdfed-preview-wrap');
   const page = pdfEdPages.find((p) => p.id === pdfEdPreviewId);
   if (!page) { wrap.innerHTML = `<div class="empty-state"><p class="muted">Select a page to preview</p></div>`; return; }
-  wrap.innerHTML = `<img src="${page.thumbUrl}" style="max-width:100%; box-shadow:0 4px 20px rgba(0,0,0,0.25); transform:rotate(${page.cssRotation}deg); background:#fff;">`;
+  wrap.innerHTML = `<img src="${page.thumbUrl}" style="max-width:100%; box-shadow:0 4px 20px rgba(0,0,0,0.25); background:#fff;">`;
 }
 
 // Reorders the actual pdf-lib document to match a new thumbnail order — rebuilt via
@@ -322,15 +347,19 @@ function pdfEdActiveTargets() {
 async function pdfEdRotateSelection(delta) {
   const targets = pdfEdActiveTargets();
   if (!targets.length) { toast('Select a page first'); return; }
-  targets.forEach((id) => {
+  for (const id of targets) {
     const idx = pdfEdFindIndex(id);
-    if (idx < 0) return;
+    if (idx < 0) continue;
     const page = pdfEdWorkingDoc.getPage(idx);
     const current = page.getRotation().angle;
     const next = ((current + delta) % 360 + 360) % 360;
     page.setRotation(PDFLib.degrees(next));
-    pdfEdPages[idx].cssRotation = ((pdfEdPages[idx].cssRotation + delta) % 360 + 360) % 360;
-  });
+    // Rotate the thumbnail's actual pixels rather than a CSS transform — see
+    // pdfEdRotateImageDataUrl for why. A 90°-multiple pixel rotation is lossless, so
+    // rotating the current thumbnail in place (rather than re-deriving from some
+    // separately-tracked original) is both correct and simpler.
+    pdfEdPages[idx].thumbUrl = await pdfEdRotateImageDataUrl(pdfEdPages[idx].thumbUrl, ((delta % 360) + 360) % 360);
+  }
   renderPdfEdBody();
 }
 

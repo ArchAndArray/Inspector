@@ -226,9 +226,17 @@ async function openAnnotator(photoId, onDone) {
   photoCtx.drawImage(img, 0, 0, cw, ch);
   if (img.close) img.close();
   if (hasEditableMark) {
-    const markImg = await loadBitmapCorrected(photo.editableMarkBlob);
-    ctx.drawImage(markImg, 0, 0, cw, ch);
-    if (markImg.close) markImg.close();
+    try {
+      const markImg = await loadBitmapCorrected(photo.editableMarkBlob);
+      ctx.drawImage(markImg, 0, 0, cw, ch);
+      if (markImg.close) markImg.close();
+    } catch (err) {
+      // If the previously-saved mark layer can't be loaded for any reason, fail visibly
+      // rather than silently leaving initialization half-done — a swallowed error here
+      // would otherwise present as "editing doesn't work" with no indication why.
+      console.error('Failed to reload editable mark layer', err);
+      toast('Could not reload your previous marks — starting from the flattened image instead');
+    }
   }
 
   // ---- View transform (pinch-zoom / pan) ----
@@ -266,8 +274,15 @@ async function openAnnotator(photoId, onDone) {
 
   // ---- Line style (dash pattern) — applies broadly to any stroked line: Pen, Fountain,
   // Smoothing, Measure, and the Arc tool. Not Airbrush, which is dab-based rather than a
-  // stroked path, so a dash pattern has no meaningful effect on it. ----
-  const LINE_STYLES = {
+  // stroked path, so a dash pattern has no meaningful effect on it.
+  //
+  // Dash sizes are computed relative to the canvas's own resolution and the current pen
+  // width (same technique as measureArrowSizing) rather than fixed pixel counts — a photo
+  // canvas can be as large as 2400px but displayed at a fraction of that on screen, so a
+  // fixed small dash/gap (e.g. 2px) becomes sub-pixel at display size and reads as a solid
+  // line. LINE_STYLE_PREVIEW below is separate and intentionally fixed-size — it's only for
+  // the small picker sheet's icon swatches, not the actual canvas.
+  const LINE_STYLE_PREVIEW = {
     solid: [],
     dots: [2, 5],
     smallDashes: [6, 5],
@@ -275,8 +290,20 @@ async function openAnnotator(photoId, onDone) {
     largeDashes: [16, 7]
   };
   let currentLineStyle = 'solid';
+  function getLineDashArray() {
+    if (currentLineStyle === 'solid') return [];
+    const ref = Math.min(cw, ch);
+    const unit = Math.max(8, ref * 0.012, currentWidth * 1.8);
+    const patterns = {
+      dots: [unit * 0.5, unit * 1.1],
+      smallDashes: [unit * 1.3, unit * 1.0],
+      dashDot: [unit * 2.1, unit * 1.0, unit * 0.5, unit * 1.0],
+      largeDashes: [unit * 3.3, unit * 1.5]
+    };
+    return patterns[currentLineStyle] || [];
+  }
   function applyLineStyle() {
-    ctx.setLineDash(LINE_STYLES[currentLineStyle] || []);
+    ctx.setLineDash(getLineDashArray());
   }
   function resetLineStyle() {
     ctx.setLineDash([]);
@@ -294,7 +321,7 @@ async function openAnnotator(photoId, onDone) {
           <h2>Line style</h2>
           ${options.map(([key, label]) => `
             <button class="btn btn-secondary btn-block line-style-option" data-style="${key}" style="margin-top:8px; display:flex; align-items:center; gap:12px; ${key === currentLineStyle ? 'border-color:var(--ink); background:#f0f0f2;' : ''}">
-              <svg width="60" height="14" viewBox="0 0 60 14"><line x1="2" y1="7" x2="58" y2="7" stroke="#1c1f26" stroke-width="2.4" stroke-dasharray="${LINE_STYLES[key].join(',')}"/></svg>
+              <svg width="60" height="14" viewBox="0 0 60 14"><line x1="2" y1="7" x2="58" y2="7" stroke="#1c1f26" stroke-width="2.4" stroke-dasharray="${LINE_STYLE_PREVIEW[key].join(',')}"/></svg>
               <span>${label}</span>
             </button>
           `).join('')}
@@ -349,17 +376,24 @@ async function openAnnotator(photoId, onDone) {
 
   // Shared tap-vs-hold detection: a short press selects, a ~500ms hold opens the editor —
   // used identically for the custom color slots and the custom width button.
+  // Shared tap-vs-hold detection: a short press selects, a ~500ms hold opens the editor —
+  // used identically for the custom color slots and the custom width button. Captures the
+  // pointer on press so natural finger drift during a tap on these small targets can't send
+  // the pointerup event to a neighboring element instead, which was silently breaking both
+  // the tap and the hold intermittently.
   function wireTapAndHold(el2, onTap, onHold) {
     let holdTimer = null;
     let holdFired = false;
     el2.addEventListener('pointerdown', (e) => {
       holdFired = false;
+      try { el2.setPointerCapture(e.pointerId); } catch (err) { /* not critical if unsupported */ }
       holdTimer = setTimeout(() => { holdFired = true; onHold(e); }, 500);
     });
     function clearHold() { if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; } }
     el2.addEventListener('pointerup', (e) => {
       clearHold();
       if (!holdFired) onTap(e);
+      try { el2.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
     });
     el2.addEventListener('pointerleave', clearHold);
     el2.addEventListener('pointercancel', clearHold);
@@ -564,12 +598,17 @@ async function openAnnotator(photoId, onDone) {
   function updateGridVisual() {
     if (!gridState) return;
     const spacing = GRID_SPACING[gridState];
+    // Stroke width scaled up slightly rather than a fixed 1 unit — under this SVG's
+    // viewBox scale-down (native canvas resolution mapped onto a much smaller on-screen
+    // size), a 1-unit line can render at a sub-pixel width, which some renderers handle
+    // inconsistently depending on exact pixel alignment.
+    const strokeW = Math.max(1.5, cw / 1400);
     let svg = `<svg width="100%" height="100%" viewBox="0 0 ${cw} ${ch}" preserveAspectRatio="none" style="display:block;">`;
     for (let x = spacing; x < cw; x += spacing) {
-      svg += `<line x1="${x}" y1="0" x2="${x}" y2="${ch}" stroke="#000000" stroke-width="1" opacity="0.18"/>`;
+      svg += `<line x1="${x}" y1="0" x2="${x}" y2="${ch}" stroke="#000000" stroke-width="${strokeW}" opacity="0.18"/>`;
     }
     for (let y = spacing; y < ch; y += spacing) {
-      svg += `<line x1="0" y1="${y}" x2="${cw}" y2="${y}" stroke="#000000" stroke-width="1" opacity="0.18"/>`;
+      svg += `<line x1="0" y1="${y}" x2="${cw}" y2="${y}" stroke="#000000" stroke-width="${strokeW}" opacity="0.18"/>`;
     }
     svg += `</svg>`;
     gridVisual.innerHTML = svg;
@@ -921,13 +960,29 @@ async function openAnnotator(photoId, onDone) {
     const dist = Math.hypot(b.cx - a.cx, b.cy - a.cy);
     const mid = { x: (a.cx + b.cx) / 2, y: (a.cy + b.cy) / 2 };
     if (!pinchState) {
-      pinchState = { startDist: dist, startScale: viewScale, startMid: mid, startTx: viewTx, startTy: viewTy };
+      pinchState = { startDist: dist, startScale: viewScale };
       return;
     }
     const scaleFactor = pinchState.startDist > 0 ? dist / pinchState.startDist : 1;
-    viewScale = Math.min(MAX_ZOOM, Math.max(1, pinchState.startScale * scaleFactor));
-    viewTx = pinchState.startTx + (mid.x - pinchState.startMid.x);
-    viewTy = pinchState.startTy + (mid.y - pinchState.startMid.y);
+    const newScale = Math.min(MAX_ZOOM, Math.max(1, pinchState.startScale * scaleFactor));
+
+    // Zoom anchored on the current pinch midpoint, not the transform's fixed top-left
+    // origin — stackEl is flex-centered within its container, so its base layout position
+    // isn't known directly, but it can always be derived from the currently-observed
+    // rendered rect and the currently-applied translate (rect.left = baseLeft + viewTx
+    // always holds, since translate is a simple additive offset), which stays correct
+    // regardless of how the centering itself is achieved.
+    const rect = stackEl.getBoundingClientRect();
+    const baseLeft = rect.left - viewTx;
+    const baseTop = rect.top - viewTy;
+    const nativeW = rect.width / viewScale;
+    const nativeH = rect.height / viewScale;
+    const fracX = (mid.x - rect.left) / rect.width;
+    const fracY = (mid.y - rect.top) / rect.height;
+
+    viewTx = mid.x - fracX * nativeW * newScale - baseLeft;
+    viewTy = mid.y - fracY * nativeH * newScale - baseTop;
+    viewScale = newScale;
     applyViewTransform();
   }
 
@@ -1052,7 +1107,7 @@ async function openAnnotator(photoId, onDone) {
     targetCtx.strokeStyle = currentColor;
     targetCtx.lineWidth = currentWidth;
     targetCtx.lineCap = 'round';
-    targetCtx.setLineDash(LINE_STYLES[currentLineStyle] || []);
+    targetCtx.setLineDash(getLineDashArray());
     targetCtx.beginPath();
     targetCtx.moveTo(p1.x, p1.y);
     targetCtx.quadraticCurveTo(control.x, control.y, p2.x, p2.y);
@@ -1521,7 +1576,7 @@ async function openAnnotator(photoId, onDone) {
     targetCtx.fillStyle = currentColor;
     targetCtx.lineWidth = lineWidth;
     targetCtx.lineCap = 'round';
-    targetCtx.setLineDash(LINE_STYLES[currentLineStyle] || []); // restore() below cleans this up automatically
+    targetCtx.setLineDash(getLineDashArray()); // restore() below cleans this up automatically
     // On a very short arrow, pulling back both ends could make them cross — in that case
     // the two arrowheads alone (drawn below regardless) are enough at this scale, so the
     // connecting line is skipped rather than drawing a glitchy backwards segment.

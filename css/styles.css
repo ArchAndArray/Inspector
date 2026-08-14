@@ -408,9 +408,10 @@ button {
 }
 .tool-btn.active { background: var(--red); }
 .tool-btn.tool-btn-text { width: auto; padding: 0 12px; font-size: 12px; font-weight: 700; }
-.atb-row { display: flex; align-items: center; gap: 10px; width: 100%; }
-.atb-left, .atb-right { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.atb-mid { display: flex; align-items: center; justify-content: center; gap: 8px; flex: 1; }
+.atb-row { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; width: 100%; }
+.atb-left { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-self: start; }
+.atb-right { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-self: end; }
+.atb-mid { display: flex; align-items: center; justify-content: center; gap: 8px; justify-self: center; }
 .atb-mid .color-dot { width: 26px; height: 26px; flex-shrink: 0; }
 .annotate-canvas-wrap {
   flex: 1;
