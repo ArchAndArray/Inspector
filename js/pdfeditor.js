@@ -12,6 +12,7 @@ let pdfEdFilename = 'document';
 let pdfEdPages = [];          // ordered descriptors: { id, thumbUrl } — rotation is baked directly into the thumbnail's own pixels, not a separate display transform
 let pdfEdSelected = new Set();
 let pdfEdPreviewId = null;
+let pdfEdCommentMode = false;
 let pdfEdDragId = null;
 
 function pdfEdFindIndex(id) {
@@ -175,6 +176,9 @@ function renderPdfEdBody() {
       <button class="pdfed-btn" id="btn-pdfed-duplicate">Duplicate</button>
       <button class="pdfed-btn pdfed-btn-danger" id="btn-pdfed-delete">Delete</button>
       <button class="pdfed-btn" id="btn-pdfed-extract">Extract</button>
+      <button class="pdfed-btn" id="btn-pdfed-comment">Comment</button>
+      <button class="pdfed-btn" id="btn-pdfed-annotate">Sketch</button>
+      <button class="pdfed-btn" id="btn-pdfed-compress">Compress</button>
       <div class="spacer"></div>
       <button class="pdfed-btn" id="btn-pdfed-insert">Insert PDF</button>
       <button class="pdfed-btn" id="btn-pdfed-append">Append PDF</button>
@@ -288,12 +292,14 @@ function pdfEdRenderSidebarActiveOnly() {
 function pdfEdRenderPreview() {
   const stack = document.getElementById('pdfed-preview-stack');
   stack.innerHTML = pdfEdPages.map((p, i) => `
-    <div id="pdfed-page-${p.id}" class="pdfed-preview-page" data-id="${p.id}" style="box-shadow:0 4px 20px rgba(0,0,0,0.25); background:#fff;">
-      <img src="${p.thumbUrl}" style="display:block; width:100%;">
+    <div id="pdfed-page-${p.id}" class="pdfed-preview-page" data-id="${p.id}" data-pageindex="${i}" style="position:relative; box-shadow:0 4px 20px rgba(0,0,0,0.25); background:#fff;">
+      <img src="${p.thumbUrl}" style="display:block; width:100%; pointer-events:none;">
+      <div class="pdfed-textlayer" data-pageindex="${i}" style="position:absolute; inset:0; display:none;"></div>
     </div>
   `).join('');
   stack.querySelectorAll('.pdfed-preview-page').forEach((el2) => {
     el2.addEventListener('click', () => {
+      if (pdfEdCommentMode) return; // clicks in comment mode are for text selection, not page-switching
       pdfEdPreviewId = el2.dataset.id;
       pdfEdRenderSidebarActiveOnly();
     });
@@ -405,6 +411,9 @@ function pdfEdWireToolbar() {
   document.getElementById('btn-pdfed-split').addEventListener('click', pdfEdSplitPrompt);
   document.getElementById('btn-pdfed-insert').addEventListener('click', () => pdfEdMergeSecondFile('insert'));
   document.getElementById('btn-pdfed-append').addEventListener('click', () => pdfEdMergeSecondFile('append'));
+  document.getElementById('btn-pdfed-comment').addEventListener('click', pdfEdToggleCommentMode);
+  document.getElementById('btn-pdfed-annotate').addEventListener('click', pdfEdAnnotatePageButton);
+  document.getElementById('btn-pdfed-compress').addEventListener('click', pdfEdCompressDocument);
 
   document.getElementById('btn-pdfed-save').addEventListener('click', () => pdfEdExportPages(pdfEdWorkingDoc.getPageIndices(), pdfEdFilename));
   document.getElementById('btn-pdfed-export').addEventListener('click', () => {
@@ -427,7 +436,567 @@ function pdfEdActiveTargets() {
   return pdfEdPreviewId ? [pdfEdPreviewId] : [];
 }
 
+// ============================================================================
+// Sketch tools on PDF pages — rasterizes the target page to a bitmap, opens it
+// in the exact same annotator used everywhere else in the app (Findings,
+// Drawings, Scale/Annotate), then replaces that page's content with the
+// flattened result. This is a real trade-off, not a limitation to hide: the
+// annotated page becomes a raster image — marks baked in, but that page's
+// live text/vectors are gone. Every other page is untouched. Reuses
+// resizeAndCompressImage (pdf.js) so a marked-up page doesn't reintroduce the
+// oversized-file problem that motivated building that utility in the first
+// place — an unmarked, unresized flattened page would be exactly as bloated.
+// ============================================================================
+
+async function pdfEdAnnotatePageButton() {
+  const targets = pdfEdActiveTargets();
+  if (!targets.length) { toast('Select a page first'); return; }
+  if (targets.length > 1) { toast('Select just one page to annotate'); return; }
+  const pageIndex = pdfEdFindIndex(targets[0]);
+  if (pageIndex < 0) return;
+  await pdfEdAnnotatePage(pageIndex);
+}
+
+async function pdfEdAnnotatePage(pageIndex) {
+  toast('Preparing page…');
+  const bytes = await pdfEdWorkingDoc.save();
+  const pdfJsDoc = await window.pdfjsLib.getDocument({ data: bytes }).promise;
+  const page = await pdfJsDoc.getPage(pageIndex + 1);
+  // Rendered notably higher than the preview's own scale:1.0 — this bitmap is
+  // what gets marked up and re-embedded, so it needs real working resolution,
+  // not just enough to look fine as a small on-screen preview.
+  const viewport = page.getViewport({ scale: 2.5 });
+  const canvas = document.createElement('canvas');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+  if (!blob) { toast('Could not prepare this page for annotation'); return; }
+
+  // A temporary photo record so the existing annotator (which always operates
+  // on a real photos-store record) can be reused completely unchanged — the
+  // same pattern the standalone Scale/Annotate tool already uses for sessions
+  // that aren't tied to any inspection. Cleaned up once the result is pulled
+  // back out, regardless of whether the user saved or cancelled.
+  const photo = await DB.addPhoto({ kind: 'pdfPage', originalBlob: blob });
+
+  openAnnotator(photo.id, async () => {
+    try {
+      const updated = await DB.get('photos', photo.id);
+      const resultBlob = updated && updated.annotatedBlob;
+      if (resultBlob) {
+        await pdfEdReplacePageWithImage(pageIndex, resultBlob);
+        toast('Page updated');
+      }
+    } catch (err) {
+      console.error('Failed to apply page annotation', err);
+      toast('Could not save the annotated page — please try again');
+    } finally {
+      try { await DB.delete('photos', photo.id); } catch (err) { /* best-effort cleanup */ }
+    }
+  });
+}
+
+async function pdfEdReplacePageWithImage(pageIndex, blob) {
+  const pdfDoc = pdfEdWorkingDoc;
+  const oldPage = pdfDoc.getPage(pageIndex);
+  const w = oldPage.getWidth(), h = oldPage.getHeight();
+  const rotation = oldPage.getRotation().angle;
+
+  const compressedBlob = await resizeAndCompressImage(blob, 2000, 0.8);
+  const imgBytes = new Uint8Array(await compressedBlob.arrayBuffer());
+  const jpgImage = await pdfDoc.embedJpg(imgBytes);
+
+  pdfDoc.removePage(pageIndex);
+  const newPage = pdfDoc.insertPage(pageIndex, [w, h]);
+  newPage.drawImage(jpgImage, { x: 0, y: 0, width: w, height: h });
+  if (rotation) newPage.setRotation(PDFLib.degrees(rotation));
+
+  await pdfEdRebuildThumbnails();
+}
+
+// ============================================================================
+// Compress: recompresses images already embedded in an arbitrary opened PDF —
+// a different, harder problem than the sketch/report cases above, since those
+// control the source image; this has to find and decode whatever's already in
+// the file. Deliberately scoped to the common case: images encoded with a
+// plain /DCTDecode (JPEG) filter, which covers most scanned/photographed
+// documents — those bytes ARE valid JPEG bytes directly. Anything else
+// (chained filters, non-JPEG encodings) is left untouched rather than risking
+// a wrong guess at how to decode it. Several of the low-level accessors here
+// (resolving XObject dict entries, reading stream bytes/filter) couldn't be
+// execute-verified — each image is processed in its own try/catch so one
+// wrong guess skips that image rather than breaking the whole document.
+// ============================================================================
+
+function pdfEdResolve(context, refOrObj) {
+  if (!refOrObj) return refOrObj;
+  if (refOrObj instanceof PDFLib.PDFRef) return context.lookup(refOrObj);
+  return refOrObj;
+}
+
+async function pdfEdCompressDocument() {
+  if (!pdfEdWorkingDoc) return;
+  if (!confirm('Compress images in this document? Large photos will be resized and recompressed to reduce file size. This cannot be undone (but nothing is saved to your device until you tap Save or Export).')) return;
+  toast('Compressing…');
+
+  const pdfDoc = pdfEdWorkingDoc;
+  const context = pdfDoc.context;
+  let processed = 0, skipped = 0;
+
+  for (const page of pdfDoc.getPages()) {
+    let resources;
+    try { resources = page.node.Resources(); } catch (err) { continue; }
+    if (!resources) continue;
+    const xObjectDict = pdfEdResolve(context, resources.get(PDFLib.PDFName.of('XObject')));
+    if (!xObjectDict || typeof xObjectDict.keys !== 'function') continue;
+
+    for (const key of xObjectDict.keys()) {
+      try {
+        const ref = xObjectDict.get(key);
+        const stream = pdfEdResolve(context, ref);
+        if (!stream) { skipped++; continue; }
+        const dict = stream.dict || stream;
+        const subtype = dict.get(PDFLib.PDFName.of('Subtype'));
+        if (!subtype || subtype.toString() !== '/Image') continue;
+
+        const filter = dict.get(PDFLib.PDFName.of('Filter'));
+        if (!filter || filter.toString() !== '/DCTDecode') { skipped++; continue; } // chained/non-JPEG filters skipped, not guessed at
+
+        const rawBytes = stream.contents || stream.getContents?.();
+        if (!rawBytes || !rawBytes.length) { skipped++; continue; }
+
+        const originalBlob = new Blob([rawBytes], { type: 'image/jpeg' });
+        const compressedBlob = await resizeAndCompressImage(originalBlob, 1800, 0.75);
+        if (compressedBlob.size >= originalBlob.size) { skipped++; continue; } // only replace if it's actually smaller
+
+        const compressedBytes = new Uint8Array(await compressedBlob.arrayBuffer());
+        const newImage = await pdfDoc.embedJpg(compressedBytes);
+        xObjectDict.set(key, newImage.ref);
+        processed++;
+      } catch (err) {
+        console.error('Skipped one image during compression', err);
+        skipped++;
+      }
+    }
+  }
+
+  await pdfEdRebuildThumbnails();
+  toast(`Compressed ${processed} image${processed === 1 ? '' : 's'}${skipped ? `, skipped ${skipped}` : ''}`);
+}
+
+// ============================================================================
+// PDF Comments (Highlight + Popup + threaded replies via native PDF annotation
+// objects) — NOT rasterized drawing. These are constructed directly against
+// pdf-lib's low-level object API (context.obj/register), producing real,
+// standards-compliant Highlight/Popup/Text annotation dictionaries readable by
+// other PDF software (Acrobat, Preview, etc.), not baked into the page content.
+//
+// The exact dictionary shape here (QuadPoints ordering, Popup linking via
+// /Parent + /Popup, reply threading via /IRT + /RT) was validated end-to-end
+// in a standalone spike: built with a low-level PDF object constructor,
+// independently re-read and verified with a completely separate PDF library,
+// including a genuine two-level reply thread walked back correctly via /IRT.
+// That confirms the PDF STRUCTURE itself is correct.
+//
+// What that spike could NOT verify is this exact translation into pdf-lib's
+// JavaScript API specifically — npm access isn't available in this sandbox to
+// execute pdf-lib directly, so this part is built from careful reading of
+// pdf-lib's own source and a confirmed real-world usage example (both show
+// context.obj() accepting plain JS objects/arrays exactly as used below), not
+// from direct execution. Real device testing is what finally confirms this
+// specific part.
+// ============================================================================
+
+function pdfEdDateString(d) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `D:${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
+}
+
+// Reads a page's existing /Annots array, creating one if it doesn't exist yet.
+function pdfEdGetOrCreateAnnots(page) {
+  const context = page.doc.context;
+  let arr = page.node.Annots ? page.node.Annots() : undefined;
+  if (!arr) {
+    arr = context.obj([]);
+    page.node.set(PDFLib.PDFName.of('Annots'), context.register(arr));
+  }
+  return arr;
+}
+
+// Creates a Highlight annotation (the underlined/marked text) plus its linked
+// Popup (the comment box), and appends both to the page. QuadPoints order is
+// top-left, top-right, bottom-left, bottom-right per rectangle — this is the
+// order real-world viewers expect in practice, per the widely-known ambiguity
+// in how the PDF spec's own text on this point is written.
+function pdfEdCreateComment(pdfDoc, page, { quadPointsPerRect, rect, contents, author, colorRgb }) {
+  const context = pdfDoc.context;
+  const highlightDict = context.obj({
+    Type: 'Annot',
+    Subtype: 'Highlight',
+    Rect: rect,
+    QuadPoints: quadPointsPerRect,
+    C: colorRgb,
+    CA: 0.55,
+    Contents: contents,
+    T: author,
+    M: pdfEdDateString(new Date())
+  });
+  const highlightRef = context.register(highlightDict);
+
+  const popupDict = context.obj({
+    Type: 'Annot',
+    Subtype: 'Popup',
+    Rect: [rect[2] + 20, rect[3], rect[2] + 220, rect[3] + 70],
+    Parent: highlightRef,
+    Open: false
+  });
+  const popupRef = context.register(popupDict);
+  highlightDict.set(PDFLib.PDFName.of('Popup'), popupRef);
+
+  const annots = pdfEdGetOrCreateAnnots(page);
+  annots.push(highlightRef);
+  annots.push(popupRef);
+
+  return highlightRef;
+}
+
+// Creates a reply annotation threaded to a parent comment (either the original
+// Highlight, or another reply) via /IRT — verified in the spike to correctly
+// support genuine multi-level threading, not just a single reply.
+function pdfEdCreateReply(pdfDoc, page, parentRef, { contents, author }) {
+  const context = pdfDoc.context;
+  const replyDict = context.obj({
+    Type: 'Annot',
+    Subtype: 'Text',
+    Rect: [0, 0, 20, 20], // replies don't need their own visible marker on the page
+    Contents: contents,
+    T: author,
+    M: pdfEdDateString(new Date()),
+    IRT: parentRef,
+    RT: 'Reply'
+  });
+  const replyRef = context.register(replyDict);
+  pdfEdGetOrCreateAnnots(page).push(replyRef);
+  return replyRef;
+}
+
+// Reads every comment (Highlight annotations only — Popups and replies are
+// linked to them, not listed as their own top-level comments) on a page,
+// with each one's reply thread resolved.
+function pdfEdListComments(pdfDoc, page) {
+  const annots = page.node.Annots ? page.node.Annots() : undefined;
+  if (!annots) return [];
+  const all = [];
+  for (let i = 0; i < annots.size(); i++) {
+    const ref = annots.get(i);
+    const dict = pdfDoc.context.lookup(ref);
+    if (dict) all.push({ ref, dict });
+  }
+  const highlights = all.filter((a) => a.dict.get(PDFLib.PDFName.of('Subtype'))?.toString() === '/Highlight');
+  return highlights.map((h) => ({
+    ref: h.ref,
+    dict: h.dict,
+    replies: pdfEdCollectReplies(all, h.ref)
+  }));
+}
+
+// Walks /IRT references to find every reply (direct or nested) to a given
+// annotation, in thread order.
+function pdfEdCollectReplies(all, parentRef) {
+  const direct = all.filter((a) => {
+    const irt = a.dict.get(PDFLib.PDFName.of('IRT'));
+    return irt && irt.toString() === parentRef.toString();
+  });
+  let result = [];
+  direct.forEach((r) => {
+    result.push(r);
+    result = result.concat(pdfEdCollectReplies(all, r.ref));
+  });
+  return result;
+}
+
+// Deletes a comment (or reply) and, per an explicit design decision, cascades
+// to delete every reply in its thread too — leaving a reply pointing at a
+// vanished parent via /IRT was found in testing to be structurally valid but
+// confusing to present in a UI, so cascade is the chosen behavior throughout.
+function pdfEdDeleteCommentCascade(pdfDoc, page, targetRef) {
+  const annots = page.node.Annots ? page.node.Annots() : undefined;
+  if (!annots) return;
+  const all = [];
+  for (let i = 0; i < annots.size(); i++) {
+    const ref = annots.get(i);
+    const dict = pdfDoc.context.lookup(ref);
+    if (dict) all.push({ ref, dict });
+  }
+  const toDelete = new Set([targetRef.toString()]);
+  // Also delete the target's linked Popup, if it has one.
+  const targetDict = pdfDoc.context.lookup(targetRef);
+  const popupRef = targetDict && targetDict.get(PDFLib.PDFName.of('Popup'));
+  if (popupRef) toDelete.add(popupRef.toString());
+  // Cascade through every level of replies.
+  pdfEdCollectReplies(all, targetRef).forEach((r) => toDelete.add(r.ref.toString()));
+
+  const kept = [];
+  for (let i = 0; i < annots.size(); i++) {
+    const ref = annots.get(i);
+    if (!toDelete.has(ref.toString())) kept.push(ref);
+  }
+  const newArr = pdfDoc.context.obj(kept);
+  page.node.set(PDFLib.PDFName.of('Annots'), pdfDoc.context.register(newArr));
+}
+
+// ---- Comment mode: toggles the invisible text-selection layer on every page,
+// so native browser text selection can be used to pick what to highlight. ----
+async function pdfEdToggleCommentMode() {
+  pdfEdCommentMode = !pdfEdCommentMode;
+  document.getElementById('btn-pdfed-comment').classList.toggle('pdfed-btn-active', pdfEdCommentMode);
+  document.querySelectorAll('.pdfed-textlayer').forEach((el2) => {
+    el2.style.display = pdfEdCommentMode ? 'block' : 'none';
+  });
+  if (pdfEdCommentMode) {
+    toast('Select text to add a comment. Tap an existing highlight to view or reply.');
+    for (let i = 0; i < pdfEdPages.length; i++) {
+      await pdfEdBuildTextLayer(i);
+      pdfEdRenderCommentMarkers(i);
+    }
+    document.addEventListener('selectionchange', pdfEdOnSelectionChange);
+  } else {
+    document.removeEventListener('selectionchange', pdfEdOnSelectionChange);
+    window.getSelection().removeAllRanges();
+  }
+}
+
+// Builds an invisible, selectable text layer for one page by positioning a
+// <span> per pdf.js text item at its correct location. Deliberately computed
+// in CSS pixels relative to the container's CURRENT rendered size (a
+// snapshot) rather than percentages — font-size can't be expressed as "% of
+// container height" in standard CSS, so this rebuilds on zoom-end instead of
+// trying to stay continuously responsive during an active pinch gesture.
+async function pdfEdBuildTextLayer(pageIndex) {
+  const container = document.querySelector(`.pdfed-textlayer[data-pageindex="${pageIndex}"]`);
+  if (!container) return;
+  const containerRect = container.getBoundingClientRect();
+  if (containerRect.width < 10) return;
+
+  const bytes = await pdfEdWorkingDoc.save();
+  const pdfJsDoc = await window.pdfjsLib.getDocument({ data: bytes }).promise;
+  const page = await pdfJsDoc.getPage(pageIndex + 1);
+  const baseViewport = page.getViewport({ scale: 1 });
+  const pdfW = baseViewport.width, pdfH = baseViewport.height;
+  const scaleX = containerRect.width / pdfW;
+  const scaleY = containerRect.height / pdfH;
+  const textContent = await page.getTextContent();
+
+  container.innerHTML = '';
+  container.dataset.pdfW = pdfW;
+  container.dataset.pdfH = pdfH;
+  container.dataset.built = '1';
+
+  const markersDiv = document.createElement('div');
+  markersDiv.className = 'pdfed-markers';
+  markersDiv.style.cssText = 'position:absolute; inset:0; pointer-events:none;';
+  container.appendChild(markersDiv);
+
+  textContent.items.forEach((item) => {
+    if (!item.str || !item.str.trim()) return;
+    const tx = window.pdfjsLib.Util.transform(baseViewport.transform, item.transform);
+    const fontHeightPdf = Math.hypot(tx[2], tx[3]);
+    const angle = Math.atan2(tx[1], tx[0]);
+    const span = document.createElement('span');
+    span.textContent = item.str;
+    span.style.position = 'absolute';
+    span.style.left = (tx[4] * scaleX) + 'px';
+    span.style.top = ((tx[5] - fontHeightPdf) * scaleY) + 'px';
+    span.style.fontSize = Math.max(1, fontHeightPdf * scaleY) + 'px';
+    span.style.fontFamily = 'sans-serif';
+    span.style.color = 'transparent';
+    span.style.whiteSpace = 'pre';
+    span.style.transformOrigin = '0% 0%';
+    span.style.cursor = 'text';
+    if (Math.abs(angle) > 0.01) span.style.transform = `rotate(${angle}rad)`;
+    container.appendChild(span);
+  });
+}
+
+// Converts the current browser text selection (if it's within this page's
+// text layer) into PDF-space QuadPoints + a bounding Rect, using the same
+// scaleX/scaleY relationship established when the text layer was built.
+function pdfEdSelectionToQuad(container) {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
+  const range = sel.getRangeAt(0);
+  if (!container.contains(range.commonAncestorContainer)) return null;
+  const rects = Array.from(range.getClientRects()).filter((r) => r.width > 1 && r.height > 1);
+  if (!rects.length) return null;
+
+  const containerRect = container.getBoundingClientRect();
+  const pdfW = parseFloat(container.dataset.pdfW);
+  const pdfH = parseFloat(container.dataset.pdfH);
+  const scaleX = pdfW / containerRect.width;
+  const scaleY = pdfH / containerRect.height;
+
+  let quad = [];
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  rects.forEach((r) => {
+    const x1 = (r.left - containerRect.left) * scaleX;
+    const x2 = (r.right - containerRect.left) * scaleX;
+    const yTopPdf = pdfH - (r.top - containerRect.top) * scaleY;
+    const yBotPdf = pdfH - (r.bottom - containerRect.top) * scaleY;
+    quad.push(x1, yTopPdf, x2, yTopPdf, x1, yBotPdf, x2, yBotPdf);
+    minX = Math.min(minX, x1); maxX = Math.max(maxX, x2);
+    minY = Math.min(minY, yBotPdf); maxY = Math.max(maxY, yTopPdf);
+  });
+  return { quad, rect: [minX, minY, maxX, maxY], text: range.toString() };
+}
+
+let pdfEdSelectionDebounce = null;
+function pdfEdOnSelectionChange() {
+  clearTimeout(pdfEdSelectionDebounce);
+  pdfEdSelectionDebounce = setTimeout(() => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return;
+    const container = Array.from(document.querySelectorAll('.pdfed-textlayer')).find((c) => c.contains(sel.anchorNode));
+    if (!container) return;
+    const result = pdfEdSelectionToQuad(container);
+    if (!result) return;
+    const pageIndex = parseInt(container.dataset.pageindex, 10);
+    pdfEdShowNewCommentSheet(pageIndex, result);
+  }, 400);
+}
+
+function pdfEdShowNewCommentSheet(pageIndex, selectionResult) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Add comment</h2>
+        <p class="muted" style="margin-top:4px;">On: "${escapeHtml(selectionResult.text.slice(0, 80))}${selectionResult.text.length > 80 ? '…' : ''}"</p>
+        <textarea id="pdfed-comment-text" rows="4" style="width:100%; margin-top:12px; padding:10px; border:1.5px solid var(--line); border-radius:8px; font-size:16px;" placeholder="Your comment"></textarea>
+        <button class="btn btn-primary btn-block" id="btn-save-comment" style="margin-top:14px;">Add Comment</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel-comment" style="margin-top:8px;">Cancel</button>
+      </div>
+    </div>
+  `);
+  document.body.appendChild(sheet);
+  sheet.querySelector('#btn-cancel-comment').addEventListener('click', () => {
+    window.getSelection().removeAllRanges();
+    sheet.remove();
+  });
+  sheet.querySelector('#btn-save-comment').addEventListener('click', () => {
+    const text = sheet.querySelector('#pdfed-comment-text').value.trim();
+    if (!text) { toast('Enter a comment first'); return; }
+    const page = pdfEdWorkingDoc.getPage(pageIndex);
+    pdfEdCreateComment(pdfEdWorkingDoc, page, {
+      quadPointsPerRect: selectionResult.quad,
+      rect: selectionResult.rect,
+      contents: text,
+      author: 'Inspector',
+      colorRgb: [1, 0.85, 0.2]
+    });
+    window.getSelection().removeAllRanges();
+    sheet.remove();
+    pdfEdRenderCommentMarkers(pageIndex);
+  });
+}
+
+// Draws existing comments as tappable semi-transparent overlays, converting
+// each Highlight's stored QuadPoints back into CSS pixels using the same
+// scale relationship as the text layer itself.
+// Reads a numeric value out of whatever pdf-lib actually returns for a
+// PDFNumber — tried defensively across a few plausible accessor shapes since
+// this specific detail couldn't be execute-verified against the real library.
+function pdfEdNum(x) {
+  if (typeof x === 'number') return x;
+  if (x && typeof x.asNumber === 'function') return x.asNumber();
+  if (x && typeof x.value === 'number') return x.value;
+  if (window.PDFLib && typeof window.PDFLib.asNumber === 'function') return window.PDFLib.asNumber(x);
+  return NaN;
+}
+
+function pdfEdRenderCommentMarkers(pageIndex) {
+  const container = document.querySelector(`.pdfed-textlayer[data-pageindex="${pageIndex}"]`);
+  if (!container || !container.dataset.built) return;
+  const markersDiv = container.querySelector('.pdfed-markers');
+  if (!markersDiv) return;
+  markersDiv.innerHTML = '';
+
+  const containerRect = container.getBoundingClientRect();
+  const pdfW = parseFloat(container.dataset.pdfW);
+  const pdfH = parseFloat(container.dataset.pdfH);
+  const scaleX = containerRect.width / pdfW;
+  const scaleY = containerRect.height / pdfH;
+
+  const page = pdfEdWorkingDoc.getPage(pageIndex);
+  const comments = pdfEdListComments(pdfEdWorkingDoc, page);
+  comments.forEach((c) => {
+    const rectArr = c.dict.get(PDFLib.PDFName.of('Rect'));
+    if (!rectArr) return;
+    const [x1, y1, x2, y2] = [0, 1, 2, 3].map((i) => pdfEdNum(rectArr.get(i)));
+    const marker = document.createElement('div');
+    marker.style.cssText = `position:absolute; left:${x1 * scaleX}px; top:${(pdfH - y2) * scaleY}px; width:${(x2 - x1) * scaleX}px; height:${(y2 - y1) * scaleY}px; background:rgba(255,217,51,0.4); border-bottom:2px solid rgba(200,150,0,0.8); pointer-events:auto; cursor:pointer;`;
+    marker.addEventListener('click', (e) => {
+      e.stopPropagation();
+      pdfEdShowThreadSheet(pageIndex, c.ref);
+    });
+    markersDiv.appendChild(marker);
+  });
+}
+
+function pdfEdShowThreadSheet(pageIndex, highlightRef) {
+  const page = pdfEdWorkingDoc.getPage(pageIndex);
+  const comments = pdfEdListComments(pdfEdWorkingDoc, page);
+  const thread = comments.find((c) => c.ref.toString() === highlightRef.toString());
+  if (!thread) return;
+
+  const renderEntry = (dict, isReply) => {
+    const author = dict.get(PDFLib.PDFName.of('T'));
+    const contents = dict.get(PDFLib.PDFName.of('Contents'));
+    return `
+      <div style="padding:10px 0; border-bottom:1px solid var(--line); ${isReply ? 'margin-left:20px;' : ''}">
+        <div style="font-weight:600; font-size:13px;">${escapeHtml(author ? author.decodeText() : 'Unknown')}</div>
+        <div style="margin-top:2px;">${escapeHtml(contents ? contents.decodeText() : '')}</div>
+      </div>
+    `;
+  };
+
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Comment thread</h2>
+        <div id="pdfed-thread-list" style="max-height:40vh; overflow-y:auto; margin-top:8px;">
+          ${renderEntry(thread.dict, false)}
+          ${thread.replies.map((r) => renderEntry(r.dict, true)).join('')}
+        </div>
+        <textarea id="pdfed-reply-text" rows="2" style="width:100%; margin-top:12px; padding:10px; border:1.5px solid var(--line); border-radius:8px; font-size:16px;" placeholder="Reply"></textarea>
+        <button class="btn btn-secondary btn-block" id="btn-reply-comment" style="margin-top:10px;">Reply</button>
+        <button class="btn btn-ghost btn-block" id="btn-delete-comment" style="margin-top:8px; color:#c81e1e;">Delete comment${thread.replies.length ? ' and all replies' : ''}</button>
+        <button class="btn btn-ghost btn-block" id="btn-close-thread" style="margin-top:8px;">Close</button>
+      </div>
+    </div>
+  `);
+  document.body.appendChild(sheet);
+  sheet.querySelector('#btn-close-thread').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-reply-comment').addEventListener('click', () => {
+    const text = sheet.querySelector('#pdfed-reply-text').value.trim();
+    if (!text) { toast('Enter a reply first'); return; }
+    const lastRef = thread.replies.length ? thread.replies[thread.replies.length - 1].ref : thread.ref;
+    pdfEdCreateReply(pdfEdWorkingDoc, page, lastRef, { contents: text, author: 'Inspector' });
+    sheet.remove();
+    pdfEdRenderCommentMarkers(pageIndex);
+  });
+  sheet.querySelector('#btn-delete-comment').addEventListener('click', () => {
+    if (!confirm('Delete this comment' + (thread.replies.length ? ' and all its replies' : '') + '?')) return;
+    pdfEdDeleteCommentCascade(pdfEdWorkingDoc, page, thread.ref);
+    sheet.remove();
+    pdfEdRenderCommentMarkers(pageIndex);
+  });
+}
+
 async function pdfEdRotateSelection(delta) {
+
   const targets = pdfEdActiveTargets();
   if (!targets.length) { toast('Select a page first'); return; }
   for (const id of targets) {

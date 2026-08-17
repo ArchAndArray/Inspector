@@ -15,6 +15,30 @@ const PRIORITY_COLORS_RGB = {
   Monitor: [30, 125, 200]
 };
 
+// Resizes and recompresses an image blob for embedding — shared by the PDF Editor's
+// sketch-flatten (new page images) and existing-PDF image recompression, both of which need
+// the same "don't embed more resolution than will ever be seen" logic. Camera photos are
+// typically 3000-4000px+ wide; once a page/photo has a sensible display size, resolution
+// beyond that is pure invisible file-size waste that compounds directly with photo count.
+async function resizeAndCompressImage(blob, maxDim = 1800, quality = 0.78) {
+  const bitmap = await createImageBitmap(blob);
+  let { width, height } = bitmap;
+  if (Math.max(width, height) > maxDim) {
+    const scale = maxDim / Math.max(width, height);
+    width = Math.round(width * scale);
+    height = Math.round(height * scale);
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0, width, height);
+  if (bitmap.close) bitmap.close();
+  return new Promise((resolve) => {
+    canvas.toBlob((b) => resolve(b), 'image/jpeg', quality);
+  });
+}
+
 // CURRENCY_SYMBOLS is defined once, in app.js (which loads before this file) — declaring
 // it again here as well was a real bug: two top-level `const` bindings with the same name
 // sharing the same global scope is a SyntaxError in Safari, and it silently prevented this
@@ -635,9 +659,14 @@ async function buildAndSaveInspectionPDF(inspectionId) {
     y += approxLines.length * 11 + 10;
   }
 
-  // Element summary table (grouped by section)
-  y += 20;
-  y = drawElementSummaryTableForGroups(doc, groups, y, { margin, contentW, pageH });
+  // Element summary table (grouped by section) — skipped entirely if extent/severity
+  // isn't used anywhere in this inspection, since "Worst Sev." and "Worst Ext." would
+  // just show "—" for every row, making the table uninformative rather than useful.
+  const anySeverityOrExtent = groups.some((g) => g.elementData.some((ed) => ed.findings.some((f) => f.severity || f.extent)));
+  if (anySeverityOrExtent) {
+    y += 20;
+    y = drawElementSummaryTableForGroups(doc, groups, y, { margin, contentW, pageH });
+  }
 
   // ---------- Detailed findings, grouped by section ----------
   let isFirstGroup = true;

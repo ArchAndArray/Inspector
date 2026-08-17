@@ -459,6 +459,7 @@ button {
 }
 .pdfed-btn:active { background: #f0f0f2; }
 .pdfed-btn.pdfed-btn-danger { color: #c81e1e; border-color: #f0c8c8; }
+.pdfed-btn.pdfed-btn-active { background: var(--ink); color: #fff; border-color: var(--ink); }
 
 @media (min-width: 700px) {
   .content { padding-top: 24px; }

@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '4.2';
+const APP_VERSION = '4.5';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -77,6 +77,15 @@ function el(html) {
   const t = document.createElement('template');
   t.innerHTML = html.trim();
   return t.content.firstElementChild;
+}
+
+// Escapes user-entered text before inserting it into an HTML template string —
+// needed anywhere free-text content (like a PDF comment) gets rendered back
+// into innerHTML, so it can't be interpreted as markup.
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str == null ? '' : String(str);
+  return div.innerHTML;
 }
 
 // ---------- Shared location field (GPS / grid reference / map) ----------
