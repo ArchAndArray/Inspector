@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '4.5';
+const APP_VERSION = '4.6';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -1793,11 +1793,19 @@ async function openReportInfoSheet(inspectionId) {
         <button class="btn btn-secondary btn-block" id="btn-conclusion" style="margin-top:10px;">📋 Conclusion &amp; Recommendations${(insp.conclusion || (insp.recommendations && insp.recommendations.length)) ? ' — added' : ''}</button>
 
         <button class="btn btn-primary btn-block" id="btn-save" style="margin-top:22px;">Save</button>
+        <button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:8px;">Delete inspection</button>
         <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
       </div>
     </div>
   `);
   presentOverlay(sheet);
+
+  sheet.querySelector('#btn-delete').addEventListener('click', async () => {
+    if (!confirm('Delete this inspection and all its sections, elements, findings, and photos? This cannot be undone.')) return;
+    await DB.deleteInspectionCascade(inspectionId);
+    sheet.remove();
+    navigate('#/');
+  });
 
   // Reads the current state of every field in this sheet and persists it — used both by
   // the Save button and before navigating to the Introduction/Conclusion sub-sheets, so
