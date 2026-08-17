@@ -460,6 +460,10 @@ button {
 .pdfed-btn:active { background: #f0f0f2; }
 .pdfed-btn.pdfed-btn-danger { color: #c81e1e; border-color: #f0c8c8; }
 .pdfed-btn.pdfed-btn-active { background: var(--ink); color: #fff; border-color: var(--ink); }
+/* Annotator save buttons restyled to the new theme's red (see Phase 6 of the UI rebuild) —
+   scoped by ID since --red/--ink are global and changing them would cascade across every
+   still-unmigrated legacy screen. */
+#btn-save:active { background: oklch(0.47 0.19 27) !important; }
 
 @media (min-width: 700px) {
   .content { padding-top: 24px; }

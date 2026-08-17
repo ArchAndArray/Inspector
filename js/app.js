@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '5.1';
+const APP_VERSION = '6.0';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -484,8 +484,8 @@ function openSketchTitlePrompt(onConfirm) {
         <div class="sheet-handle"></div>
         <h2>Name this sketch</h2>
         <div class="field"><label>Title</label><input type="text" id="f-sketch-title" placeholder="Untitled Sketch"></div>
-        <button class="btn btn-primary btn-block" id="btn-start-sketch">Start sketch</button>
-        <button class="btn btn-ghost btn-block" id="btn-cancel-sketch">Cancel</button>
+        <button class="btn btn-primary btn-block" id="btn-start-sketch" style="background:oklch(0.56 0.19 27);">Start sketch</button>
+        <button class="btn btn-ghost btn-block" id="btn-cancel-sketch" style="color:oklch(0.56 0.19 27);">Cancel</button>
       </div>
     </div>
   `);
@@ -2196,7 +2196,7 @@ function openConclusionSheet(inspectionId) {
 }
 
 // ---------- ADD SECTION ----------
-function openAddSectionSheet(inspectionId) {
+function openAddSectionSheet(inspectionId, onDone) {
   const sheet = el(`
     <div class="sheet-backdrop">
       <div class="sheet">
@@ -2218,7 +2218,8 @@ function openAddSectionSheet(inspectionId) {
     const existing = await DB.listSections(inspectionId);
     const sec = await DB.createSection(inspectionId, { name, comments: sheet.querySelector('#f-comments').value.trim(), order: existing.length });
     sheet.remove();
-    navigate(`#/inspection/${inspectionId}/section/${sec.id}`);
+    if (onDone) onDone(sec);
+    else navigate(`#/inspection/${inspectionId}/section/${sec.id}`);
   });
 }
 
@@ -2555,7 +2556,8 @@ async function renderElement(inspectionId, elementId) {
   appEl.querySelectorAll('.list-item[data-id]').forEach((row) => row.addEventListener('click', () => openFindingEditor(inspectionId, elementId, row.dataset.id)));
 }
 
-async function openEditElementSheet(inspectionId, elmt, backHash) {
+async function openEditElementSheet(inspectionId, elmt, backHash, opts = {}) {
+  const { onSaved = null, onDeleted = null } = opts;
   const insp = await DB.get('inspections', inspectionId);
   const isGiBridges = insp && insp.inspectionType === 'GI Bridges';
   const sheet = el(`
@@ -2588,13 +2590,15 @@ async function openEditElementSheet(inspectionId, elmt, backHash) {
       : { materialType: sheet.querySelector('#f-material').value.trim(), location: sheet.querySelector('#f-location').value.trim() };
     await DB.updateElement(elmt.id, { name, ...extra });
     sheet.remove();
-    renderElement(inspectionId, elmt.id);
+    if (onSaved) onSaved();
+    else renderElement(inspectionId, elmt.id);
   });
   sheet.querySelector('#btn-delete').addEventListener('click', async () => {
     if (!confirm('Delete this element and all its findings and photos?')) return;
     await DB.deleteElementCascade(elmt.id);
     sheet.remove();
-    navigate(backHash);
+    if (onDeleted) onDeleted();
+    else navigate(backHash);
   });
 }
 

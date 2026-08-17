@@ -209,8 +209,8 @@ async function openAnnotator(photoId, onDone) {
       <div class="annotate-toolbar">
         <button class="btn btn-ghost" id="btn-cancel">Cancel</button>
         <div class="spacer"></div>
-        <button class="btn btn-secondary" id="btn-save-editable" title="Saves your progress but keeps every mark individually editable if you come back to it">Save (editable)</button>
-        <button class="btn btn-primary" id="btn-save" style="margin-left:8px;" title="Permanently merges the marks into the image">Flatten &amp; save</button>
+        <button class="btn btn-secondary" id="btn-save-editable" title="Saves your progress but keeps every mark individually editable if you come back to it" style="border-color:oklch(0.91 0.004 90); color:oklch(0.22 0.012 260);">Save (editable)</button>
+        <button class="btn btn-primary" id="btn-save" style="margin-left:8px; background:oklch(0.56 0.19 27);" title="Permanently merges the marks into the image">Flatten &amp; save</button>
       </div>
     </div>
   `);
