@@ -144,7 +144,7 @@ const DB = {
       locationMapMode: data.locationMapMode || 'auto', // 'auto' (generated) | 'custom' (uploaded) | 'off'
       locationMapScale: data.locationMapScale || 2500,
       includeCoverPage: data.includeCoverPage != null ? !!data.includeCoverPage : true,
-      reportStyle: data.reportStyle === 'new' ? 'new' : 'old', // set once at creation, not changed later
+      reportStyle: data.reportStyle === 'new' ? 'new' : 'old', // set at creation; can later change via convertInspectionToNewStyle
       includeRiskAssessmentAppendix: !!data.includeRiskAssessmentAppendix,
       introduction: data.introduction || '',
       summary: data.summary || '',
@@ -200,6 +200,56 @@ const DB = {
     const inspPhotos = await this.getAllByIndex('photos', 'inspectionId', id);
     for (const p of inspPhotos) await this.delete('photos', p.id);
     await this.delete('inspections', id);
+  },
+
+  // One-time, deliberate migration from Old Style to New Style — never happened
+  // automatically before this, since reportStyle was previously a permanent,
+  // creation-time-only choice. Doesn't touch elements/findings/photos at all
+  // (already shared between both styles) — only auto-generates an equivalent
+  // reportSections scaffold from Old Style's fixed fields, then flips the flag.
+  async convertInspectionToNewStyle(inspectionId) {
+    const insp = await this.get('inspections', inspectionId);
+    if (!insp || insp.reportStyle === 'new') return insp;
+
+    if (insp.introduction) {
+      const s = await this.addReportSection(inspectionId, 'text', 'Introduction');
+      await this.updateReportSection(s.id, { textHtml: insp.introduction });
+    }
+    if (insp.summary) {
+      const s = await this.addReportSection(inspectionId, 'text', 'Summary');
+      await this.updateReportSection(s.id, { textHtml: insp.summary });
+    }
+    await this.addReportSection(inspectionId, 'locationMap', '');
+    await this.addReportSection(inspectionId, 'inspectionDetails', '');
+
+    // Old Style's existing sections become nested Structure Sections under one
+    // new Inspection Findings entry, preserving their current grouping exactly.
+    const findingsSection = await this.addReportSection(inspectionId, 'inspection', '');
+    const sections = await this.listSections(inspectionId);
+    for (const sec of sections) {
+      await this.updateSection(sec.id, { reportSectionId: findingsSection.id });
+    }
+
+    await this.addReportSection(inspectionId, 'elementSummary', '');
+
+    if (insp.conclusion || (insp.recommendations && insp.recommendations.length)) {
+      let html = insp.conclusion || '';
+      if (insp.recommendations && insp.recommendations.length) {
+        html += '<p><strong>Recommendations</strong></p><ul>' +
+          insp.recommendations.map((r) => `<li>${esc(r)}</li>`).join('') + '</ul>';
+      }
+      const s = await this.addReportSection(inspectionId, 'text', 'Conclusion & Recommendations');
+      await this.updateReportSection(s.id, { textHtml: html });
+    }
+
+    await this.addReportSection(inspectionId, 'drawing', 'Drawings');
+    const apx = await this.addReportSection(inspectionId, 'appendices', 'Appendices');
+    if (insp.includeRiskAssessmentAppendix) {
+      await this.updateReportSection(apx.id, { includeRiskAssessment: true });
+    }
+
+    await this.updateInspection(inspectionId, { reportStyle: 'new' });
+    return await this.get('inspections', inspectionId);
   },
   async listInspections() {
     const all = await this.getAll('inspections');

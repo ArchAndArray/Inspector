@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '4.6';
+const APP_VERSION = '5.1';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -363,7 +363,8 @@ async function route() {
   clearObjectUrls();
   const p = parseHash();
   try {
-    if (p.length === 0) await renderHome();
+    if (p.length === 0) await renderLauncher();
+    else if (p[0] === 'inspector') await renderInspectorShell();
     else if (p[0] === 'inspection' && p[1] && p[2] === 'section' && p[3]) await renderSection(p[1], p[3]);
     else if (p[0] === 'inspection' && p[1] && p[2] === 'element' && p[3]) await renderElement(p[1], p[3]);
     else if (p[0] === 'inspection' && p[1] && p[2] === 'risk-assessment') await renderRiskAssessment(p[1]);
@@ -381,7 +382,7 @@ async function route() {
     else if (p[0] === 'templates') await renderTemplates();
     else if (p[0] === 'scale-annotate') await renderScaleAnnotate();
     else if (p[0] === 'pdf-editor') await renderPdfEditor();
-    else await renderHome();
+    else await renderLauncher();
   } catch (err) {
     console.error(err);
     appEl.innerHTML = `<div class="center-note">Something went wrong loading this screen.<br>${esc(err.message)}</div>`;
@@ -654,7 +655,7 @@ async function renderHome() {
   });
 }
 
-function openNewInspectionSheet() {
+function openNewInspectionSheet(onCreated) {
   const sheet = el(`
     <div class="sheet-backdrop">
       <div class="sheet">
@@ -737,7 +738,8 @@ function openNewInspectionSheet() {
       if (templateId) await DB.applyReportTemplate(insp.id, templateId);
     }
     sheet.remove();
-    navigate(`#/inspection/${insp.id}`);
+    if (onCreated) onCreated(insp);
+    else navigate(`#/inspection/${insp.id}`);
   });
 }
 
