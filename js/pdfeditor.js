@@ -190,6 +190,7 @@ function renderPdfEdBody() {
       <div id="pdfed-preview-wrap" style="flex:1; min-width:0; overflow:auto; background:#c8c8cd; touch-action:pan-y;">
         <div id="pdfed-preview-stack" style="padding:20px; display:flex; flex-direction:column; align-items:center; gap:20px;"></div>
       </div>
+      <div id="pdfed-comment-panel" style="display:none; flex-shrink:0; border-left:1px solid var(--line); background:#fff;"></div>
     </div>
     <div class="annotate-toolbar" style="background:var(--paper); color:var(--ink); border-top:1px solid var(--line); flex-shrink:0;">
       <button class="btn btn-ghost" id="btn-pdfed-close">Close document</button>
@@ -202,6 +203,7 @@ function renderPdfEdBody() {
   pdfEdRenderPreview();
   pdfEdWirePreviewZoom();
   pdfEdWireToolbar();
+  pdfEdRenderCommentPanel();
 }
 
 function pdfEdRenderSidebar() {
@@ -898,6 +900,7 @@ function pdfEdShowNewCommentSheet(pageIndex, selectionResult) {
     window.getSelection().removeAllRanges();
     sheet.remove();
     pdfEdRenderCommentMarkers(pageIndex);
+    pdfEdRenderCommentPanel();
   });
 }
 
@@ -941,6 +944,19 @@ function pdfEdRenderCommentMarkers(pageIndex) {
       pdfEdShowThreadSheet(pageIndex, c.ref);
     });
     markersDiv.appendChild(marker);
+
+    // Small comment icon, an additional/alternative click target beyond the highlight
+    // itself — positioned just above the highlight's top-right corner.
+    const icon = document.createElement('div');
+    const iconSize = Math.max(16, Math.min(24, (y2 - y1) * scaleY * 0.8));
+    icon.style.cssText = `position:absolute; left:${x2 * scaleX - iconSize / 2}px; top:${(pdfH - y2) * scaleY - iconSize / 2}px; width:${iconSize}px; height:${iconSize}px; border-radius:50%; background:#c81e1e; color:#fff; display:flex; align-items:center; justify-content:center; font-size:${iconSize * 0.6}px; pointer-events:auto; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,0.3); z-index:1;`;
+    icon.textContent = '💬';
+    icon.title = 'View comment';
+    icon.addEventListener('click', (e) => {
+      e.stopPropagation();
+      pdfEdShowThreadSheet(pageIndex, c.ref);
+    });
+    markersDiv.appendChild(icon);
   });
 }
 
@@ -986,12 +1002,14 @@ function pdfEdShowThreadSheet(pageIndex, highlightRef) {
     pdfEdCreateReply(pdfEdWorkingDoc, page, lastRef, { contents: text, author: 'Inspector' });
     sheet.remove();
     pdfEdRenderCommentMarkers(pageIndex);
+    pdfEdRenderCommentPanel();
   });
   sheet.querySelector('#btn-delete-comment').addEventListener('click', () => {
     if (!confirm('Delete this comment' + (thread.replies.length ? ' and all its replies' : '') + '?')) return;
     pdfEdDeleteCommentCascade(pdfEdWorkingDoc, page, thread.ref);
     sheet.remove();
     pdfEdRenderCommentMarkers(pageIndex);
+    pdfEdRenderCommentPanel();
   });
 }
 
@@ -1150,4 +1168,105 @@ function pdfEdMergeSecondFile(mode) {
     }
   };
   input.click();
+}
+
+// ============================================================================
+// Comment preview panel — a collapsible right-side list of every comment in
+// the document, only shown when comments actually exist. Selecting one
+// scrolls the main preview to it. Collapses into a vertical-text ribbon.
+// ============================================================================
+
+let pdfEdCommentPanelCollapsed = false;
+
+function pdfEdListAllComments() {
+  if (!pdfEdWorkingDoc) return [];
+  const pages = pdfEdWorkingDoc.getPages();
+  let all = [];
+  pages.forEach((page, i) => {
+    const comments = pdfEdListComments(pdfEdWorkingDoc, page);
+    comments.forEach((c) => all.push({ ...c, pageIndex: i }));
+  });
+  return all;
+}
+
+function pdfEdRenderCommentPanel() {
+  const panel = document.getElementById('pdfed-comment-panel');
+  if (!panel) return;
+  const allComments = pdfEdListAllComments();
+  if (!allComments.length) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = 'block';
+
+  if (pdfEdCommentPanelCollapsed) {
+    panel.style.width = '36px';
+    panel.innerHTML = `
+      <div id="pdfed-comment-ribbon" style="height:100%; display:flex; align-items:center; justify-content:center; cursor:pointer; padding:10px 0;">
+        <div style="writing-mode:vertical-rl; transform:rotate(180deg); font-size:12px; font-weight:650; color:var(--ink); letter-spacing:0.5px; white-space:nowrap;">◀ Comment Preview Window</div>
+      </div>
+    `;
+    document.getElementById('pdfed-comment-ribbon').addEventListener('click', () => {
+      pdfEdCommentPanelCollapsed = false;
+      pdfEdRenderCommentPanel();
+    });
+    return;
+  }
+
+  panel.style.width = '240px';
+  panel.innerHTML = `
+    <div style="padding:10px 12px; border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between;">
+      <div style="font-size:13px; font-weight:650;">Comments</div>
+      <button id="pdfed-comment-collapse" style="background:none; border:none; font-size:16px; color:var(--muted); padding:2px 4px;" title="Collapse">▶</button>
+    </div>
+    <div id="pdfed-comment-list" style="overflow-y:auto; padding:8px; height:calc(100% - 41px);"></div>
+  `;
+  document.getElementById('pdfed-comment-collapse').addEventListener('click', () => {
+    pdfEdCommentPanelCollapsed = true;
+    pdfEdRenderCommentPanel();
+  });
+
+  const list = document.getElementById('pdfed-comment-list');
+  list.innerHTML = allComments.map((c) => {
+    const contents = c.dict.get(PDFLib.PDFName.of('Contents'));
+    const text = contents ? contents.decodeText() : '';
+    return `
+      <div class="pdfed-comment-item" data-page="${c.pageIndex}" data-ref="${c.ref.toString()}" style="background:#f7f7f8; border-radius:8px; padding:9px 10px; margin-bottom:6px; cursor:pointer;">
+        <div style="font-size:11px; color:var(--muted); font-weight:600; margin-bottom:3px;">Page ${c.pageIndex + 1}${c.replies.length ? ` · ${c.replies.length} repl${c.replies.length === 1 ? 'y' : 'ies'}` : ''}</div>
+        <div style="font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(text)}</div>
+      </div>
+    `;
+  }).join('');
+  list.querySelectorAll('.pdfed-comment-item').forEach((item) => {
+    item.addEventListener('click', () => pdfEdScrollToComment(Number(item.dataset.page), item.dataset.ref, allComments));
+  });
+}
+
+// Scrolls the page into view first, then nudges the scroll position toward the comment's
+// actual vertical location within that page — a best-effort refinement on top of the core
+// "scrolls to it" behavior, not pixel-perfect, since it estimates once the smooth
+// scrollIntoView above has likely settled rather than precisely detecting scroll-end.
+function pdfEdScrollToComment(pageIndex, refStr, allComments) {
+  const comment = allComments.find((c) => c.pageIndex === pageIndex && c.ref.toString() === refStr);
+  const pageDesc = pdfEdPages[pageIndex];
+  if (!pageDesc) return;
+  const pageEl = document.getElementById(`pdfed-page-${pageDesc.id}`);
+  if (!pageEl) return;
+  pageEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (!comment) return;
+
+  const rectArr = comment.dict.get(PDFLib.PDFName.of('Rect'));
+  if (!rectArr) return;
+  const y2 = pdfEdNum(rectArr.get(3));
+  const pdfPage = pdfEdWorkingDoc.getPage(pageIndex);
+  const pdfH = pdfPage.getHeight();
+  const fracFromTop = 1 - (y2 / pdfH);
+
+  setTimeout(() => {
+    const wrap = document.getElementById('pdfed-preview-wrap');
+    const pageRect = pageEl.getBoundingClientRect();
+    const wrapRect = wrap.getBoundingClientRect();
+    const offsetWithinPage = fracFromTop * pageRect.height;
+    wrap.scrollTop += (pageRect.top - wrapRect.top) + offsetWithinPage - 80;
+  }, 350);
 }

@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '6.2';
+const APP_VERSION = '6.5';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {

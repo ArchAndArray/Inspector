@@ -90,6 +90,8 @@ async function openAnnotator(photoId, onDone) {
             <button class="tool-btn tool-btn-text" id="btn-crop" title="Crop">Crop</button>
             <button class="tool-btn tool-btn-text" id="btn-calibrate" title="Calibrate">Calibrate</button>
             <button class="tool-btn tool-btn-text" id="btn-grid" title="Grid">Grid</button>
+            <button class="tool-btn tool-btn-text" id="btn-layer-toggle" title="Switch between the Drawing and Annotation layers">Layer: Drawing</button>
+            <button class="tool-btn tool-btn-text" id="btn-insert-photo" title="Insert a photo, positioned against this one">Insert Photo</button>
           </div>
           <div class="atb-mid" id="color-row-fixed">
             ${ANNOTATE_COLORS.map((c, i) => `<div class="color-dot ${i === 0 ? 'active' : ''}" data-color="${c}" style="background:${c};"></div>`).join('')}
@@ -182,6 +184,7 @@ async function openAnnotator(photoId, onDone) {
         <div id="canvas-stack" style="position:relative;">
           <canvas id="photo-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%;"></canvas>
           <canvas id="mark-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%; position:absolute; top:0; left:0;"></canvas>
+          <canvas id="annotation-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%; position:absolute; top:0; left:0;"></canvas>
           <canvas id="preview-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%; position:absolute; top:0; left:0; pointer-events:none;"></canvas>
           <div id="grid-visual" style="display:none; position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:2;"></div>
           <svg id="cal-line-svg" width="100%" height="100%" viewBox="0 0 ${cw} ${ch}" style="display:none; position:absolute; top:0; left:0; pointer-events:none; z-index:5;" preserveAspectRatio="none">
@@ -218,6 +221,7 @@ async function openAnnotator(photoId, onDone) {
 
   const photoCanvas = view.querySelector('#photo-canvas');
   const markCanvas = view.querySelector('#mark-canvas');
+  const annotationCanvas = view.querySelector('#annotation-canvas');
   const previewCanvas = view.querySelector('#preview-canvas');
   const previewCtx = previewCanvas.getContext('2d');
   const rulerVisual = view.querySelector('#ruler-visual');
@@ -225,8 +229,193 @@ async function openAnnotator(photoId, onDone) {
   const gridVisual = view.querySelector('#grid-visual');
   const stackEl = view.querySelector('#canvas-stack');
   markCanvas.style.touchAction = 'none';
+  annotationCanvas.style.touchAction = 'none';
   const photoCtx = photoCanvas.getContext('2d');
   const ctx = markCanvas.getContext('2d');
+  const annotationCtx = annotationCanvas.getContext('2d');
+
+  // ============================================================================
+  // Annotation layer: Text and Measure objects live here as persistent, editable
+  // data (position, content, endpoints) rather than baked pixels — unlike every
+  // other tool, which still commits straight to the Drawing layer (mark-canvas)
+  // exactly as before. Always renders on top of the Drawing layer. Reuses the
+  // exact same drawTextBoxOn/drawMeasureArrowOn functions used for fresh
+  // placement, so a re-rendered object looks pixel-identical to how it always
+  // has — this isn't a new rendering system, just a new place these two
+  // specific tools' output lives and gets redrawn from.
+  // ============================================================================
+  let annotationObjects = (photo.annotationObjects || []).map((o) => ({ ...o }));
+  let annotationLayerActive = false;
+  let adjustEditingObjectId = null; // set when adjust-mode is editing an existing object rather than placing a new one
+
+  async function renderAnnotationLayer() {
+    annotationCtx.clearRect(0, 0, cw, ch);
+    for (const obj of annotationObjects) {
+      if (adjustEditingObjectId === obj.id) continue; // being actively edited — drawn on the preview layer instead, not here
+      if (obj.kind === 'text') {
+        drawTextBoxOn(annotationCtx, obj.x, obj.y, obj.text, { bold: obj.bold, underline: obj.underline, fontSize: obj.fontSize });
+        if (obj.leaderX != null) {
+          const box = { centerX: obj.x + obj._w / 2, centerY: obj.y + obj._h / 2, w: obj._w, h: obj._h };
+          drawLeaderOn(annotationCtx, box, obj.leaderX, obj.leaderY, obj.color);
+        }
+      } else if (obj.kind === 'measure') {
+        const prevColor = currentColor;
+        currentColor = obj.color;
+        drawMeasureArrowOn(annotationCtx, obj.x1, obj.y1, obj.x2, obj.y2);
+        currentColor = prevColor;
+      } else if (obj.kind === 'image') {
+        // Bitmap cached in-memory on the object itself after first load, so repositioning
+        // or resizing later doesn't re-fetch/re-decode from IndexedDB on every redraw —
+        // only ever needed once per photo session (or once per reopen).
+        if (!obj._bitmapCache) {
+          const rec = await DB.get('photos', obj.photoBlobId);
+          if (!rec) continue; // referenced photo no longer exists — skip rather than error
+          try { obj._bitmapCache = await loadBitmapCorrected(rec.originalBlob); } catch (err) { continue; }
+        }
+        annotationCtx.drawImage(obj._bitmapCache, obj.x, obj.y, obj.w, obj.h);
+      }
+    }
+  }
+
+  // Shared by both the fresh-placement leader draw (confirmPendingAdjust) and re-rendering
+  // a stored text object with a leader — factored out so both paths draw it identically.
+  function drawLeaderOn(targetCtx, box, targetX, targetY, color) {
+    const start = rectEdgeIntersection(box.centerX, box.centerY, box.w, box.h, targetX, targetY);
+    const { headSize, lineWidth } = measureArrowSizing();
+    const lineEnd = pullBackForArrowhead(start.x, start.y, targetX, targetY, headSize);
+    targetCtx.save();
+    targetCtx.strokeStyle = color;
+    targetCtx.fillStyle = color;
+    targetCtx.lineWidth = lineWidth;
+    targetCtx.beginPath();
+    targetCtx.moveTo(start.x, start.y);
+    targetCtx.lineTo(lineEnd.x, lineEnd.y);
+    targetCtx.stroke();
+    drawArrowheadOn(targetCtx, start.x, start.y, targetX, targetY, headSize);
+    targetCtx.restore();
+  }
+
+  // Hit-tests a canvas point against every annotation object, topmost (last-drawn) first.
+  // Measure uses a tolerance band around the line since it's thin; Text uses its actual box.
+  function hitTestAnnotationObjects(p) {
+    for (let i = annotationObjects.length - 1; i >= 0; i--) {
+      const obj = annotationObjects[i];
+      if (obj.kind === 'text') {
+        if (p.x >= obj.x && p.x <= obj.x + (obj._w || 0) && p.y >= obj.y && p.y <= obj.y + (obj._h || 0)) return obj;
+      } else if (obj.kind === 'measure') {
+        const tolerance = Math.max(14, measureArrowSizing().lineWidth * 3);
+        const dist = distanceToSegment(p, { x: obj.x1, y: obj.y1 }, { x: obj.x2, y: obj.y2 });
+        if (dist <= tolerance) return obj;
+      } else if (obj.kind === 'image') {
+        if (p.x >= obj.x && p.x <= obj.x + obj.w && p.y >= obj.y && p.y <= obj.y + obj.h) return obj;
+      }
+    }
+    return null;
+  }
+
+  function distanceToSegment(p, a, b) {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const lenSq = dx * dx + dy * dy;
+    let t = lenSq ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq : 0;
+    t = Math.max(0, Math.min(1, t));
+    const cx = a.x + t * dx, cy = a.y + t * dy;
+    return Math.hypot(p.x - cx, p.y - cy);
+  }
+
+  function setAnnotationLayerActive(active) {
+    annotationLayerActive = active;
+    annotationCanvas.style.pointerEvents = active ? 'auto' : 'none';
+    view.querySelector('#btn-layer-toggle').textContent = active ? 'Layer: Annotation' : 'Layer: Drawing';
+    view.querySelector('#btn-layer-toggle').classList.toggle('active', active);
+  }
+  setAnnotationLayerActive(false); // drawing layer is the default, matching every prior behavior
+
+  view.querySelector('#btn-layer-toggle').addEventListener('click', () => setAnnotationLayerActive(!annotationLayerActive));
+
+  // Inserting a photo — e.g. a defect close-up positioned against this overview photo —
+  // creates its own photos-store record (kind:'annotationImage', matching how every other
+  // image in this app is stored, rather than embedding blob data inline in the annotation
+  // object) and immediately enters image adjust-mode for the user to position/size it.
+  view.querySelector('#btn-insert-photo').addEventListener('click', () => {
+    openPhotoSourceSheet({
+      onFiles: async (files) => {
+        const normalized = await normalizeImageFile(files[0]);
+        const rec = await DB.addPhoto({ kind: 'annotationImage', inspectionId: photo.inspectionId, originalBlob: normalized });
+        const bitmap = await loadBitmapCorrected(normalized);
+        setAnnotationLayerActive(true);
+        // Default size: a modest fraction of the canvas, centered, preserving the
+        // inserted photo's own aspect ratio rather than distorting it to a fixed box.
+        const naturalW = bitmap.width || bitmap.naturalWidth;
+        const naturalH = bitmap.height || bitmap.naturalHeight;
+        const targetW = cw * 0.3;
+        const targetH = targetW * (naturalH / naturalW);
+        enterImageAdjustMode({ x: (cw - targetW) / 2, y: (ch - targetH) / 2, w: targetW, h: targetH }, bitmap, rec.id, true);
+      }
+    });
+  });
+
+  // Tapping an existing object on the annotation layer opens it for editing — the one
+  // piece of this whole feature that's genuinely new territory: re-entering adjust-mode
+  // from stored data at any time afterward, not just in the few seconds right after
+  // placement, which is what every other use of adjust-mode still assumes.
+  annotationCanvas.addEventListener('pointerdown', (e) => {
+    if (!annotationLayerActive || measureMode || textMode) return; // placing something new takes priority over editing
+    const p = canvasPoint(e);
+    const hit = hitTestAnnotationObjects(p);
+    if (!hit) return;
+    e.preventDefault();
+    openAnnotationObjectEditor(hit);
+  });
+
+  let adjustEditingObjectColor = null; // preserves an existing object's own color while it's being repositioned, rather than silently switching it to whatever color is currently selected
+
+  function openAnnotationObjectEditor(obj) {
+    const label = obj.kind === 'text' ? 'Text' : obj.kind === 'measure' ? 'Measure' : 'Photo';
+    const sheet = el(`
+      <div class="sheet-backdrop">
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <h2>${label}</h2>
+          <button class="btn btn-primary btn-block" id="btn-ao-edit">Edit</button>
+          <button class="btn btn-danger btn-block" id="btn-ao-delete" style="margin-top:10px;">Delete</button>
+          <button class="btn btn-ghost btn-block" id="btn-ao-cancel" style="margin-top:10px;">Cancel</button>
+        </div>
+      </div>
+    `);
+    presentOverlay(sheet);
+    sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+    sheet.querySelector('#btn-ao-cancel').addEventListener('click', () => sheet.remove());
+    sheet.querySelector('#btn-ao-delete').addEventListener('click', () => {
+      sheet.remove();
+      annotationObjects = annotationObjects.filter((o) => o.id !== obj.id);
+      if (obj.kind === 'image' && obj.photoBlobId) DB.delete('photos', obj.photoBlobId).catch(() => {});
+      renderAnnotationLayer();
+    });
+    sheet.querySelector('#btn-ao-edit').addEventListener('click', () => {
+      sheet.remove();
+      startEditingAnnotationObject(obj);
+    });
+  }
+
+  function startEditingAnnotationObject(obj) {
+    if (obj.kind === 'measure') {
+      adjustEditingObjectId = obj.id;
+      adjustEditingObjectColor = obj.color;
+      renderAnnotationLayer();
+      enterMeasureAdjustMode({ x: obj.x1, y: obj.y1 }, { x: obj.x2, y: obj.y2 });
+    } else if (obj.kind === 'text') {
+      openTextEntrySheet((result) => {
+        adjustEditingObjectId = obj.id;
+        adjustEditingObjectColor = obj.color;
+        renderAnnotationLayer();
+        enterTextAdjustMode({ x: obj.x, y: obj.y }, obj.leaderX != null ? { x: obj.leaderX, y: obj.leaderY } : null, result);
+      }, { text: obj.text, bold: obj.bold, underline: obj.underline, fontSize: obj.fontSize });
+    } else if (obj.kind === 'image') {
+      adjustEditingObjectId = obj.id;
+      renderAnnotationLayer();
+      enterImageAdjustMode({ x: obj.x, y: obj.y, w: obj.w, h: obj.h }, obj._bitmapCache, obj.photoBlobId, false);
+    }
+  }
 
   photoCtx.drawImage(img, 0, 0, cw, ch);
   if (img.close) img.close();
@@ -243,6 +432,7 @@ async function openAnnotator(photoId, onDone) {
       toast('Could not reload your previous marks — starting from the flattened image instead');
     }
   }
+  renderAnnotationLayer(); // paints any previously-saved Text/Measure objects immediately on open — without this, the data loads correctly but nothing appears until the next edit
 
   // ---- View transform (pinch-zoom / pan) ----
   let viewScale = 1, viewTx = 0, viewTy = 0;
@@ -1046,7 +1236,7 @@ async function openAnnotator(photoId, onDone) {
   // draggable (rather than committing to pixels immediately) until explicitly confirmed —
   // giving one more chance to nudge it into place. No auto-timeout, matching how every
   // other confirmation in this app works (deliberate, not implicit). ----
-  let adjustMode = null; // null | 'measure' | 'text' | 'arc'
+  let adjustMode = null; // null | 'measure' | 'text' | 'arc' | 'image'
   let adjustP1 = null, adjustP2 = null; // measure mode's two endpoints, also arc mode's two endpoints
   let adjustTextAnchor = null, adjustTextArrow = null, adjustTextResult = null; // text mode
   let adjustArcMid = null; // arc mode's bulge point — where the curve is dragged to pass through
@@ -1055,12 +1245,19 @@ async function openAnnotator(photoId, onDone) {
   let adjustDragBoxOffset = null;
 
   let adjustTextBoxRect = null;
+  let adjustImageRect = null; // { x, y, w, h } — image mode's current position/size while editing
+  let adjustImageBitmap = null; // cached decoded bitmap for the live preview only, not persisted
+  let adjustImagePhotoId = null; // the photos-store id backing whichever image is being placed/edited
+  let adjustImageIsNew = false; // true only for a fresh "Insert Photo" placement, not editing an existing one — used to clean up an orphaned photos-store record if the placement is cancelled
   function redrawAdjustPreview() {
     clearPreview();
     const boxArea = view.querySelector('#adjust-box-area');
     if (adjustMode === 'measure') {
       boxArea.style.display = 'none';
+      const prevColor = currentColor;
+      if (adjustEditingObjectColor) currentColor = adjustEditingObjectColor;
       drawMeasureArrowOn(previewCtx, adjustP1.x, adjustP1.y, adjustP2.x, adjustP2.y);
+      currentColor = prevColor;
       positionAdjustHandle('#adjust-handle-1', adjustP1);
       positionAdjustHandle('#adjust-handle-2', adjustP2);
       positionAdjustHandle('#adjust-handle-3', null);
@@ -1084,8 +1281,8 @@ async function openAnnotator(photoId, onDone) {
         const { headSize, lineWidth } = measureArrowSizing();
         const lineEnd = pullBackForArrowhead(start.x, start.y, adjustTextArrow.x, adjustTextArrow.y, headSize);
         previewCtx.save();
-        previewCtx.strokeStyle = currentColor;
-        previewCtx.fillStyle = currentColor;
+        previewCtx.strokeStyle = adjustEditingObjectColor || currentColor;
+        previewCtx.fillStyle = adjustEditingObjectColor || currentColor;
         previewCtx.lineWidth = lineWidth;
         previewCtx.beginPath();
         previewCtx.moveTo(start.x, start.y);
@@ -1100,6 +1297,16 @@ async function openAnnotator(photoId, onDone) {
         // "just a text box" with no leader at all.
         positionAdjustHandle('#adjust-handle-2', { x: box.x + box.w, y: box.y + box.h });
       }
+      positionAdjustHandle('#adjust-handle-3', null);
+    } else if (adjustMode === 'image') {
+      if (adjustImageBitmap) previewCtx.drawImage(adjustImageBitmap, adjustImageRect.x, adjustImageRect.y, adjustImageRect.w, adjustImageRect.h);
+      boxArea.style.display = 'block';
+      boxArea.style.left = (adjustImageRect.x / cw) * 100 + '%';
+      boxArea.style.top = (adjustImageRect.y / ch) * 100 + '%';
+      boxArea.style.width = (adjustImageRect.w / cw) * 100 + '%';
+      boxArea.style.height = (adjustImageRect.h / ch) * 100 + '%';
+      positionAdjustHandle('#adjust-handle-1', null);
+      positionAdjustHandle('#adjust-handle-2', { x: adjustImageRect.x + adjustImageRect.w, y: adjustImageRect.y + adjustImageRect.h });
       positionAdjustHandle('#adjust-handle-3', null);
     }
   }
@@ -1143,6 +1350,19 @@ async function openAnnotator(photoId, onDone) {
     adjustTextAnchor = null; adjustTextArrow = null; adjustTextResult = null;
     adjustArcMid = null;
     adjustDragTarget = null; adjustDragPointerId = null;
+    // Cancel (not just Done/commitAnnotationObject) also needs to clear this — otherwise
+    // a cancelled edit would leave that object permanently hidden from
+    // renderAnnotationLayer, which skips whatever adjustEditingObjectId currently points to.
+    if (adjustEditingObjectId) { adjustEditingObjectId = null; adjustEditingObjectColor = null; renderAnnotationLayer(); }
+    // A cancelled fresh "Insert Photo" placement (not editing an existing one) would
+    // otherwise leave an orphaned photos-store record behind — checked against the final
+    // annotationObjects state rather than relying on call-order, since this runs both
+    // right after a successful commit and on a plain Cancel.
+    if (adjustMode === 'image' && adjustImageIsNew) {
+      const wasCommitted = annotationObjects.some((o) => o.kind === 'image' && o.photoBlobId === adjustImagePhotoId);
+      if (!wasCommitted && adjustImagePhotoId) DB.delete('photos', adjustImagePhotoId).catch(() => {});
+    }
+    adjustImageRect = null; adjustImageBitmap = null; adjustImagePhotoId = null; adjustImageIsNew = false;
     clearPreview();
     hideMagnifier();
     view.querySelector('#main-toolbar').style.display = '';
@@ -1194,36 +1414,64 @@ async function openAnnotator(photoId, onDone) {
     redrawAdjustPreview();
   }
 
+  function enterImageAdjustMode(rect, bitmap, photoBlobId, isNew) {
+    enterAdjustModeCommon();
+    adjustMode = 'image';
+    adjustImageRect = { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
+    adjustImageBitmap = bitmap;
+    adjustImagePhotoId = photoBlobId;
+    adjustImageIsNew = !!isNew;
+    redrawAdjustPreview();
+  }
+
   // Commits whatever's currently pending in adjust mode to the real canvas — shared by the
   // Done button and by the annotator's own outer Save button, so tapping Save while an item
   // is still mid-adjustment (only ever drawn on the preview layer, not the real one) can
   // never silently lose it.
   function confirmPendingAdjust() {
     if (adjustMode === 'measure') {
-      finalizeMeasureArrow(adjustP1.x, adjustP1.y, adjustP2.x, adjustP2.y);
+      if (Math.hypot(adjustP2.x - adjustP1.x, adjustP2.y - adjustP1.y) >= 4) {
+        commitAnnotationObject({
+          kind: 'measure', id: adjustEditingObjectId || uid(),
+          x1: adjustP1.x, y1: adjustP1.y, x2: adjustP2.x, y2: adjustP2.y, color: adjustEditingObjectColor || currentColor
+        });
+      }
     } else if (adjustMode === 'arc') {
       pushUndo();
       drawArcOn(ctx, adjustP1, adjustP2, adjustArcMid);
     } else if (adjustMode === 'text') {
-      pushUndo();
-      const box = drawTextBoxOn(ctx, adjustTextAnchor.x, adjustTextAnchor.y, adjustTextResult.text, adjustTextResult);
-      if (adjustTextArrow) {
-        const start = rectEdgeIntersection(box.centerX, box.centerY, box.w, box.h, adjustTextArrow.x, adjustTextArrow.y);
-        const { headSize, lineWidth } = measureArrowSizing();
-        const lineEnd = pullBackForArrowhead(start.x, start.y, adjustTextArrow.x, adjustTextArrow.y, headSize);
-        ctx.save();
-        ctx.strokeStyle = currentColor;
-        ctx.fillStyle = currentColor;
-        ctx.lineWidth = lineWidth;
-        ctx.beginPath();
-        ctx.moveTo(start.x, start.y);
-        ctx.lineTo(lineEnd.x, lineEnd.y);
-        ctx.stroke();
-        drawArrowheadOn(ctx, start.x, start.y, adjustTextArrow.x, adjustTextArrow.y, headSize);
-        ctx.restore();
-      }
+      // Measured once on a scratch context purely to get the box's final w/h for storage
+      // (needed for hit-testing later) — the real render happens via renderAnnotationLayer.
+      const measureCtx = document.createElement('canvas').getContext('2d');
+      const box = drawTextBoxOn(measureCtx, adjustTextAnchor.x, adjustTextAnchor.y, adjustTextResult.text, adjustTextResult);
+      commitAnnotationObject({
+        kind: 'text', id: adjustEditingObjectId || uid(),
+        x: adjustTextAnchor.x, y: adjustTextAnchor.y, text: adjustTextResult.text,
+        bold: adjustTextResult.bold, underline: adjustTextResult.underline, fontSize: adjustTextResult.fontSize,
+        color: adjustEditingObjectColor || currentColor, leaderX: adjustTextArrow ? adjustTextArrow.x : null, leaderY: adjustTextArrow ? adjustTextArrow.y : null,
+        _w: box.w, _h: box.h
+      });
+    } else if (adjustMode === 'image') {
+      commitAnnotationObject({
+        kind: 'image', id: adjustEditingObjectId || uid(),
+        x: adjustImageRect.x, y: adjustImageRect.y, w: adjustImageRect.w, h: adjustImageRect.h,
+        photoBlobId: adjustImagePhotoId,
+        _bitmapCache: adjustImageBitmap // reuse the already-decoded bitmap immediately, no need to re-fetch/re-decode on the very next render
+      });
     }
     exitAdjustMode();
+  }
+
+  // Adds a new annotation object or updates an existing one (if adjustEditingObjectId is
+  // set), then re-renders the annotation layer from the updated list — the single place
+  // both the "place new" and "edit existing" paths converge, so they can't drift apart.
+  function commitAnnotationObject(obj) {
+    const idx = annotationObjects.findIndex((o) => o.id === obj.id);
+    if (idx >= 0) annotationObjects[idx] = obj;
+    else annotationObjects.push(obj);
+    adjustEditingObjectId = null;
+    adjustEditingObjectColor = null;
+    renderAnnotationLayer();
   }
 
   view.querySelector('#btn-adjust-cancel').addEventListener('click', exitAdjustMode);
@@ -1250,6 +1498,9 @@ async function openAnnotator(photoId, onDone) {
         else if (measureTarget === 'p3') adjustArcMid = p;
       } else if (adjustMode === 'text') {
         adjustTextArrow = p;
+      } else if (adjustMode === 'image' && measureTarget === 'p2') {
+        adjustImageRect.w = Math.max(20, p.x - adjustImageRect.x);
+        adjustImageRect.h = Math.max(20, p.y - adjustImageRect.y);
       }
       showMagnifier(p, e.clientX, e.clientY);
       redrawAdjustPreview();
@@ -1273,14 +1524,20 @@ async function openAnnotator(photoId, onDone) {
     adjustDragPointerId = e.pointerId;
     try { adjustBoxArea.setPointerCapture(e.pointerId); } catch (err) {}
     const p = canvasPoint(e);
-    adjustDragBoxOffset = { x: p.x - adjustTextAnchor.x, y: p.y - adjustTextAnchor.y };
+    const anchor = adjustMode === 'image' ? adjustImageRect : adjustTextAnchor;
+    adjustDragBoxOffset = { x: p.x - anchor.x, y: p.y - anchor.y };
     showMagnifier(p, e.clientX, e.clientY);
     e.preventDefault(); e.stopPropagation();
   });
   adjustBoxArea.addEventListener('pointermove', (e) => {
     if (adjustDragTarget !== 'box' || e.pointerId !== adjustDragPointerId) return;
     const p = canvasPoint(e);
-    adjustTextAnchor = { x: p.x - adjustDragBoxOffset.x, y: p.y - adjustDragBoxOffset.y };
+    if (adjustMode === 'image') {
+      adjustImageRect.x = p.x - adjustDragBoxOffset.x;
+      adjustImageRect.y = p.y - adjustDragBoxOffset.y;
+    } else {
+      adjustTextAnchor = { x: p.x - adjustDragBoxOffset.x, y: p.y - adjustDragBoxOffset.y };
+    }
     showMagnifier(p, e.clientX, e.clientY);
     redrawAdjustPreview();
     e.preventDefault(); e.stopPropagation();
@@ -1627,6 +1884,7 @@ async function openAnnotator(photoId, onDone) {
     if (measureMode) {
       deactivateOtherModes('measure');
       e.currentTarget.classList.add('active');
+      setAnnotationLayerActive(true); // per an explicit decision: starting to place a Measure auto-switches to the Annotation layer
     } else {
       e.currentTarget.classList.remove('active');
     }
@@ -1775,14 +2033,16 @@ async function openAnnotator(photoId, onDone) {
     return { x, y, w: boxW, h: boxH, centerX: x + boxW / 2, centerY: y + boxH / 2 };
   }
 
-  function openTextEntrySheet(onConfirm) {
-    let bold = textBold, underline = textUnderline, fontSize = textFontSize;
+  function openTextEntrySheet(onConfirm, initial) {
+    let bold = initial ? initial.bold : textBold;
+    let underline = initial ? initial.underline : textUnderline;
+    let fontSize = initial ? initial.fontSize : textFontSize;
     const sheet = el(`
       <div class="sheet-backdrop">
         <div class="sheet">
           <div class="sheet-handle"></div>
-          <h2>Add text</h2>
-          <div class="field"><textarea id="f-text" placeholder="Type a label…" style="min-height:140px;"></textarea></div>
+          <h2>${initial ? 'Edit text' : 'Add text'}</h2>
+          <div class="field"><textarea id="f-text" placeholder="Type a label…" style="min-height:140px;">${initial ? esc(initial.text) : ''}</textarea></div>
           <div class="field">
             <label>Formatting</label>
             <div class="severity-picker">
@@ -1793,7 +2053,7 @@ async function openAnnotator(photoId, onDone) {
             </div>
             <p class="hint" id="size-readout">Size: ${fontSize}px</p>
           </div>
-          <button class="btn btn-primary btn-block" id="btn-place">Place text</button>
+          <button class="btn btn-primary btn-block" id="btn-place">${initial ? 'Update text' : 'Place text'}</button>
           <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
         </div>
       </div>
@@ -1837,6 +2097,7 @@ async function openAnnotator(photoId, onDone) {
     if (textMode) {
       deactivateOtherModes('text');
       e.currentTarget.classList.add('active');
+      setAnnotationLayerActive(true); // per an explicit decision: starting to place Text auto-switches to the Annotation layer
     } else {
       e.currentTarget.classList.remove('active');
     }
@@ -2298,7 +2559,12 @@ async function openAnnotator(photoId, onDone) {
     view.remove();
   });
 
-  function buildMergedBlob() {
+  async function buildMergedBlob() {
+    // Explicitly waits for a fresh render rather than trusting the annotation canvas is
+    // already up to date — commitAnnotationObject's own render call isn't awaited by its
+    // callers, so without this, saving immediately after committing an object (especially
+    // an image, which loads asynchronously) could composite a stale annotation layer.
+    await renderAnnotationLayer();
     return new Promise((resolve) => {
       const mergeCanvas = document.createElement('canvas');
       mergeCanvas.width = cw;
@@ -2306,6 +2572,7 @@ async function openAnnotator(photoId, onDone) {
       const mergeCtx = mergeCanvas.getContext('2d');
       mergeCtx.drawImage(photoCanvas, 0, 0);
       mergeCtx.drawImage(markCanvas, 0, 0);
+      mergeCtx.drawImage(annotationCanvas, 0, 0); // annotation layer always composites on top, per its "always on top" requirement
       mergeCanvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.92);
     });
   }
@@ -2319,7 +2586,7 @@ async function openAnnotator(photoId, onDone) {
     markCanvas.toBlob(async (markBlob) => {
       if (!markBlob) { toast('Could not prepare the image to save — nothing was lost, please try again'); return; }
       try {
-        await DB.saveEditableAnnotation(photoId, mergedBlob, markBlob);
+        await DB.saveEditableAnnotation(photoId, mergedBlob, markBlob, annotationObjects);
       } catch (err) {
         console.error('Save failed', err);
         toast('Save failed — your edits are still here, please try again');
@@ -2340,7 +2607,7 @@ async function openAnnotator(photoId, onDone) {
       return;
     }
     try {
-      await DB.setAnnotatedBlob(photoId, blob);
+      await DB.setAnnotatedBlob(photoId, blob, annotationObjects);
     } catch (err) {
       console.error('Save failed', err);
       toast('Save failed — your edits are still here, please try again');

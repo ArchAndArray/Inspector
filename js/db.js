@@ -402,24 +402,30 @@ const DB = {
     };
     return this.put('photos', photo);
   },
-  async setAnnotatedBlob(photoId, blob) {
+  async setAnnotatedBlob(photoId, blob, annotationObjects) {
     const existing = await this.get('photos', photoId);
     if (!existing) throw new Error('Photo not found');
     existing.annotatedBlob = blob;
     // Committing a flattened save clears any previously saved editable layer — from this
     // point the marks are permanently part of the image, matching "Flatten & commit".
+    // annotationObjects (Text/Measure) is deliberately NOT cleared here — "Flatten" has
+    // always referred specifically to the Drawing layer's pixels; keeping annotation
+    // objects editable regardless of which save button was used is the entire point of
+    // that layer existing as structured data instead of pixels in the first place.
     existing.editableMarkBlob = null;
+    if (annotationObjects) existing.annotationObjects = annotationObjects;
     return this.put('photos', existing);
   },
   // "Save, keep editable" — stores the flattened result for display/export (same as
   // setAnnotatedBlob) but also keeps the raw, unflattened mark layer so a later visit to
   // the annotator can reload it and continue editing individual marks rather than starting
   // from an image with everything already baked in.
-  async saveEditableAnnotation(photoId, mergedBlob, markBlob) {
+  async saveEditableAnnotation(photoId, mergedBlob, markBlob, annotationObjects) {
     const existing = await this.get('photos', photoId);
     if (!existing) throw new Error('Photo not found');
     existing.annotatedBlob = mergedBlob;
     existing.editableMarkBlob = markBlob;
+    if (annotationObjects) existing.annotationObjects = annotationObjects;
     return this.put('photos', existing);
   },
   async listPhotosForFinding(findingId) {
