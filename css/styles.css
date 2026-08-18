@@ -33,6 +33,15 @@ input, textarea {
   user-select: text;
 }
 
+/* The PDF Editor's Comment mode text layer needs real, working text selection to let the
+   user pick what to highlight — it inherited the global user-select:none above like any
+   other non-input element, which silently made selection impossible despite everything
+   else about the text layer being correctly positioned. */
+.pdfed-textlayer, .pdfed-textlayer * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 button {
   font-family: inherit;
   cursor: pointer;
