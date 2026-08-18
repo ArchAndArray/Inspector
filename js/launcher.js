@@ -46,6 +46,18 @@ async function renderLauncher() {
             </div>
             <div style="font-size:13.5px; font-weight:650; text-align:center;">Inspector</div>
           </div>
+
+          <div class="launcher-tile" data-target="pm" style="width:132px; display:flex; flex-direction:column; align-items:center; gap:10px; cursor:pointer; padding:16px 8px;">
+            <div style="width:64px; height:64px; border-radius:16px; background:${t.red}; display:flex; align-items:center; justify-content:center;">
+              <div style="display:flex; align-items:flex-end; gap:3px; height:26px;">
+                <div style="width:5px; height:14px; border-radius:1px; background:#fff;"></div>
+                <div style="width:5px; height:22px; border-radius:1px; background:#fff;"></div>
+                <div style="width:5px; height:9px; border-radius:1px; background:#fff;"></div>
+                <div style="width:5px; height:18px; border-radius:1px; background:#fff;"></div>
+              </div>
+            </div>
+            <div style="font-size:13.5px; font-weight:650; text-align:center;">Project<br>Management</div>
+          </div>
         </div>
       </div>
 
@@ -102,6 +114,7 @@ async function renderLauncher() {
 
 async function onLauncherTileClick(target) {
   if (target === 'inspector') { navigate('#/inspector'); return; }
+  if (target === 'pm') { navigate('#/pm'); return; }
   if (target === 'scale-annotate') { navigate('#/scale-annotate'); return; }
   if (target === 'pdf-editor') { navigate('#/pdf-editor'); return; }
   if (target === 'backup') { openBackupRestoreSheet(); return; }

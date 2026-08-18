@@ -477,3 +477,26 @@ button {
 @media (min-width: 700px) {
   .content { padding-top: 24px; }
 }
+
+/* Project Management — WBS task table (Phase 1 Step 1, see roadmap.md 4.1) */
+.pm-table { width: 100%; }
+.pm-row {
+  display: flex; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line);
+  min-height: 44px; box-sizing: border-box;
+}
+.pm-row-header { font-size: 12px; font-weight: 700; letter-spacing: 0.3px; text-transform: uppercase; color: var(--ink-soft); background: var(--paper); position: sticky; top: 0; z-index: 1; }
+.pm-row:not(.pm-row-header):active { background: #f7f7f8; }
+.pm-row-selected { background: oklch(0.96 0.03 27); }
+.pm-row-summary .pm-cell-name { font-weight: 700; }
+.pm-cell { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pm-cell-wbs { width: 52px; flex-shrink: 0; color: var(--ink-soft); font-size: 12.5px; }
+.pm-cell-name { flex: 1; min-width: 0; }
+.pm-cell-dur { width: 64px; flex-shrink: 0; text-align: right; padding-right: 10px; }
+.pm-cell-date { width: 82px; flex-shrink: 0; text-align: right; padding-right: 10px; color: var(--ink-soft); }
+.pm-cell-pct { width: 56px; flex-shrink: 0; text-align: right; font-weight: 600; }
+.pm-milestone-diamond { color: var(--red); margin-right: 5px; }
+.pm-toolbar {
+  display: flex; gap: 8px; padding: 10px 16px; padding-bottom: calc(10px + var(--safe-bottom));
+  border-top: 1px solid var(--line); background: #fff; overflow-x: auto;
+}
+.pm-toolbar .btn { flex-shrink: 0; padding: 9px 14px; font-size: 13.5px; }

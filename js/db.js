@@ -2,7 +2,7 @@
 // Stores: inspections, sections, elements, findings, photos, templates
 
 const DB_NAME = 'siteInspectionDB';
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 
 let dbPromise = null;
 
@@ -74,6 +74,26 @@ function openDB() {
         const photosStore4 = tx.objectStore('photos');
         if (!photosStore4.indexNames.contains('reportSectionId')) {
           photosStore4.createIndex('reportSectionId', 'reportSectionId', { unique: false });
+        }
+      }
+
+      if (oldVersion < 6) {
+        // Project Management module: WBS task hierarchy + scheduling. Data model is the
+        // source of truth (Gantt is a view of it, built in a later pass) — matches the
+        // New Style report principle of not inventing parallel storage for a new UI.
+        if (!db.objectStoreNames.contains('pmProjects')) {
+          db.createObjectStore('pmProjects', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('pmTasks')) {
+          const ptStore = db.createObjectStore('pmTasks', { keyPath: 'id' });
+          ptStore.createIndex('projectId', 'projectId', { unique: false });
+          ptStore.createIndex('parentId', 'parentId', { unique: false });
+        }
+        if (!db.objectStoreNames.contains('pmDependencies')) {
+          const pdStore = db.createObjectStore('pmDependencies', { keyPath: 'id' });
+          pdStore.createIndex('projectId', 'projectId', { unique: false });
+          pdStore.createIndex('predecessorId', 'predecessorId', { unique: false });
+          pdStore.createIndex('successorId', 'successorId', { unique: false });
         }
       }
     };
@@ -862,6 +882,127 @@ const DB = {
       created.push(await this.createElement(inspectionId, { name: e.name, category: e.category, sectionId, order: order++ }));
     }
     return created;
+  },
+
+  // --- Project Management: Projects ---
+  async createPMProject(data) {
+    const now = new Date().toISOString();
+    const project = {
+      id: uid(),
+      name: data.name || 'Untitled Project',
+      structureRef: data.structureRef || '',
+      client: data.client || '',
+      startDate: data.startDate || now.slice(0, 10),
+      notes: data.notes || '',
+      createdAt: now,
+      updatedAt: now
+    };
+    return this.put('pmProjects', project);
+  },
+  async listPMProjects() {
+    const all = await this.getAll('pmProjects');
+    return all.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+  },
+  async updatePMProject(id, patch) {
+    const existing = await this.get('pmProjects', id);
+    if (!existing) throw new Error('Project not found');
+    const updated = { ...existing, ...patch, updatedAt: new Date().toISOString() };
+    return this.put('pmProjects', updated);
+  },
+  async deletePMProjectCascade(id) {
+    const tasks = await this.getAllByIndex('pmTasks', 'projectId', id);
+    for (const t of tasks) await this.delete('pmTasks', t.id);
+    const deps = await this.getAllByIndex('pmDependencies', 'projectId', id);
+    for (const d of deps) await this.delete('pmDependencies', d.id);
+    await this.delete('pmProjects', id);
+  },
+
+  // --- Project Management: Tasks (WBS hierarchy) ---
+  // parentId is null for a top-level task. `order` positions siblings under the same parent;
+  // WBS numbers (1, 1.1, 1.2 ...) are derived at render time from hierarchy + order, not stored.
+  async createPMTask(projectId, data) {
+    const now = new Date().toISOString();
+    const siblings = await this.listPMTasksByParent(projectId, data.parentId || null);
+    const task = {
+      id: uid(),
+      projectId,
+      parentId: data.parentId || null,
+      order: siblings.length,
+      name: data.name || 'New Task',
+      duration: data.duration != null ? data.duration : 1, // whole days
+      start: data.start || null,
+      finish: data.finish || null,
+      percentComplete: data.percentComplete || 0,
+      isMilestone: !!data.isMilestone,
+      notes: data.notes || '',
+      createdAt: now,
+      updatedAt: now
+    };
+    return this.put('pmTasks', task);
+  },
+  async listPMTasks(projectId) {
+    const all = await this.getAllByIndex('pmTasks', 'projectId', projectId);
+    return all.sort((a, b) => a.order - b.order);
+  },
+  async listPMTasksByParent(projectId, parentId) {
+    const all = await this.listPMTasks(projectId);
+    return all.filter((t) => (t.parentId || null) === (parentId || null));
+  },
+  async getPMTaskChildren(taskId) {
+    const all = await this.getAll('pmTasks');
+    return all.filter((t) => t.parentId === taskId).sort((a, b) => a.order - b.order);
+  },
+  async updatePMTask(id, patch) {
+    const existing = await this.get('pmTasks', id);
+    if (!existing) throw new Error('Task not found');
+    const updated = { ...existing, ...patch, updatedAt: new Date().toISOString() };
+    return this.put('pmTasks', updated);
+  },
+  async deletePMTaskCascade(id) {
+    const children = await this.getPMTaskChildren(id);
+    for (const c of children) await this.deletePMTaskCascade(c.id);
+    const deps = await this.getAll('pmDependencies');
+    for (const d of deps) {
+      if (d.predecessorId === id || d.successorId === id) await this.delete('pmDependencies', d.id);
+    }
+    await this.delete('pmTasks', id);
+  },
+  async movePMTask(id, newParentId, newOrder) {
+    const task = await this.get('pmTasks', id);
+    if (!task) throw new Error('Task not found');
+    // Prevent a task becoming its own descendant's child.
+    let check = newParentId;
+    while (check) {
+      if (check === id) throw new Error('Cannot move a task inside its own subtask');
+      const parentTask = await this.get('pmTasks', check);
+      check = parentTask ? parentTask.parentId : null;
+    }
+    return this.updatePMTask(id, { parentId: newParentId, order: newOrder });
+  },
+
+  // --- Project Management: Dependencies (FS/SS/FF/SF, stored now; auto-scheduling engine
+  // to be built in a later pass — see roadmap.md 4.1) ---
+  async createPMDependency(projectId, predecessorId, successorId, type, lagDays) {
+    const dep = {
+      id: uid(),
+      projectId,
+      predecessorId,
+      successorId,
+      type: type || 'FS',
+      lagDays: lagDays || 0,
+      createdAt: new Date().toISOString()
+    };
+    return this.put('pmDependencies', dep);
+  },
+  async listPMDependencies(projectId) {
+    return this.getAllByIndex('pmDependencies', 'projectId', projectId);
+  },
+  async listPMDependenciesForTask(taskId) {
+    const all = await this.getAll('pmDependencies');
+    return all.filter((d) => d.predecessorId === taskId || d.successorId === taskId);
+  },
+  async deletePMDependency(id) {
+    return this.delete('pmDependencies', id);
   },
 
   // --- Aggregate helpers ---
