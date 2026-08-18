@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '6.0';
+const APP_VERSION = '6.1';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -365,20 +365,7 @@ async function route() {
   try {
     if (p.length === 0) await renderLauncher();
     else if (p[0] === 'inspector') await renderInspectorShell();
-    else if (p[0] === 'inspection' && p[1] && p[2] === 'section' && p[3]) await renderSection(p[1], p[3]);
-    else if (p[0] === 'inspection' && p[1] && p[2] === 'element' && p[3]) await renderElement(p[1], p[3]);
-    else if (p[0] === 'inspection' && p[1] && p[2] === 'risk-assessment') await renderRiskAssessment(p[1]);
-    else if (p[0] === 'inspection' && p[1] && p[2] === 'drawings') await renderDrawings(p[1]);
-    else if (p[0] === 'inspection' && p[1] && p[2] === 'appendix' && p[3]) await renderAppendix(p[1], p[3]);
-    else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'drawings') await renderReportSectionDrawings(p[1], p[3]);
-    else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'text') await renderTextReportSection(p[1], p[3]);
-    else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'locationMap') await renderLocationMapReportSection(p[1], p[3]);
-    else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'inspectionDetails') await renderBasicInfoReportSection(p[1], p[3]);
-    else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'elementSummary') await renderElementSummaryReportSection(p[1], p[3]);
-    else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'inspection') await renderInspectionFindingsReportSection(p[1], p[3]);
-    else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'appendices' && p[5]) await renderReportSectionAppendix(p[1], p[3], p[5]);
-    else if (p[0] === 'inspection' && p[1] && p[2] === 'rsection' && p[3] && p[4] === 'appendices') await renderReportSectionAppendicesList(p[1], p[3]);
-    else if (p[0] === 'inspection' && p[1] && !p[2]) await renderInspection(p[1]);
+    else if (p[0] === 'inspection' && p[1]) await redirectLegacyInspectionRoute(p[1]);
     else if (p[0] === 'templates') await renderTemplates();
     else if (p[0] === 'scale-annotate') await renderScaleAnnotate();
     else if (p[0] === 'pdf-editor') await renderPdfEditor();
@@ -751,7 +738,8 @@ const REPORT_SECTION_TYPES = {
   locationMap: { label: 'Location Map', icon: '🗺️' },
   inspectionDetails: { label: 'Basic Inspection Information', icon: 'ℹ️' },
   elementSummary: { label: 'Element Summary', icon: '📊' },
-  appendices: { label: 'Appendices', icon: '📎' }
+  appendices: { label: 'Appendices', icon: '📎' },
+  recommendations: { label: 'Recommendations', icon: '✅' }
 };
 
 async function renderInspectionNewStyle(inspectionId, insp) {

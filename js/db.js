@@ -232,14 +232,13 @@ const DB = {
 
     await this.addReportSection(inspectionId, 'elementSummary', '');
 
-    if (insp.conclusion || (insp.recommendations && insp.recommendations.length)) {
-      let html = insp.conclusion || '';
-      if (insp.recommendations && insp.recommendations.length) {
-        html += '<p><strong>Recommendations</strong></p><ul>' +
-          insp.recommendations.map((r) => `<li>${esc(r)}</li>`).join('') + '</ul>';
-      }
-      const s = await this.addReportSection(inspectionId, 'text', 'Conclusion & Recommendations');
-      await this.updateReportSection(s.id, { textHtml: html });
+    if (insp.conclusion) {
+      const s = await this.addReportSection(inspectionId, 'text', 'Conclusion');
+      await this.updateReportSection(s.id, { textHtml: insp.conclusion });
+    }
+    if (insp.recommendations && insp.recommendations.length) {
+      const s = await this.addReportSection(inspectionId, 'recommendations', 'Recommendations');
+      await this.updateReportSection(s.id, { recommendations: insp.recommendations.filter(Boolean) });
     }
 
     await this.addReportSection(inspectionId, 'drawing', 'Drawings');
@@ -599,6 +598,7 @@ const DB = {
       elementSectionId: null,
       appendices: [],
       includeRiskAssessment: false,
+      recommendations: [],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -711,16 +711,20 @@ const DB = {
     }
   },
   async seedDefaultReportTemplate() {
-    const existing = await this.get('reportTemplates', 'default-template');
-    if (existing) return;
+    // Always kept in sync with the current default sequence, unlike user-saved templates —
+    // this is a system-owned definition, not something a user customized, so silently
+    // overwriting it when the default sequence changes (rather than only seeding once) is
+    // the correct behavior here.
     await this.put('reportTemplates', {
       id: 'default-template',
       name: 'Standard Report',
       sections: [
+        { type: 'inspectionDetails', title: 'Basic Inspection Data' },
+        { type: 'text', title: 'Introduction' },
         { type: 'locationMap', title: 'Location Map' },
-        { type: 'inspectionDetails', title: 'Inspection Details' },
-        { type: 'elementSummary', title: 'Element Summary' },
-        { type: 'text', title: 'Conclusion' }
+        { type: 'inspection', title: 'Inspection Findings' },
+        { type: 'text', title: 'Conclusion' },
+        { type: 'recommendations', title: 'Recommendations' }
       ],
       createdAt: new Date().toISOString()
     });

@@ -36,18 +36,33 @@ const SHELL_TOKENS = {
 
 const SHELL_TABS = [
   { id: 'overview', label: 'Overview' },
-  { id: 'elements', label: 'Elements' },
   { id: 'drawings', label: 'Drawings' },
+  { id: 'photos', label: 'Photos' },
   { id: 'risk', label: 'Risk Assessment' },
-  { id: 'appendices', label: 'Appendices' },
   { id: 'report', label: 'Report' }
 ];
 
 let shellState = {
   selectedInspectionId: null,
   activeTab: 'overview',
+  editingSectionId: null,
   searchQuery: ''
 };
+
+// Catches every legacy #/inspection/... URL (bare, or any of its old sub-routes like
+// /section/:id, /element/:id, /rsection/:id/text, etc.) that used to bypass the shell
+// entirely by calling the old render functions directly — confirmed as the actual root
+// cause of a real bug: opening an Old Style inspection this way skipped the conversion
+// prompt completely, since those old functions have zero awareness of it. Every one of
+// these URLs now goes through the shell instead, so shellSelectInspection's
+// conversion-prompt logic can never be bypassed again. Deep-linking to the exact nested
+// view (a specific element, a specific section) isn't preserved — nothing in the current
+// UI generates these deep links anymore, so this is a one-way migration off them, not a
+// feature loss for anything actually reachable today.
+async function redirectLegacyInspectionRoute(inspectionId) {
+  await renderInspectorShell();
+  await shellSelectInspection(inspectionId);
+}
 
 async function renderInspectorShell() {
   const t = SHELL_TOKENS;
@@ -58,21 +73,31 @@ async function renderInspectorShell() {
     </div>
   `;
   shellState.activeTab = 'overview';
+  shellState.editingSectionId = null;
   await renderShellSidebar();
   await renderShellMainPane();
 }
 
+// Dispatches between two entirely different sidebars: the inspection list (nothing
+// selected yet) and, once an inspection is open, that inspection's own section
+// navigation — per an explicit decision that these should not coexist as two separate
+// panels (the earlier design had the Report tab's own section list sitting awkwardly
+// next to a sidebar that was still just the flat inspection list).
 async function renderShellSidebar() {
+  if (shellState.selectedInspectionId) {
+    await renderShellSectionSidebar();
+  } else {
+    await renderShellInspectionListSidebar();
+  }
+}
+
+async function renderShellInspectionListSidebar() {
   const t = SHELL_TOKENS;
   const sidebar = document.getElementById('shell-sidebar');
   const inspections = await DB.listInspections();
   const q = shellState.searchQuery.trim().toLowerCase();
   const filtered = q ? inspections.filter((i) => (i.structureName || '').toLowerCase().includes(q)) : inspections;
 
-  // Worst severity per inspection, for the sidebar dot — a bounded two-hop query
-  // (elements indexed by inspectionId, findings indexed by elementId) per inspection.
-  // Fine for realistic list sizes; worth revisiting if very large inspection counts
-  // ever make this sluggish.
   const dots = {};
   for (const insp of filtered) {
     dots[insp.id] = await shellWorstSeverity(insp.id);
@@ -113,10 +138,8 @@ async function renderShellSidebar() {
   const searchInput = document.getElementById('shell-search');
   searchInput.addEventListener('input', (e) => {
     shellState.searchQuery = e.target.value;
-    renderShellSidebar(); // re-render sidebar only — main pane and its state are untouched
+    renderShellSidebar();
   });
-  // Restores focus + cursor position after the re-render above, since innerHTML
-  // replacement always drops focus even when the same input reappears.
   if (document.activeElement === document.body && q) {
     const el2 = document.getElementById('shell-search');
     el2.focus();
@@ -125,6 +148,60 @@ async function renderShellSidebar() {
 
   sidebar.querySelectorAll('.shell-insp-row').forEach((row) => {
     row.addEventListener('click', () => shellSelectInspection(row.dataset.id));
+  });
+}
+
+// The section-navigation sidebar for a selected inspection — Back (to inspection list),
+// Home (straight to the Launcher), + Add Section, then the reorderable section list.
+// Clicking a section here always opens its editor in the main area, regardless of which
+// top-bar tab is currently active — selecting a section takes priority; clicking a
+// top-bar tab clears it and returns to that tab's own view (see shellSwitchTab).
+async function renderShellSectionSidebar() {
+  const t = SHELL_TOKENS;
+  const sidebar = document.getElementById('shell-sidebar');
+  const insp = await DB.get('inspections', shellState.selectedInspectionId);
+  if (!insp) { shellState.selectedInspectionId = null; return renderShellSidebar(); }
+  const sections = await DB.listReportSections(insp.id);
+
+  sidebar.innerHTML = `
+    <div style="padding:14px 16px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid ${t.inkBorder};">
+      <button id="shell-sec-back" style="background:none; border:none; color:${t.mutedLight}; font-size:13px; font-weight:650;">‹ Back</button>
+      <button id="shell-sec-home" style="background:none; border:none; color:${t.mutedLight}; font-size:13px; font-weight:650;">⌂ Home</button>
+    </div>
+    <div style="padding:12px 16px;">
+      <button id="shell-sec-addsection" style="width:100%; background:${t.inkHover}; color:#fff; border:1px solid ${t.inkBorder}; border-radius:9px; padding:10px; font-size:13.5px; font-weight:650;">+ Add Section</button>
+    </div>
+    <div id="shell-sec-list" style="flex:1; min-height:0; overflow-y:auto; padding:0 12px calc(14px + var(--safe-bottom));"></div>
+  `;
+
+  document.getElementById('shell-sec-back').addEventListener('click', () => {
+    shellState.selectedInspectionId = null;
+    shellState.editingSectionId = null;
+    renderShellSidebar();
+    renderShellMainPane();
+  });
+  document.getElementById('shell-sec-home').addEventListener('click', () => navigate('#/'));
+  document.getElementById('shell-sec-addsection').addEventListener('click', shellOpenAddSectionMenu);
+
+  const listBox = document.getElementById('shell-sec-list');
+  listBox.innerHTML = sections.map((s) => {
+    const info = REPORT_SECTION_TYPES[s.type] || { label: s.type };
+    const namedTypes = ['text', 'inspection'];
+    const hasCustomTitle = namedTypes.includes(s.type);
+    const title = (hasCustomTitle && s.title) ? s.title : info.label;
+    const subtitle = hasCustomTitle ? info.label : null;
+    const active = s.id === shellState.editingSectionId;
+    return `
+      <div class="shell-rep-card" draggable="true" data-id="${s.id}" style="background:${active ? t.inkHover : 'transparent'}; border:1px solid ${active ? t.inkBorder : 'transparent'}; border-radius:9px; padding:9px 10px; margin-bottom:5px; cursor:pointer;">
+        <div style="font-size:13px; font-weight:650; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(title)}</div>
+        ${subtitle ? `<div style="font-size:10.5px; color:${t.mutedLight}; margin-top:1px;">${esc(subtitle)}</div>` : ''}
+      </div>
+    `;
+  }).join('');
+
+  listBox.querySelectorAll('.shell-rep-card').forEach((card) => {
+    card.addEventListener('click', () => shellSelectSection(card.dataset.id));
+    shellWireReportCardDrag(card, sections);
   });
 }
 
@@ -170,8 +247,17 @@ async function shellSelectInspection(id) {
   }
   shellState.selectedInspectionId = id;
   shellState.activeTab = 'overview';
+  shellState.editingSectionId = null;
   await renderShellSidebar();
   await renderShellMainPane();
+}
+
+// Selecting a section from the sidebar takes priority over whichever top-bar tab was
+// active — opens straight into that section's editor.
+function shellSelectSection(sectionId) {
+  shellState.editingSectionId = sectionId;
+  renderShellSidebar();
+  renderShellMainPane();
 }
 
 async function renderShellMainPane() {
@@ -202,7 +288,7 @@ async function renderShellMainPane() {
       </div>
       <div id="shell-tabbar" style="display:flex; gap:22px; margin-top:20px; border-bottom:1px solid ${t.line}; overflow-x:auto;">
         ${SHELL_TABS.map((tab) => `
-          <button class="shell-tab" data-tab="${tab.id}" style="background:none; border:none; padding:10px 2px 12px; font-size:14px; font-weight:650; white-space:nowrap; color:${tab.id === shellState.activeTab ? '#000' : t.muted}; border-bottom:2px solid ${tab.id === shellState.activeTab ? t.red : 'transparent'};">${tab.label}</button>
+          <button class="shell-tab" data-tab="${tab.id}" style="background:none; border:none; padding:10px 2px 12px; font-size:14px; font-weight:650; white-space:nowrap; color:${(tab.id === shellState.activeTab && !shellState.editingSectionId) ? '#000' : t.muted}; border-bottom:2px solid ${(tab.id === shellState.activeTab && !shellState.editingSectionId) ? t.red : 'transparent'};">${tab.label}</button>
         `).join('')}
       </div>
     </div>
@@ -219,14 +305,18 @@ async function renderShellMainPane() {
 }
 
 // Switches tabs by re-rendering only the tab bar's active state + the content area —
-// never remounts the sidebar or the header above it.
+// never remounts the sidebar or the header above it. Clicking a tab also clears any
+// section currently being edited, returning to that tab's own dedicated view — section
+// editing and tab browsing are two separate states, and a tab click always wins.
 function shellSwitchTab(tabId) {
   shellState.activeTab = tabId;
+  shellState.editingSectionId = null;
   document.querySelectorAll('.shell-tab').forEach((btn) => {
     const active = btn.dataset.tab === tabId;
     btn.style.color = active ? '#000' : SHELL_TOKENS.muted;
     btn.style.borderBottomColor = active ? SHELL_TOKENS.red : 'transparent';
   });
+  renderShellSidebar(); // refresh the section list's "active" highlight
   renderShellTabContent();
 }
 
@@ -234,20 +324,21 @@ function shellSwitchTab(tabId) {
 // later phases (4: Elements, 5: Drawings/Appendices, 7: Risk Assessment, 8: Report).
 async function renderShellTabContent() {
   const content = document.getElementById('shell-tab-content');
+  if (shellState.editingSectionId) {
+    const section = await DB.get('reportSections', shellState.editingSectionId);
+    if (section) { await shellRenderReportSectionEditor(content, section); return; }
+    shellState.editingSectionId = null; // stale/deleted section — fall through to the tab's own view
+  }
   if (shellState.activeTab === 'overview') {
     await shellRenderOverviewTab(content);
     return;
   }
-  if (shellState.activeTab === 'elements') {
-    await shellRenderElementsTab(content);
-    return;
-  }
   if (shellState.activeTab === 'drawings') {
-    await shellRenderDrawingsTab(content);
+    await shellRenderUnifiedDrawingsTab(content);
     return;
   }
-  if (shellState.activeTab === 'appendices') {
-    await shellRenderAppendicesTab(content);
+  if (shellState.activeTab === 'photos') {
+    await shellRenderUnifiedPhotosTab(content);
     return;
   }
   if (shellState.activeTab === 'risk') {
@@ -255,7 +346,7 @@ async function renderShellTabContent() {
     return;
   }
   if (shellState.activeTab === 'report') {
-    await shellRenderReportTab(content);
+    await shellRenderReportContinuousPreview(content);
     return;
   }
   const tab = SHELL_TABS.find((t2) => t2.id === shellState.activeTab);
@@ -268,16 +359,34 @@ async function renderShellTabContent() {
 // than separate queries per stat — same two-hop indexed path as the sidebar's severity dot.
 async function shellComputeInspectionStats(inspectionId) {
   const elements = await DB.getAllByIndex('elements', 'inspectionId', inspectionId);
-  const stats = { elementCount: elements.length, findingCount: 0, worksRequiredCount: 0, severityCounts: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } };
+  const stats = { elementCount: elements.length, findingCount: 0, worksRequiredCount: 0, severityCounts: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }, worksRequiredItems: [] };
   for (const el2 of elements) {
     const findings = await DB.getAllByIndex('findings', 'elementId', el2.id);
     stats.findingCount += findings.length;
     findings.forEach((f) => {
-      if (f.worksRequired) stats.worksRequiredCount++;
+      if (f.worksRequired) {
+        stats.worksRequiredCount++;
+        stats.worksRequiredItems.push({ elementName: el2.name, description: f.worksDescription, costEstimate: f.costEstimate });
+      }
       if (f.severity && stats.severityCounts[f.severity] != null) stats.severityCounts[f.severity]++;
     });
   }
   return stats;
+}
+
+// Sum of recommendations across every Recommendations-type section — feeds the Overview
+// tab's count, per an explicit reason: making recommendations countable at all is why
+// they became a structured list instead of staying buried in Conclusion's free text.
+async function shellCountRecommendations(inspectionId) {
+  const sections = (await DB.listReportSections(inspectionId)).filter((s) => s.type === 'recommendations');
+  return sections.reduce((sum, s) => sum + ((s.recommendations || []).filter(Boolean).length), 0);
+}
+
+// Parses a cost estimate string (may include currency symbols/commas) into a number for
+// summing — non-numeric or empty values contribute 0 rather than breaking the total.
+function shellParseCost(value) {
+  const n = parseFloat(String(value || '').replace(/[^0-9.-]/g, ''));
+  return isNaN(n) ? 0 : n;
 }
 
 async function shellRenderOverviewTab(content) {
@@ -286,6 +395,9 @@ async function shellRenderOverviewTab(content) {
   const isGiBridges = insp.inspectionType === 'GI Bridges';
   const stats = await shellComputeInspectionStats(insp.id);
   const reportSections = await DB.listReportSections(insp.id);
+  const recommendationsCount = await shellCountRecommendations(insp.id);
+  const currencySymbol = CURRENCY_SYMBOLS[insp.currency] || '$';
+  const worksTotal = stats.worksRequiredItems.reduce((sum, w) => sum + shellParseCost(w.costEstimate), 0);
 
   let bci = null;
   if (isGiBridges) {
@@ -330,15 +442,32 @@ async function shellRenderOverviewTab(content) {
             <div><div style="font-size:11px; color:${t.muted}; font-weight:700; text-transform:uppercase;">MDCI</div><div style="font-size:19px; font-weight:700;">${bci.mdci.bciAv != null ? bci.mdci.bciAv.toFixed(1) : '—'}</div></div>
           </div>
         ` : ''}
-        <div style="display:flex; gap:24px; margin-bottom:16px;">
+        <div style="display:flex; gap:24px; margin-bottom:16px; flex-wrap:wrap;">
           <div><div style="font-size:22px; font-weight:700;">${stats.elementCount}</div><div style="font-size:11.5px; color:${t.muted};">Elements</div></div>
           <div><div style="font-size:22px; font-weight:700;">${stats.findingCount}</div><div style="font-size:11.5px; color:${t.muted};">Findings</div></div>
           <div><div style="font-size:22px; font-weight:700; color:${t.red};">${stats.worksRequiredCount}</div><div style="font-size:11.5px; color:${t.muted};">Works required</div></div>
+          <div><div style="font-size:22px; font-weight:700;">${recommendationsCount}</div><div style="font-size:11.5px; color:${t.muted};">Recommendations</div></div>
         </div>
         <div style="display:flex; height:10px; border-radius:5px; overflow:hidden; background:${t.line};">${barSegments}</div>
         <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:10.5px; color:${t.muted};">
           <span>As New</span><span>Failed</span>
         </div>
+      </div>
+
+      <div style="grid-column:1 / -1; background:#fff; border:1px solid ${t.line}; border-radius:14px; padding:18px 20px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+          <div style="font-size:15px; font-weight:650;">Works Required</div>
+          ${stats.worksRequiredItems.length ? `<div style="font-size:13px; font-weight:700; color:${t.red};">${currencySymbol}${worksTotal.toLocaleString()}</div>` : ''}
+        </div>
+        ${stats.worksRequiredItems.length ? stats.worksRequiredItems.map((w) => `
+          <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding:10px 0; border-bottom:1px solid ${t.line};">
+            <div style="min-width:0;">
+              <div style="font-size:13.5px; font-weight:650;">${esc(w.elementName)}</div>
+              ${w.description ? `<div style="font-size:12.5px; color:${t.muted}; margin-top:2px;">${esc(w.description)}</div>` : ''}
+            </div>
+            <div style="font-size:13px; font-weight:650; flex-shrink:0;">${w.costEstimate ? currencySymbol + shellParseCost(w.costEstimate).toLocaleString() : '—'}</div>
+          </div>
+        `).join('') : `<div style="color:${t.muted}; font-size:13.5px;">No works required logged yet.</div>`}
       </div>
 
       <div style="grid-column:1 / -1; background:#fff; border:1px solid ${t.line}; border-radius:14px; padding:18px 20px;">
@@ -1241,64 +1370,21 @@ async function shellOpenRiskDocFieldsSheet(raId) {
 // to a different section is always safe, never risks losing an edit.
 // ============================================================================
 
+// shellReportEditingSectionId / shellRenderReportPreviewList / shellRenderReportMainArea
+// are retained as thin redirects to the new global state (shellState.editingSectionId,
+// renderShellSidebar, renderShellTabContent) — section editing is no longer local to a
+// Report-tab-specific two-pane layout, it's a global sidebar concern now. Redirecting
+// here rather than touching every individual call site across every section editor was
+// the lower-risk option given how many places reference these.
 let shellReportEditingSectionId = null;
 
-async function shellRenderReportTab(content) {
-  const t = SHELL_TOKENS;
-  shellReportEditingSectionId = null;
-  content.innerHTML = `
-    <div style="display:flex; height:100%; margin:-24px -28px; box-sizing:border-box;">
-      <div id="shell-report-panel" style="width:260px; flex-shrink:0; border-right:1px solid ${t.line}; overflow-y:auto; padding:16px;"></div>
-      <div id="shell-report-main" style="flex:1; min-width:0; overflow-y:auto; padding:24px 28px;"></div>
-    </div>
-  `;
-  await shellRenderReportPreviewList();
-  await shellRenderReportMainArea();
-}
-
 async function shellRenderReportPreviewList() {
-  const t = SHELL_TOKENS;
-  const panel = document.getElementById('shell-report-panel');
-  if (!panel) return;
-  const insp = await DB.get('inspections', shellState.selectedInspectionId);
-  const sections = await DB.listReportSections(insp.id);
-
-  panel.innerHTML = `
-    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
-      <div style="font-size:11px; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; color:${t.muted};">Sections</div>
-      <button id="shell-rep-add" style="background:none; border:none; color:${t.red}; font-size:18px; font-weight:700; line-height:1;">+</button>
-    </div>
-    <div id="shell-rep-list">
-      ${sections.map((s) => {
-        const info = REPORT_SECTION_TYPES[s.type] || { label: s.type };
-        const namedTypes = ['text', 'inspection'];
-        const hasCustomTitle = namedTypes.includes(s.type);
-        const title = (hasCustomTitle && s.title) ? s.title : info.label;
-        const subtitle = hasCustomTitle ? info.label : null;
-        const active = s.id === shellReportEditingSectionId;
-        return `
-          <div class="shell-rep-card" draggable="true" data-id="${s.id}" style="background:${active ? t.page : '#fff'}; border:1px solid ${active ? t.ink : t.line}; border-radius:10px; padding:10px 12px; margin-bottom:6px; cursor:pointer;">
-            <div style="font-size:13.5px; font-weight:650; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(title)}</div>
-            ${subtitle ? `<div style="font-size:11px; color:${t.muted}; margin-top:1px;">${esc(subtitle)}</div>` : ''}
-          </div>
-        `;
-      }).join('')}
-    </div>
-    <button id="shell-rep-templates" style="width:100%; background:none; border:1.5px dashed ${t.line}; border-radius:8px; padding:8px; font-size:12px; font-weight:650; color:${t.muted}; margin-top:8px;">Templates</button>
-  `;
-
-  document.getElementById('shell-rep-add').addEventListener('click', shellOpenAddSectionMenu);
-  document.getElementById('shell-rep-templates').addEventListener('click', () => {
-    openSaveReportTemplateSheet(sections);
-  });
-  panel.querySelectorAll('.shell-rep-card').forEach((card) => {
-    card.addEventListener('click', () => {
-      shellReportEditingSectionId = card.dataset.id;
-      shellRenderReportPreviewList();
-      shellRenderReportMainArea();
-    });
-    shellWireReportCardDrag(card, sections);
-  });
+  shellState.editingSectionId = shellReportEditingSectionId;
+  await renderShellSidebar();
+}
+async function shellRenderReportMainArea() {
+  shellState.editingSectionId = shellReportEditingSectionId;
+  await renderShellTabContent();
 }
 
 // HTML5 drag-and-drop reordering — same pattern already proven in the PDF
@@ -1351,18 +1437,6 @@ function shellOpenAddSectionMenu() {
       shellRenderReportMainArea();
     });
   });
-}
-
-async function shellRenderReportMainArea() {
-  const main = document.getElementById('shell-report-main');
-  if (!main) return;
-  if (!shellReportEditingSectionId) {
-    await shellRenderReportContinuousPreview(main);
-    return;
-  }
-  const section = await DB.get('reportSections', shellReportEditingSectionId);
-  if (!section) { shellReportEditingSectionId = null; return shellRenderReportMainArea(); }
-  await shellRenderReportSectionEditor(main, section);
 }
 
 // ---- Continuous, PDF-styled preview of the whole assembled report ----
@@ -1440,6 +1514,10 @@ async function shellRenderReportSectionPreviewBlock(insp, section, isGiBridges) 
     const appendices = await DB.listSectionAppendices(section.id);
     return `${heading}${appendices.length ? appendices.map((a) => `<div style="font-size:13.5px; padding:3px 0;">${esc(a.name)}</div>`).join('') : `<div style="color:${t.muted}; font-size:13.5px;">No appendices yet.</div>`}`;
   }
+  if (section.type === 'recommendations') {
+    const recs = (section.recommendations || []).filter(Boolean);
+    return `${heading}${recs.length ? `<ol style="font-size:14.5px; padding-left:22px; margin:0;">${recs.map((r) => `<li style="margin-bottom:4px;">${esc(r)}</li>`).join('')}</ol>` : `<div style="color:${t.muted}; font-size:13.5px;">No recommendations yet.</div>`}`;
+  }
   return heading;
 }
 
@@ -1453,12 +1531,13 @@ async function shellRenderReportSectionEditor(main, section) {
     elementSummary: shellEditElementSummarySection,
     inspection: shellEditInspectionFindingsSection,
     drawing: shellEditDrawingSection,
-    appendices: shellEditAppendicesSection
+    appendices: shellEditAppendicesSection,
+    recommendations: shellEditRecommendationsSection
   };
   const fn = editors[section.type];
   const t = SHELL_TOKENS;
   main.innerHTML = `
-    <button id="shell-rep-back" style="background:none; border:none; color:${t.muted}; font-size:13px; font-weight:650; margin-bottom:14px;">‹ Back to preview</button>
+    <button id="shell-rep-back" style="background:none; border:none; color:${t.muted}; font-size:13px; font-weight:650; margin-bottom:14px;">‹ Back</button>
     <div id="shell-rep-editor-body"></div>
   `;
   document.getElementById('shell-rep-back').addEventListener('click', () => {
@@ -1753,4 +1832,224 @@ async function shellEditAppendicesSection(body, section) {
     appendices = await DB.listSectionAppendices(section.id);
     renderList();
   });
+}
+
+// ---- Recommendations section editor — a structured numbered list, not rich text, so it
+// can feed a count on the Overview tab. Stored as a plain string array on the report
+// section (recommendations[]). ----
+async function shellEditRecommendationsSection(body, section) {
+  const t = SHELL_TOKENS;
+  let recs = (section.recommendations || []).slice();
+
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div id="shell-rec-list"></div>
+    <button id="shell-rec-add" style="width:100%; border:1.5px dashed ${t.line}; background:none; border-radius:10px; padding:12px; font-size:13.5px; font-weight:650; color:${t.muted}; margin-top:8px;">+ Add recommendation</button>
+  `;
+  body.appendChild(wrap);
+
+  async function persist() {
+    await DB.updateReportSection(section.id, { recommendations: recs });
+  }
+
+  function renderList() {
+    const box = document.getElementById('shell-rec-list');
+    box.innerHTML = recs.map((r, i) => `
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+        <div style="width:22px; text-align:right; font-size:13.5px; font-weight:650; color:${t.muted}; flex-shrink:0;">${i + 1}.</div>
+        <input type="text" class="shell-rec-input" data-i="${i}" value="${esc(r)}" style="flex:1; border:1px solid ${t.line}; border-radius:8px; padding:8px 10px; font-size:14px; box-sizing:border-box;">
+        <button class="shell-rec-remove" data-i="${i}" style="background:none; border:none; color:${t.muted}; font-size:16px; flex-shrink:0;">✕</button>
+      </div>
+    `).join('') || `<div style="color:${t.muted}; font-size:13.5px;">No recommendations yet.</div>`;
+
+    box.querySelectorAll('.shell-rec-input').forEach((input) => {
+      shellWireAutosaveField(input, (v) => { recs[Number(input.dataset.i)] = v; persist(); });
+    });
+    box.querySelectorAll('.shell-rec-remove').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        recs.splice(Number(btn.dataset.i), 1);
+        persist();
+        renderList();
+      });
+    });
+  }
+  renderList();
+
+  document.getElementById('shell-rec-add').addEventListener('click', () => {
+    recs.push('');
+    persist();
+    renderList();
+    const inputs = document.querySelectorAll('.shell-rec-input');
+    if (inputs.length) inputs[inputs.length - 1].focus();
+  });
+}
+
+// ============================================================================
+// Unified Drawings and Photos tabs — genuinely new backend aggregation, per
+// an explicit request: Drawings covers every drawing across the whole
+// inspection regardless of whether it lives in a main-body Drawing section
+// or inside an Appendices section (both are photos-store records under the
+// hood, so this is a real merge, not a relabeling); Photos covers every
+// element/finding/cover photo, independent of location. Both use a 2-across,
+// vertically-scrolling grid, and open into the same shared media viewer.
+// ============================================================================
+
+async function shellCollectAllDrawings(inspectionId) {
+  const drawSections = (await DB.listReportSections(inspectionId)).filter((s) => s.type === 'drawing');
+  const apxSections = (await DB.listReportSections(inspectionId)).filter((s) => s.type === 'appendices');
+  let items = [];
+  for (const sec of drawSections) {
+    items = items.concat(await DB.listSectionDrawings(sec.id));
+  }
+  for (const sec of apxSections) {
+    const appendices = await DB.listSectionAppendices(sec.id);
+    for (const apx of appendices) {
+      items = items.concat(await DB.listAppendixItems(apx.id));
+    }
+  }
+  return items;
+}
+
+async function shellCollectAllPhotos(inspectionId) {
+  const elements = await DB.listElements(inspectionId);
+  let items = [];
+  for (const el2 of elements) {
+    items = items.concat(await DB.listPhotosForElement(el2.id));
+    const findings = await DB.listFindings(el2.id);
+    for (const f of findings) {
+      items = items.concat(await DB.listPhotosForFinding(f.id));
+    }
+  }
+  const cover = await DB.getCoverPhoto(inspectionId);
+  if (cover) items.push(cover);
+  return items;
+}
+
+function shellMediaGridHtml(items) {
+  const t = SHELL_TOKENS;
+  return `
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
+      ${items.map((it) => `
+        <div class="shell-media-tile" data-id="${it.id}" style="cursor:pointer;">
+          <div style="aspect-ratio:1; border-radius:10px; overflow:hidden; background:${t.line}; position:relative;">
+            <img src="${blobUrl(it.annotatedBlob || it.originalBlob)}" style="width:100%; height:100%; object-fit:cover;">
+          </div>
+          ${it.title ? `<div style="font-size:12px; color:${t.muted}; margin-top:5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(it.title)}</div>` : ''}
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+async function shellRenderUnifiedDrawingsTab(content) {
+  const t = SHELL_TOKENS;
+  const insp = await DB.get('inspections', shellState.selectedInspectionId);
+  const items = await shellCollectAllDrawings(insp.id);
+  content.innerHTML = `
+    <div style="font-size:15px; font-weight:650; margin-bottom:16px;">Drawings</div>
+    ${items.length ? shellMediaGridHtml(items) : `<div style="color:${t.muted}; font-size:14px;">No drawings yet.</div>`}
+  `;
+  content.querySelectorAll('.shell-media-tile').forEach((tile) => {
+    tile.addEventListener('click', () => shellOpenMediaViewer(items, tile.dataset.id, () => shellRenderUnifiedDrawingsTab(content)));
+  });
+}
+
+async function shellRenderUnifiedPhotosTab(content) {
+  const t = SHELL_TOKENS;
+  const insp = await DB.get('inspections', shellState.selectedInspectionId);
+  const items = await shellCollectAllPhotos(insp.id);
+  content.innerHTML = `
+    <div style="font-size:15px; font-weight:650; margin-bottom:16px;">Photos</div>
+    ${items.length ? shellMediaGridHtml(items) : `<div style="color:${t.muted}; font-size:14px;">No photos yet.</div>`}
+  `;
+  content.querySelectorAll('.shell-media-tile').forEach((tile) => {
+    tile.addEventListener('click', () => shellOpenMediaViewer(items, tile.dataset.id, () => shellRenderUnifiedPhotosTab(content)));
+  });
+}
+
+// Shared full-screen media viewer — pinch-zoom (real width-change technique, same
+// verified approach as the PDF Editor's preview, not a CSS-transform, for the same
+// cross-browser scroll-bounds reasons), a caption field (photos.title — the actual text
+// that appears under the image in the report), Edit (opens the real annotator), and
+// Delete. onRefresh lets the caller (Drawings or Photos tab) re-render itself afterward.
+async function shellOpenMediaViewer(items, photoId, onRefresh) {
+  const t = SHELL_TOKENS;
+  let photo = items.find((it) => it.id === photoId);
+  if (!photo) return;
+
+  const backdrop = el(`
+    <div style="position:fixed; inset:0; background:#141519; z-index:400; display:flex; flex-direction:column;">
+      <div style="padding:calc(14px + var(--safe-top)) 16px 14px; display:flex; align-items:center; justify-content:space-between; flex-shrink:0;">
+        <button id="shell-mv-close" style="background:none; border:none; color:#fff; font-size:22px;">✕</button>
+        <div style="display:flex; gap:10px;">
+          <button id="shell-mv-edit" style="background:rgba(255,255,255,0.12); color:#fff; border:none; border-radius:8px; padding:8px 16px; font-size:13.5px; font-weight:650;">Edit</button>
+          <button id="shell-mv-delete" style="background:rgba(255,255,255,0.12); color:${t.red}; border:none; border-radius:8px; padding:8px 16px; font-size:13.5px; font-weight:650;">Delete</button>
+        </div>
+      </div>
+      <div id="shell-mv-wrap" style="flex:1; min-height:0; overflow:auto; touch-action:pan-y; display:flex; align-items:center; justify-content:center;">
+        <img id="shell-mv-img" src="${blobUrl(photo.annotatedBlob || photo.originalBlob)}" style="max-width:100%; max-height:100%; display:block;">
+      </div>
+      <div style="padding:12px 16px calc(16px + var(--safe-bottom)); flex-shrink:0;">
+        <input id="shell-mv-caption" type="text" value="${esc(photo.title)}" placeholder="Caption (appears under this image in the report)" style="width:100%; background:rgba(255,255,255,0.1); border:1px solid rgba(255,255,255,0.2); border-radius:8px; padding:10px 12px; font-size:14px; color:#fff; box-sizing:border-box;">
+      </div>
+    </div>
+  `);
+  document.body.appendChild(backdrop);
+
+  document.getElementById('shell-mv-close').addEventListener('click', () => { backdrop.remove(); if (onRefresh) onRefresh(); });
+  shellWireAutosaveField(document.getElementById('shell-mv-caption'), (v) => DB.updatePhoto(photo.id, { title: v }));
+  document.getElementById('shell-mv-edit').addEventListener('click', () => {
+    openAnnotator(photo.id, async () => {
+      photo = await DB.get('photos', photo.id);
+      document.getElementById('shell-mv-img').src = blobUrl(photo.annotatedBlob || photo.originalBlob);
+    });
+  });
+  document.getElementById('shell-mv-delete').addEventListener('click', async () => {
+    if (!confirm('Delete this image? This cannot be undone.')) return;
+    await DB.delete('photos', photo.id);
+    backdrop.remove();
+    if (onRefresh) onRefresh();
+  });
+
+  // Pinch-to-zoom via real width changes on the image itself — same verified technique
+  // and anchoring math as the PDF Editor's preview pane.
+  const wrap = document.getElementById('shell-mv-wrap');
+  const img = document.getElementById('shell-mv-img');
+  let scale = 1;
+  const baseWidthPercent = 100;
+  function applyScale() { img.style.maxWidth = (baseWidthPercent * scale) + '%'; img.style.width = 'auto'; }
+  const touchPts = new Map();
+  let pinchState = null;
+  wrap.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch') return;
+    touchPts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (touchPts.size >= 2) pinchState = null;
+  });
+  wrap.addEventListener('pointermove', (e) => {
+    if (e.pointerType !== 'touch' || !touchPts.has(e.pointerId)) return;
+    touchPts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (touchPts.size < 2) return;
+    e.preventDefault();
+    const pts = Array.from(touchPts.values());
+    const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+    const mid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+    if (!pinchState) { pinchState = { startDist: dist, startScale: scale }; return; }
+    const wrapRect = wrap.getBoundingClientRect();
+    const beforeScrollW = wrap.scrollWidth, beforeScrollH = wrap.scrollHeight;
+    const fracX = (wrap.scrollLeft + (mid.x - wrapRect.left)) / beforeScrollW;
+    const fracY = (wrap.scrollTop + (mid.y - wrapRect.top)) / beforeScrollH;
+    scale = Math.min(4, Math.max(1, pinchState.startScale * (dist / pinchState.startDist)));
+    applyScale();
+    requestAnimationFrame(() => {
+      wrap.scrollLeft = fracX * wrap.scrollWidth - (mid.x - wrapRect.left);
+      wrap.scrollTop = fracY * wrap.scrollHeight - (mid.y - wrapRect.top);
+    });
+  });
+  function clearTouch(e) {
+    if (e.pointerType !== 'touch') return;
+    touchPts.delete(e.pointerId);
+    if (touchPts.size < 2) pinchState = null;
+  }
+  wrap.addEventListener('pointerup', clearTouch);
+  wrap.addEventListener('pointercancel', clearTouch);
 }

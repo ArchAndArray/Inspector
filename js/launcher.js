@@ -32,7 +32,7 @@ async function renderLauncher() {
             <div style="width:28px; height:28px; border-radius:8px; background:${t.red}; flex-shrink:0;"></div>
             <div style="font-size:15px; font-weight:650; letter-spacing:0.1px; color:${t.mutedDark};">Arch &amp; Array</div>
           </div>
-          <button id="launcher-check-updates" style="background:none; border:none; color:${t.muted}; font-size:12px; font-weight:600; padding:6px;">Check Updates</button>
+          <button id="launcher-check-updates" style="background:none; border:none; color:${t.muted}; font-size:12px; font-weight:600; padding:6px; text-align:right;">Check Updates<br><span style="font-size:10.5px; opacity:0.8;">v${APP_VERSION}</span></button>
         </div>
         <div style="font-size:12px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase; color:${t.muted}; margin-bottom:18px; flex-shrink:0;">Modules</div>
         <div style="flex:1; overflow-y:auto; display:flex; flex-wrap:wrap; align-content:flex-start; gap:14px;">
