@@ -508,7 +508,7 @@ button {
 .pm-gantt-row { position: relative; height: 44px; box-sizing: border-box; border-bottom: 1px solid var(--line); }
 .pm-gantt-header { background: var(--paper); position: sticky; top: 0; z-index: 1; }
 .pm-gantt-bar {
-  position: absolute; top: 10px; height: 24px; border-radius: 5px; background: oklch(0.65 0.03 260);
+  position: absolute; top: 10px; left: 0; right: 0; height: 24px; border-radius: 5px; background: oklch(0.65 0.03 260);
   overflow: hidden; box-sizing: border-box;
 }
 .pm-gantt-bar-summary { background: transparent; border: none; top: 14px; height: 16px; }
@@ -524,6 +524,25 @@ button {
   transform: translateX(-10px) rotate(45deg); border-radius: 3px;
 }
 .pm-gantt-today { position: absolute; top: 0; width: 0; border-left: 1.5px dashed var(--red); z-index: 2; pointer-events: none; }
+
+/* Project Management — Gantt drag/resize hit areas (Phase 1 Step 4) */
+/* Hit areas are deliberately taller than the visual bar (full 44px row height, not the bar's
+   24px) — a touch target sized to the visible bar alone would be well under Apple's 44pt
+   minimum guidance, the same lesson already applied to the annotator's color/width swatches. */
+.pm-gantt-hit { position: absolute; top: 0; height: 100%; touch-action: none; }
+.pm-gantt-hit-draggable { cursor: grab; }
+.pm-gantt-hit-draggable:active { cursor: grabbing; }
+.pm-gantt-hit-milestone { cursor: grab; }
+.pm-gantt-handle {
+  position: absolute; top: 0; bottom: 0; cursor: ew-resize; touch-action: none;
+}
+.pm-gantt-handle-left { left: 0; }
+.pm-gantt-handle-right { right: 0; }
+.pm-gantt-drag-label {
+  position: fixed; transform: translateX(-50%); background: var(--ink); color: #fff;
+  padding: 5px 10px; border-radius: 7px; font-size: 12.5px; font-weight: 650; white-space: nowrap;
+  pointer-events: none; z-index: 50; box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
 
 /* Project Management — dependency rows in the task edit sheet (Phase 1 Step 3) */
 .pm-dep-row {

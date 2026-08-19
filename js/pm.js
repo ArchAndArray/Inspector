@@ -101,7 +101,7 @@ async function renderPMWorkspace(projectId) {
   const project = await DB.get('pmProjects', projectId);
   if (!project) { renderPM(); return; }
   const tasks = await DB.listPMTasks(projectId);
-  pmWorkspaceState = { project, tasks, selectedTaskId: null };
+  pmWorkspaceState = { project, tasks, selectedTaskId: null, undoStack: [], redoStack: [] };
   drawPMWorkspace();
 }
 
@@ -189,23 +189,38 @@ function pmGanttHeaderHtml(minMs, totalDays) {
   return `<div class="pm-gantt-header pm-gantt-row" style="width:${totalDays * PM_GANTT_PX_PER_DAY}px;">${ticks.join('')}</div>`;
 }
 
-function pmGanttRowHtml(row, minMs, totalDays, todayMs) {
+function pmGanttRowHtml(row, minMs, totalDays) {
   const { task, eff, hasChildren } = row;
   const width = totalDays * PM_GANTT_PX_PER_DAY;
   let barHtml = '';
   const s = pmParseISODate(eff.start);
   const f = pmParseISODate(eff.finish || eff.start);
+  const draggable = !hasChildren; // summary bars are computed rollups, not independently dated
+
   if (s != null && f != null) {
     const left = pmDaysBetween(minMs, s) * PM_GANTT_PX_PER_DAY;
     if (task.isMilestone) {
-      barHtml = `<div class="pm-gantt-milestone" style="left:${left}px;" title="${esc(task.name)}"></div>`;
+      // Hit area is wider than the visual diamond so it's a comfortable touch target — the
+      // 20x20 diamond alone is well under Apple's 44pt minimum tap-target guidance.
+      barHtml = draggable ? `
+        <div class="pm-gantt-hit pm-gantt-hit-milestone" data-task-id="${task.id}" style="left:${left - 15}px; width:30px;">
+          <div class="pm-gantt-milestone" style="left:5px;" title="${esc(task.name)}"></div>
+        </div>` : `<div class="pm-gantt-milestone" style="left:${left}px;" title="${esc(task.name)}"></div>`;
     } else {
       const spanDays = Math.max(1, pmDaysBetween(s, f) + 1);
       const barWidth = Math.max(6, spanDays * PM_GANTT_PX_PER_DAY - 2);
       const pct = Math.min(100, Math.max(0, eff.percentComplete || 0));
+      // Resize handles only appear once the bar is wide enough to still leave a usable middle
+      // "move" zone — below that, dragging still works (move only), and precise duration
+      // changes go through the task sheet instead, same fallback the table already offers.
+      const showHandles = draggable && barWidth >= 34;
+      const handleW = showHandles ? Math.round(Math.min(16, Math.max(10, barWidth * 0.28))) : 0;
       barHtml = `
-        <div class="pm-gantt-bar${hasChildren ? ' pm-gantt-bar-summary' : ''}" style="left:${left}px; width:${barWidth}px;" title="${esc(task.name)} — ${pct}%">
-          ${hasChildren ? '' : `<div class="pm-gantt-bar-progress" style="width:${pct}%;"></div>`}
+        <div class="pm-gantt-hit${draggable ? ' pm-gantt-hit-draggable' : ''}" ${draggable ? `data-task-id="${task.id}"` : ''} style="left:${left}px; width:${barWidth}px;">
+          <div class="pm-gantt-bar${hasChildren ? ' pm-gantt-bar-summary' : ''}" title="${esc(task.name)} — ${pct}%">
+            ${hasChildren ? '' : `<div class="pm-gantt-bar-progress" style="width:${pct}%;"></div>`}
+          </div>
+          ${showHandles ? `<div class="pm-gantt-handle pm-gantt-handle-left" style="width:${handleW}px;"></div><div class="pm-gantt-handle pm-gantt-handle-right" style="width:${handleW}px;"></div>` : ''}
         </div>
       `;
     }
@@ -219,7 +234,7 @@ function pmGanttChartHtml(rows) {
   const totalDays = Math.max(1, pmDaysBetween(minMs, maxMs));
   const todayMs = pmParseISODate(new Date().toISOString());
   const headerHtml = pmGanttHeaderHtml(minMs, totalDays);
-  const rowsHtml = rows.map((row) => pmGanttRowHtml(row, minMs, totalDays, todayMs)).join('');
+  const rowsHtml = rows.map((row) => pmGanttRowHtml(row, minMs, totalDays)).join('');
 
   let todayLineHtml = '';
   if (todayMs >= minMs && todayMs <= maxMs) {
@@ -237,6 +252,106 @@ function pmGanttChartHtml(rows) {
       </div>
     </div>
   `;
+}
+
+// ---------- Gantt drag/resize (Step 4) ----------
+// Wired after every render, since drawPMWorkspace rebuilds the whole DOM each time. Live
+// feedback during drag is done with direct style/transform writes on the dragged element (not
+// a full re-render per pointermove — that would be far too slow to feel responsive), and a
+// small floating label showing the tentative date, matching the app's existing pattern of
+// giving precise visual feedback during touch-driven placement (the annotator's magnifier is
+// the closest precedent). The actual commit — validation, persistence, cascade, undo — only
+// happens once, on release, via the same pmCommitTaskDates() the task sheet uses.
+function pmWireGanttDrag() {
+  const chart = document.querySelector('.pm-gantt-chart');
+  if (!chart) return;
+  chart.querySelectorAll('.pm-gantt-hit-draggable, .pm-gantt-hit-milestone').forEach((hitEl) => {
+    hitEl.addEventListener('pointerdown', (e) => pmStartGanttDrag(e, hitEl));
+  });
+}
+
+function pmStartGanttDrag(downEvent, hitEl) {
+  const taskId = hitEl.dataset.taskId;
+  const task = pmWorkspaceState.tasks.find((t) => t.id === taskId);
+  if (!task) return;
+  downEvent.preventDefault();
+  hitEl.setPointerCapture(downEvent.pointerId);
+
+  let mode = 'move';
+  if (downEvent.target.classList.contains('pm-gantt-handle-left')) mode = 'resize-left';
+  else if (downEvent.target.classList.contains('pm-gantt-handle-right')) mode = 'resize-right';
+
+  const startX = downEvent.clientX;
+  const origStartMs = pmParseISODate(task.start);
+  const origFinishMs = pmParseISODate(task.finish || task.start);
+  const origLeft = parseFloat(hitEl.style.left);
+  const origWidth = parseFloat(hitEl.style.width);
+
+  const label = el(`<div class="pm-gantt-drag-label"></div>`);
+  document.body.appendChild(label);
+  function showLabel(text, clientX, clientY) {
+    label.textContent = text;
+    label.style.left = clientX + 'px';
+    label.style.top = Math.max(8, clientY - 42) + 'px';
+  }
+
+  function dayDelta(ev) { return Math.round((ev.clientX - startX) / PM_GANTT_PX_PER_DAY); }
+
+  function onMove(ev) {
+    const deltaDays = dayDelta(ev);
+    if (mode === 'move') {
+      hitEl.style.left = (origLeft + deltaDays * PM_GANTT_PX_PER_DAY) + 'px';
+      showLabel(fmtDate(pmFormatISODate(origStartMs + deltaDays * 86400000)), ev.clientX, ev.clientY);
+    } else if (mode === 'resize-right') {
+      const newWidthPx = Math.max(PM_GANTT_PX_PER_DAY, origWidth + deltaDays * PM_GANTT_PX_PER_DAY);
+      hitEl.style.width = newWidthPx + 'px';
+      const newFinishMs = origStartMs + (Math.round(newWidthPx / PM_GANTT_PX_PER_DAY) - 1) * 86400000;
+      showLabel('Finish: ' + fmtDate(pmFormatISODate(newFinishMs)), ev.clientX, ev.clientY);
+    } else if (mode === 'resize-left') {
+      const newWidthPx = Math.max(PM_GANTT_PX_PER_DAY, origWidth - deltaDays * PM_GANTT_PX_PER_DAY);
+      hitEl.style.left = (origLeft + (origWidth - newWidthPx)) + 'px';
+      hitEl.style.width = newWidthPx + 'px';
+      const newStartMs = origFinishMs - (Math.round(newWidthPx / PM_GANTT_PX_PER_DAY) - 1) * 86400000;
+      showLabel('Start: ' + fmtDate(pmFormatISODate(newStartMs)), ev.clientX, ev.clientY);
+    }
+  }
+
+  function cleanup() {
+    hitEl.removeEventListener('pointermove', onMove);
+    hitEl.removeEventListener('pointerup', onUp);
+    hitEl.removeEventListener('pointercancel', onCancel);
+    label.remove();
+  }
+
+  async function onUp(ev) {
+    const deltaDays = dayDelta(ev);
+    cleanup();
+    if (deltaDays === 0) { drawPMWorkspace(); return; }
+
+    let patch = null;
+    if (mode === 'move') {
+      const newStartMs = origStartMs + deltaDays * 86400000;
+      const newFinishMs = task.isMilestone ? newStartMs : newStartMs + (origFinishMs - origStartMs);
+      patch = { start: pmFormatISODate(newStartMs), finish: pmFormatISODate(newFinishMs) };
+    } else if (mode === 'resize-right') {
+      let newFinishMs = Math.max(origStartMs, origFinishMs + deltaDays * 86400000);
+      patch = { finish: pmFormatISODate(newFinishMs), duration: pmDaysBetween(origStartMs, newFinishMs) + 1 };
+    } else if (mode === 'resize-left') {
+      let newStartMs = Math.min(origFinishMs, origStartMs + deltaDays * 86400000);
+      patch = { start: pmFormatISODate(newStartMs), duration: pmDaysBetween(newStartMs, origFinishMs) + 1 };
+    }
+
+    const result = await pmCommitTaskDates(taskId, patch);
+    if (!result.ok) { toast(result.error); drawPMWorkspace(); return; }
+    pmReportMoved(result.movedOthers);
+    drawPMWorkspace();
+  }
+
+  function onCancel() { cleanup(); drawPMWorkspace(); }
+
+  hitEl.addEventListener('pointermove', onMove);
+  hitEl.addEventListener('pointerup', onUp);
+  hitEl.addEventListener('pointercancel', onCancel);
 }
 
 function drawPMWorkspace() {
@@ -299,6 +414,8 @@ function drawPMWorkspace() {
       <button class="btn btn-secondary" id="btn-pm-add-subtask" ${selectedTaskId ? '' : 'disabled'}>+ Subtask</button>
       <button class="btn btn-secondary" id="btn-pm-indent" ${selectedTaskId ? '' : 'disabled'}>Indent</button>
       <button class="btn btn-secondary" id="btn-pm-outdent" ${selectedTaskId ? '' : 'disabled'}>Outdent</button>
+      <button class="btn btn-secondary" id="btn-pm-undo" ${pmWorkspaceState.undoStack.length ? '' : 'disabled'}>↶ Undo</button>
+      <button class="btn btn-secondary" id="btn-pm-redo" ${pmWorkspaceState.redoStack.length ? '' : 'disabled'}>↷ Redo</button>
       <button class="btn btn-danger" id="btn-pm-delete" ${selectedTaskId ? '' : 'disabled'}>Delete</button>
     </div>
   `;
@@ -311,6 +428,8 @@ function drawPMWorkspace() {
   });
   document.getElementById('btn-pm-indent').addEventListener('click', pmIndentSelected);
   document.getElementById('btn-pm-outdent').addEventListener('click', pmOutdentSelected);
+  document.getElementById('btn-pm-undo').addEventListener('click', pmUndo);
+  document.getElementById('btn-pm-redo').addEventListener('click', pmRedo);
   document.getElementById('btn-pm-delete').addEventListener('click', pmDeleteSelected);
 
   appEl.querySelectorAll('.pm-row[data-id]').forEach((rowEl) => {
@@ -324,6 +443,8 @@ function drawPMWorkspace() {
       }
     });
   });
+
+  pmWireGanttDrag();
 }
 
 async function pmRefreshTasks() {
@@ -336,26 +457,90 @@ function pmLeafTasks() {
   return pmWorkspaceState.tasks.filter((t) => pmTaskChildren(t.id).length === 0);
 }
 
-// Runs the CPM forward pass, persists any tasks it moved, refreshes state, and returns the
-// list of moved tasks (with names attached) so the caller can tell the user what happened —
-// per the original brief: "clearly indicate the resulting change." Never pulls a task earlier,
-// only pushes tasks later that would otherwise violate a predecessor's finish date + lag.
-async function pmRecomputeSchedule() {
-  const leaf = pmLeafTasks();
-  const deps = await DB.listPMDependencies(pmWorkspaceState.project.id);
-  const changed = PMSchedule.computeForwardPass(leaf, deps, pmDateFns);
-  for (const c of changed) {
-    await DB.updatePMTask(c.id, { start: c.start, finish: c.finish });
-  }
-  await pmRefreshTasks();
-  return changed.map((c) => ({ ...c, name: (leaf.find((t) => t.id === c.id) || {}).name || '' }));
+// ---------- Schedule-change undo/redo (Step 4) ----------
+// Scoped deliberately to DATE changes only (manual sheet edits, drag, resize) — not dependency
+// create/remove, and not structural WBS edits (indent/outdent/add/delete). Those remain
+// non-undoable for now; extending undo to cover them is real future scope, not silently implied
+// by this being called "undo/redo". Every entry here represents ONE user-initiated action,
+// covering every task it moved — the directly-edited task AND anything the forward-pass
+// cascade moved as a result — so undo reverts the whole thing atomically, never leaving
+// cascaded tasks stranded at now-unjustified positions.
+function pmPushUndoEntry(entry) {
+  if (!entry.length) return;
+  pmWorkspaceState.undoStack.push(entry);
+  pmWorkspaceState.redoStack = []; // a new action invalidates any redo history, standard behavior
 }
 
-function pmReportScheduleChanges(changed, excludeTaskId) {
-  const others = changed.filter((c) => c.id !== excludeTaskId);
-  if (others.length) {
-    toast(`Also moved: ${others.map((c) => c.name).join(', ')}`);
+async function pmUndo() {
+  if (!pmWorkspaceState.undoStack.length) { toast('Nothing to undo'); return; }
+  const entry = pmWorkspaceState.undoStack.pop();
+  for (const c of entry) await DB.updatePMTask(c.id, { start: c.before.start, finish: c.before.finish });
+  pmWorkspaceState.redoStack.push(entry);
+  await pmRefreshTasks();
+  drawPMWorkspace();
+}
+
+async function pmRedo() {
+  if (!pmWorkspaceState.redoStack.length) { toast('Nothing to redo'); return; }
+  const entry = pmWorkspaceState.redoStack.pop();
+  for (const c of entry) await DB.updatePMTask(c.id, { start: c.after.start, finish: c.after.finish });
+  pmWorkspaceState.undoStack.push(entry);
+  await pmRefreshTasks();
+  drawPMWorkspace();
+}
+
+// The single path every date-changing interaction (sheet save, drag, resize) goes through.
+// Persists the full patch for the primary task (start/finish plus whatever else changed, e.g.
+// name/duration/%complete from the sheet), runs the CPM forward pass, persists whatever it
+// cascaded, and records ONE atomic undo entry. The undo entry only tracks start/finish —
+// undo is scoped to date changes, not a general "revert this task edit" — see the note above
+// pmPushUndoEntry.
+// primaryPatch: any subset of task fields, but MUST include start/finish if either changed,
+// since those are what the forward pass and validation key off.
+async function pmCommitTaskDates(taskId, primaryPatch) {
+  const leaf = pmLeafTasks();
+  const deps = await DB.listPMDependencies(pmWorkspaceState.project.id);
+  const primaryTask = leaf.find((t) => t.id === taskId);
+  if (!primaryTask) return { ok: false, error: 'Task not found' };
+
+  const startChanged = primaryPatch.start !== undefined && primaryPatch.start !== primaryTask.start;
+  if (startChanged && primaryPatch.start) {
+    const check = PMSchedule.validateManualStart(taskId, primaryPatch.start, leaf, deps, pmDateFns);
+    if (!check.ok) {
+      return { ok: false, error: `Can't start before ${fmtDate(check.minStart)} — blocked by "${check.blockedBy}"` };
+    }
   }
+
+  const beforeSnapshot = new Map(leaf.map((t) => [t.id, { start: t.start, finish: t.finish }]));
+  const primaryBefore = beforeSnapshot.get(taskId);
+  const primaryAfter = {
+    start: primaryPatch.start !== undefined ? primaryPatch.start : primaryTask.start,
+    finish: primaryPatch.finish !== undefined ? primaryPatch.finish : primaryTask.finish
+  };
+
+  await DB.updatePMTask(taskId, primaryPatch);
+
+  const updatedLeaf = leaf.map((t) => (t.id === taskId ? { ...t, ...primaryPatch } : t));
+  const cascaded = PMSchedule.computeForwardPass(updatedLeaf, deps, pmDateFns);
+  for (const c of cascaded) await DB.updatePMTask(c.id, { start: c.start, finish: c.finish });
+
+  const entryMap = new Map();
+  if (primaryAfter.start !== primaryBefore.start || primaryAfter.finish !== primaryBefore.finish) {
+    entryMap.set(taskId, { id: taskId, before: primaryBefore, after: primaryAfter });
+  }
+  for (const c of cascaded) {
+    if (c.id === taskId) continue;
+    entryMap.set(c.id, { id: c.id, before: beforeSnapshot.get(c.id), after: { start: c.start, finish: c.finish } });
+  }
+  pmPushUndoEntry(Array.from(entryMap.values()));
+
+  await pmRefreshTasks();
+  const movedOthers = cascaded.filter((c) => c.id !== taskId).map((c) => ({ id: c.id, name: (leaf.find((t) => t.id === c.id) || {}).name || '' }));
+  return { ok: true, movedOthers };
+}
+
+function pmReportMoved(movedOthers) {
+  if (movedOthers.length) toast(`Also moved: ${movedOthers.map((m) => m.name).join(', ')}`);
 }
 
 async function addPMTaskAndEdit(parentId) {
@@ -412,6 +597,19 @@ async function pmDeleteSelected() {
   pmWorkspaceState.selectedTaskId = null;
   await pmRefreshTasks();
   drawPMWorkspace();
+}
+
+// Dependency add/remove aren't part of the date-change undo system (see the note above
+// pmPushUndoEntry) — but adding a dependency can still push tasks later via cascade, so that
+// still needs to run. Removing one never does (the forward pass only ever adds constraints
+// forward, so relaxing one can't require moving anything).
+async function pmRecomputeAfterDependencyChange() {
+  const leaf = pmLeafTasks();
+  const deps = await DB.listPMDependencies(pmWorkspaceState.project.id);
+  const changed = PMSchedule.computeForwardPass(leaf, deps, pmDateFns);
+  for (const c of changed) await DB.updatePMTask(c.id, { start: c.start, finish: c.finish });
+  await pmRefreshTasks();
+  return changed.map((c) => ({ id: c.id, name: (leaf.find((t) => t.id === c.id) || {}).name || '' }));
 }
 
 async function openPMTaskSheet(task) {
@@ -478,7 +676,7 @@ async function openPMTaskSheet(task) {
       btn.addEventListener('click', async () => {
         await DB.deletePMDependency(btn.dataset.depId);
         sheet.remove();
-        await pmRecomputeSchedule();
+        await pmRefreshTasks(); // no recompute needed — relaxing a constraint never requires moving anything
         drawPMWorkspace();
         openPMTaskSheet(pmWorkspaceState.tasks.find((t) => t.id === task.id));
       });
@@ -499,26 +697,22 @@ async function openPMTaskSheet(task) {
     const patch = { name, notes: sheet.querySelector('#f-pmt-notes').value.trim() };
     if (!hasChildren) {
       const isMilestone = sheet.querySelector('#f-pmt-milestone').checked;
-      const proposedStart = sheet.querySelector('#f-pmt-start').value || null;
-
-      if (proposedStart) {
-        const check = PMSchedule.validateManualStart(task.id, proposedStart, leaf, allDeps, pmDateFns);
-        if (!check.ok) {
-          toast(`Can't start before ${fmtDate(check.minStart)} — blocked by "${check.blockedBy}"`);
-          return;
-        }
-      }
-
       patch.isMilestone = isMilestone;
-      patch.start = proposedStart;
+      patch.start = sheet.querySelector('#f-pmt-start').value || null;
       patch.finish = isMilestone ? patch.start : (sheet.querySelector('#f-pmt-finish').value || null);
       patch.duration = isMilestone ? 0 : Math.max(0, parseInt(sheet.querySelector('#f-pmt-duration').value, 10) || 0);
       patch.percentComplete = Math.min(100, Math.max(0, parseInt(sheet.querySelector('#f-pmt-pct').value, 10) || 0));
+
+      const result = await pmCommitTaskDates(task.id, patch);
+      if (!result.ok) { toast(result.error); return; }
+      sheet.remove();
+      pmReportMoved(result.movedOthers);
+      drawPMWorkspace();
+      return;
     }
     await DB.updatePMTask(task.id, patch);
     sheet.remove();
-    const changed = await pmRecomputeSchedule();
-    pmReportScheduleChanges(changed, task.id);
+    await pmRefreshTasks();
     drawPMWorkspace();
   });
 }
@@ -562,8 +756,8 @@ function openAddPMDependencySheet(task, incomingDeps, allDeps, leaf, onDone) {
         return;
       }
       sheet.remove();
-      const changed = await pmRecomputeSchedule();
-      pmReportScheduleChanges(changed, null);
+      const moved = await pmRecomputeAfterDependencyChange();
+      pmReportMoved(moved);
       onDone();
     });
   });
