@@ -139,9 +139,111 @@ function pmBuildRows(parentId, depth, wbsPrefix, out) {
   const children = pmTaskChildren(parentId);
   children.forEach((task, i) => {
     const wbs = wbsPrefix ? `${wbsPrefix}.${i + 1}` : `${i + 1}`;
-    out.push({ task, depth, wbs });
+    const hasChildren = pmTaskChildren(task.id).length > 0;
+    const eff = hasChildren ? pmRollup(task.id) : task;
+    out.push({ task, depth, wbs, hasChildren, eff });
     pmBuildRows(task.id, depth + 1, wbs, out);
   });
+}
+
+// ---------- Gantt (Step 2 — read-only render, no drag/resize/zoom yet) ----------
+// Dates are stored as 'YYYY-MM-DD'. Parsed as UTC midnight throughout so day-difference math
+// can't be thrown off by DST — these are calendar days, not timestamps.
+const PM_GANTT_ROW_H = 44; // must match .pm-row / .pm-gantt-row height in styles.css
+const PM_GANTT_PX_PER_DAY = 20;
+
+function pmParseISODate(str) {
+  if (!str) return null;
+  const [y, m, d] = str.slice(0, 10).split('-').map(Number);
+  if (!y || !m || !d) return null;
+  return Date.UTC(y, m - 1, d);
+}
+function pmDaysBetween(aMs, bMs) { return Math.round((bMs - aMs) / 86400000); }
+function pmFormatDayTick(ms) {
+  const d = new Date(ms);
+  return `${d.getUTCDate()} ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()]}`;
+}
+
+function pmComputeGanttRange(rows) {
+  let minMs = null, maxMs = null;
+  rows.forEach(({ eff }) => {
+    const s = pmParseISODate(eff.start);
+    const f = pmParseISODate(eff.finish || eff.start);
+    if (s != null && (minMs == null || s < minMs)) minMs = s;
+    if (f != null && (maxMs == null || f > maxMs)) maxMs = f;
+  });
+  if (minMs == null) {
+    // No dated tasks yet — show a plain 21-day window from the project start so the chart
+    // isn't just blank.
+    minMs = pmParseISODate(pmWorkspaceState.project.startDate) || Date.now();
+    maxMs = minMs + 21 * 86400000;
+  }
+  // Padding either side so bars at the very edges aren't flush against the chart border.
+  minMs -= 2 * 86400000;
+  maxMs += 3 * 86400000;
+  return { minMs, maxMs };
+}
+
+function pmGanttHeaderHtml(minMs, totalDays) {
+  const ticks = [];
+  for (let i = 0; i < totalDays; i++) {
+    const dayMs = minMs + i * 86400000;
+    const d = new Date(dayMs);
+    if (d.getUTCDay() === 1) { // Monday — one label per week keeps it readable at this scale
+      ticks.push(`<div style="position:absolute; left:${i * PM_GANTT_PX_PER_DAY}px; top:0; bottom:0; border-left:1px solid var(--line); padding-left:4px; font-size:10.5px; color:var(--ink-soft); display:flex; align-items:center;">${pmFormatDayTick(dayMs)}</div>`);
+    }
+  }
+  return `<div class="pm-gantt-header pm-gantt-row" style="width:${totalDays * PM_GANTT_PX_PER_DAY}px;">${ticks.join('')}</div>`;
+}
+
+function pmGanttRowHtml(row, minMs, totalDays, todayMs) {
+  const { task, eff, hasChildren } = row;
+  const width = totalDays * PM_GANTT_PX_PER_DAY;
+  let barHtml = '';
+  const s = pmParseISODate(eff.start);
+  const f = pmParseISODate(eff.finish || eff.start);
+  if (s != null && f != null) {
+    const left = pmDaysBetween(minMs, s) * PM_GANTT_PX_PER_DAY;
+    if (task.isMilestone) {
+      barHtml = `<div class="pm-gantt-milestone" style="left:${left}px;" title="${esc(task.name)}"></div>`;
+    } else {
+      const spanDays = Math.max(1, pmDaysBetween(s, f) + 1);
+      const barWidth = Math.max(6, spanDays * PM_GANTT_PX_PER_DAY - 2);
+      const pct = Math.min(100, Math.max(0, eff.percentComplete || 0));
+      barHtml = `
+        <div class="pm-gantt-bar${hasChildren ? ' pm-gantt-bar-summary' : ''}" style="left:${left}px; width:${barWidth}px;" title="${esc(task.name)} — ${pct}%">
+          ${hasChildren ? '' : `<div class="pm-gantt-bar-progress" style="width:${pct}%;"></div>`}
+        </div>
+      `;
+    }
+  }
+  return `<div class="pm-gantt-row" style="width:${width}px;">${barHtml}</div>`;
+}
+
+function pmGanttChartHtml(rows) {
+  if (!rows.length) return '';
+  const { minMs, maxMs } = pmComputeGanttRange(rows);
+  const totalDays = Math.max(1, pmDaysBetween(minMs, maxMs));
+  const todayMs = pmParseISODate(new Date().toISOString());
+  const headerHtml = pmGanttHeaderHtml(minMs, totalDays);
+  const rowsHtml = rows.map((row) => pmGanttRowHtml(row, minMs, totalDays, todayMs)).join('');
+
+  let todayLineHtml = '';
+  if (todayMs >= minMs && todayMs <= maxMs) {
+    const left = pmDaysBetween(minMs, todayMs) * PM_GANTT_PX_PER_DAY;
+    const totalHeight = PM_GANTT_ROW_H + rows.length * PM_GANTT_ROW_H;
+    todayLineHtml = `<div class="pm-gantt-today" style="left:${left}px; height:${totalHeight}px;"></div>`;
+  }
+
+  return `
+    <div class="pm-gantt-chart">
+      <div style="position:relative; width:${totalDays * PM_GANTT_PX_PER_DAY}px;">
+        ${headerHtml}
+        ${rowsHtml}
+        ${todayLineHtml}
+      </div>
+    </div>
+  `;
 }
 
 function drawPMWorkspace() {
@@ -149,9 +251,8 @@ function drawPMWorkspace() {
   const rows = [];
   pmBuildRows(null, 0, '', rows);
 
-  const rowsHtml = rows.map(({ task, depth, wbs }) => {
-    const hasChildren = pmTaskChildren(task.id).length > 0;
-    const r = hasChildren ? pmRollup(task.id) : task;
+  const rowsHtml = rows.map(({ task, depth, wbs, hasChildren, eff }) => {
+    const r = eff;
     const selected = task.id === selectedTaskId;
     return `
       <div class="pm-row${selected ? ' pm-row-selected' : ''}${hasChildren ? ' pm-row-summary' : ''}" data-id="${task.id}">
@@ -167,6 +268,8 @@ function drawPMWorkspace() {
     `;
   }).join('');
 
+  const ganttHtml = pmGanttChartHtml(rows);
+
   appEl.innerHTML = `
     <div class="topbar">
       <button class="icon-btn" id="btn-pm-workspace-back">‹</button>
@@ -177,22 +280,25 @@ function drawPMWorkspace() {
       <button class="text-btn" id="btn-pm-project-info">Info</button>
     </div>
     <div class="content" id="pm-table-content" style="padding:0;">
-      <div class="pm-table">
-        <div class="pm-row pm-row-header">
-          <div class="pm-cell pm-cell-wbs">WBS</div>
-          <div class="pm-cell pm-cell-name">Task</div>
-          <div class="pm-cell pm-cell-dur">Duration</div>
-          <div class="pm-cell pm-cell-date">Start</div>
-          <div class="pm-cell pm-cell-date">Finish</div>
-          <div class="pm-cell pm-cell-pct">% Complete</div>
-        </div>
-        ${rows.length ? rowsHtml : `
-          <div class="empty-state">
-            <div class="glyph">＋</div>
-            <h3>No tasks yet</h3>
-            <p>Add the first task to start the WBS.</p>
+      <div class="pm-split-wrap">
+        <div class="pm-table">
+          <div class="pm-row pm-row-header">
+            <div class="pm-cell pm-cell-wbs">WBS</div>
+            <div class="pm-cell pm-cell-name">Task</div>
+            <div class="pm-cell pm-cell-dur">Duration</div>
+            <div class="pm-cell pm-cell-date">Start</div>
+            <div class="pm-cell pm-cell-date">Finish</div>
+            <div class="pm-cell pm-cell-pct">% Complete</div>
           </div>
-        `}
+          ${rows.length ? rowsHtml : `
+            <div class="empty-state">
+              <div class="glyph">＋</div>
+              <h3>No tasks yet</h3>
+              <p>Add the first task to start the WBS.</p>
+            </div>
+          `}
+        </div>
+        ${ganttHtml}
       </div>
     </div>
     <div class="pm-toolbar">

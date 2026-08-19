@@ -1,8 +1,8 @@
 # Inspector by Arch&Array — Development Roadmap
 
 **Status:** Living document — single source of truth
-**Last updated:** 2026-08-18
-**Last updated by:** PM module build chat — reversed the PM location decision back to "module inside Inspector," verified against real source, and built Phase 1 Step 1 (data model + WBS task table)
+**Last updated:** 2026-08-19
+**Last updated by:** PM module build chat — Step 1 confirmed field-tested on a real iPad; built Step 2 (read-only Gantt render)
 
 ---
 
@@ -51,7 +51,7 @@ This document exists because development on Inspector happens across multiple se
 ### 3.1 Platform / PWA Shell
 - **Status:** Stable
 - **Description:** Offline-first PWA, vanilla JavaScript, no build step, IndexedDB for storage, hosted on GitHub Pages, installed via Safari "Add to Home Screen" on iPad Pro. No backend.
-- **Current version:** v6.6 (DB schema version 6 — bumped this session for the new PM stores, see 4.1)
+- **Current version:** v6.7 (DB schema version 6 — no further migration needed for Step 2, Gantt reads the same stores)
 - **File list:** `index.html`, `manifest.json`, `sw.js`, `css/styles.css`, `js/db.js`, `js/bci.js`, `js/geo.js`, `js/backup.js`, `js/app.js`, `js/annotate.js`, `js/signature.js`, `js/pdf.js`, `js/pdfeditor.js`, `js/pm.js` (new this session — see 4.1), `js/launcher.js`, `js/shell.js`
 - **CDN libraries (loaded dynamically, cached by the service worker on first fetch — not in the upfront precache list, matching how pdf.js has always been handled):** jsPDF + jspdf-autotable (report creation), pdf.js (page rendering/thumbnails), **pdf-lib (new this session — structural PDF editing, used only by the PDF Editor tool)**.
 - **Current capabilities:** Full offline operation after first load; service worker caching; in-app update mechanism ("Check Updates" button clears cache/SW and reloads from GitHub Pages).
@@ -143,31 +143,39 @@ This document exists because development on Inspector happens across multiple se
 
 ### 4.1 Project Management / Scheduling (Gantt)
 
-- **Status:** In Progress — Phase 1 Step 1 built (untested on device)
-- **Decision reversed back:** this module lives **inside Inspector**, vanilla JS, no build step — **not** the separate React/TS/Vite PWA the prior session had pivoted to. Decided explicitly this session after being shown the conflict between the two sessions' opposite conclusions. See the amended Section 5 entry.
-- **Description:** Full build brief exists (Microsoft-Project-inspired — WBS, CPM scheduling engine, interactive Gantt, resources, calendars, milestones, baselines, cost tracking, dashboards). Agreed build sequence (unchanged from original scoping):
-  1. **Data model + plain editable task table** — ✅ built this session
-  2. Read-only Gantt render — not started
+- **Status:** In Progress — Step 1 **Built — Field Tested** (confirmed working on a real iPad), Step 2 built this session (untested on device)
+- **Decision reversed back:** this module lives **inside Inspector**, vanilla JS, no build step — **not** the separate React/TS/Vite PWA the prior session had pivoted to. Decided explicitly after being shown the conflict between two sessions' opposite conclusions. See the amended Section 5 entry.
+- **Description:** Full build brief exists (Microsoft-Project-inspired — WBS, CPM scheduling engine, interactive Gantt, resources, calendars, milestones, baselines, cost tracking, dashboards). Agreed build sequence:
+  1. **Data model + plain editable task table** — ✅ built, ✅ field-tested on iPad
+  2. **Read-only Gantt render** — ✅ built this session, not yet device-tested
   3. CPM scheduling engine (pure, framework-free, unit-testable) — not started
   4. Drag interaction + undo/redo — not started
-- **Current capabilities (Step 1, built this session):**
+- **Current capabilities (Step 1, field-tested):**
   - New file `js/pm.js`, reached via a new "Project Management" Launcher tile → `#/pm`, same route pattern as Scale/Annotate and PDF Editor
   - New IndexedDB stores in `db.js` (`DB_VERSION` bumped 5→6): `pmProjects`, `pmTasks` (indexed by `projectId` and `parentId`), `pmDependencies` (indexed by `projectId`/`predecessorId`/`successorId` — schema exists now so Step 3 won't need another migration, but nothing reads/writes it yet)
-  - Project list screen (create/select projects) → project workspace with a full WBS task table: unlimited nesting, add task/add subtask, indent/outdent, delete (cascades to subtasks + any dependency rows), tap-to-select then tap-to-edit (matches the app's existing sheet-based editing pattern rather than inline tiny inputs)
+  - Project list screen (create/select projects) → project workspace with a full WBS task table: unlimited nesting, add task/add subtask, indent/outdent, delete (cascades to subtasks + any dependency rows), tap-to-select then tap-to-edit
   - Manual duration/start/finish/% complete per leaf task; milestone flag (zero duration, start=finish, shown with a ◆ marker)
-  - **Summary (parent) task rollup is computed at render time, not stored** — earliest child start, latest child finish, total duration, duration-weighted % complete. Matches brief §7 and keeps it impossible for a rollup to drift from the real leaf data.
-  - `APP_VERSION` bumped 6.5→6.6, `sw.js` `CACHE_NAME` bumped in step, per the project's own release convention
-- **Verification done this session (not yet device-tested):**
+  - Summary (parent) task rollup computed at render time, not stored — earliest child start, latest child finish, total duration, duration-weighted % complete
+- **Current capabilities (Step 2, built this session, NOT yet device-tested):**
+  - The task table now sits inside a `.pm-split-wrap` flex row alongside a new `.pm-gantt-chart` column to its right — matches the brief's §4 "task table on the left + Gantt chart on the right" layout, both visible simultaneously (no toggle)
+  - Gantt rows are built from the **exact same row/effective-value array** the table uses (`pmBuildRows` now attaches `eff` — either the task itself or its computed rollup — once per row, consumed by both renderers) so the two panes can never show inconsistent numbers
+  - Task bars, summary-task bars (bracket style, per Gantt convention — thin top border with end caps rather than a filled bar, since a summary task isn't literally "in progress" the way a leaf task is), milestone diamonds, and an in-bar progress fill for % complete
+  - A dashed "today" line spans the full height of the chart when today falls within the visible range
+  - Chart timeline auto-ranges from the earliest task start to the latest task finish across the whole project (±2/3 days padding), fixed at 20px/day — **no zoom control yet**, by design, per the agreed "no interaction yet" scope for this step
+  - Weekly gridlines with a date label on each Monday
+  - Horizontal scroll is local to the chart column (native browser scroll on the wrapping div); vertical scroll is shared with the page since table and chart rows share the same row height and live in the same document flow — this was a deliberate choice over building a JS scroll-sync between two independently-scrolling panes, since it's simpler and can't drift out of sync
+- **Explicitly not built yet in Step 2 (by design):** no drag-to-reschedule, no bar resize, no dependency lines/arrows (dependencies aren't created anywhere in the UI yet — that's Step 3), no zoom/pan controls, **no working-day/calendar logic** — the chart renders raw calendar-day duration exactly as entered, same as the table always has; weekend/holiday shading is a Phase 2 feature per the original brief (calendars) and hasn't been touched
+- **Verification done this session (not yet device-tested for Step 2):**
   - `node --check` on every new/modified JS file
   - Grepped all files for duplicate top-level `const`/`let`/`function` names — none found
   - Ran a full shared-scope Node `vm` simulation loading all 12 app JS files together — all loaded without cross-file reference errors
-  - **Not yet done: real iPad Safari testing.** Treat as `Built — Untested` until confirmed in the field.
-- **Explicitly not built yet (by design, per the agreed sequence):** no dependency creation/editing UI, no auto-scheduling from dependencies, no Gantt visual at all, no undo/redo, no resources/calendars/baselines/costs (Phase 2+ per the original brief).
+  - Stand-alone unit-style check of the date-math helpers (`pmParseISODate`/`pmDaysBetween`) against hand-computed expected values for a 3-day task span, a milestone (zero-length), and range padding — all correct
+  - **Not yet done: real iPad Safari testing of Step 2.** Step 1 is confirmed field-tested; Step 2 should be treated as `Built — Untested` until confirmed, particularly the row-height alignment between the two panes (CSS uses matching but not identical height rules — `.pm-row` uses `min-height`, `.pm-gantt-row` uses fixed `height` — worth an eye on a real device in case single-line text ever renders at a slightly different height than assumed)
 - **Open questions carried forward, not yet decided:**
-  - Whether the eventual Gantt chart gets built fully custom or via an open-source library
+  - Whether the eventual interactive Gantt (Step 4) needs a proper zoom control, or whether the fixed 20px/day density from Step 2 is kept
   - Whether a PM task should be able to link to a real Inspection record — raised as a possibility, not decided
   - `.mpp` compatibility not realistic in-browser; MS Project XML export achievable later if wanted
-- **Next steps:** Step 2 — read-only Gantt render from the same data model, no interaction yet.
+- **Next steps:** Step 3 — CPM scheduling engine (pure, framework-free, unit-testable module, no DOM code), starting with Finish-to-Start dependencies and lag, wired so editing a duration or dependency recalculates downstream dates. This is also when the dependency-creation UI needs to be built, since `pmDependencies` currently has no way to be populated from the UI.
 
 ### 4.2 3D Capture & Monitoring (LiDAR / Object Capture)
 
@@ -226,3 +234,4 @@ Use this space to note something that affects another section but that you're no
 | 2026-08-15 | Scoping chat (PM module + 3D Capture planning) | Created this document. Populated Sections 3 (from prior conversation memory, unverified against source), 4.1 and 4.2 (from live scoping discussion), 5 (initial decisions). Sections 3.2 and 4.3 flagged as needing real content from a chat with source access / a dedicated scoping session respectively. |
 | 2026-08-15 | Main development chat (New Style reports, Annotator overhaul, PDF Editor) | Verified Section 3 in full directly against actual `.js` source (resolving the earlier "unverified" caveats on 3.1–3.6). Substantially rewrote 3.2 (real DB schema), 3.4 (extensive New Style changes: renames, nested Structure Sections, full-page section editors, PDF page-flow logic), 3.5 (major Annotator expansion: new tools, adjust mode, custom colors/pens, line styles, two unconfirmed bug fixes flagged honestly). Added new Section 3.7 for the PDF Editor tool (built this session). Updated 4.1 to reflect the Project Management module now being built as a separate PWA outside Inspector, with integration intended later — amended the corresponding Section 5 decision log entry rather than silently overwriting it. Added a Section 6 flag for 3D Capture given how much the Annotator changed. Did not touch 4.2 or 4.3 beyond noting they weren't reviewed this session. |
 | 2026-08-18 | PM module build chat | Read `PROJECT_SUMMARY.md` and the real source directly (`db.js`, `app.js`, `launcher.js`, `index.html`, `styles.css`, `sw.js`) — found and surfaced to the user that this roadmap's 4.1 conflicted with a decision made live in conversation. User decided: PM module stays inside Inspector, vanilla JS. Re-amended the Section 5 log entry accordingly. Built Phase 1 Step 1: new `js/pm.js` (WBS task table UI), new `pmProjects`/`pmTasks`/`pmDependencies` stores in `db.js` (`DB_VERSION` 5→6), launcher tile + route wiring, `APP_VERSION`/`CACHE_NAME` bump, small additive CSS block. Verified via `node --check` on all touched files, a full duplicate-top-level-declaration grep across all 12 app JS files, and a shared-scope Node `vm` load simulation of all 12 files together — all clean. **Not yet tested on a real device.** Corrected the stale v4.2/DB-v5 reference in 3.1 to the real current version. Did not touch 4.2 or 4.3. |
+| 2026-08-19 | PM module build chat | User confirmed Step 1 works on a real iPad — updated status to `Built — Field Tested`. Built Step 2: read-only Gantt render, added directly alongside the existing task table (`.pm-split-wrap` flex layout) rather than a separate view, per the brief's own "table left, Gantt right" layout. Refactored `pmBuildRows` to compute each row's effective (rollup-aware) values once and share them between the table and the Gantt renderer, so the two panes can't disagree. Added summary-task bracket bars, milestone diamonds, in-bar progress fill, weekly gridlines, and a today-line. Explicitly no drag/resize/zoom/dependency-lines — matches the agreed "read-only" scope for this step. Verified the same way as Step 1 (`node --check`, duplicate-declaration grep, shared-scope `vm` simulation), plus a standalone check of the date-math helpers against hand-computed values. **Step 2 not yet device-tested** — flagged specifically that the two panes' row-height CSS isn't byte-identical (`min-height` vs `height`) and is worth a real-device check. `APP_VERSION` 6.6→6.7, `CACHE_NAME` bumped in step. |

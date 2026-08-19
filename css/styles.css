@@ -500,3 +500,27 @@ button {
   border-top: 1px solid var(--line); background: #fff; overflow-x: auto;
 }
 .pm-toolbar .btn { flex-shrink: 0; padding: 9px 14px; font-size: 13.5px; }
+
+/* Project Management — Gantt (Phase 1 Step 2: read-only render, no drag/resize/zoom yet) */
+.pm-split-wrap { display: flex; align-items: flex-start; }
+.pm-table { flex-shrink: 0; }
+.pm-gantt-chart { flex: 1; min-width: 0; overflow-x: auto; border-left: 1px solid var(--line); }
+.pm-gantt-row { position: relative; height: 44px; box-sizing: border-box; border-bottom: 1px solid var(--line); }
+.pm-gantt-header { background: var(--paper); position: sticky; top: 0; z-index: 1; }
+.pm-gantt-bar {
+  position: absolute; top: 10px; height: 24px; border-radius: 5px; background: oklch(0.65 0.03 260);
+  overflow: hidden; box-sizing: border-box;
+}
+.pm-gantt-bar-summary { background: transparent; border: none; top: 14px; height: 16px; }
+.pm-gantt-bar-summary::before, .pm-gantt-bar-summary::after {
+  content: ''; position: absolute; top: 0; width: 3px; height: 16px; background: var(--ink);
+}
+.pm-gantt-bar-summary::before { left: 0; }
+.pm-gantt-bar-summary::after { right: 0; }
+.pm-gantt-bar-summary { border-top: 3px solid var(--ink); }
+.pm-gantt-bar-progress { position: absolute; top: 0; left: 0; bottom: 0; background: var(--red); opacity: 0.85; }
+.pm-gantt-milestone {
+  position: absolute; top: 12px; width: 20px; height: 20px; background: var(--red);
+  transform: translateX(-10px) rotate(45deg); border-radius: 3px;
+}
+.pm-gantt-today { position: absolute; top: 0; width: 0; border-left: 1.5px dashed var(--red); z-index: 2; pointer-events: none; }
