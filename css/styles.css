@@ -524,3 +524,12 @@ button {
   transform: translateX(-10px) rotate(45deg); border-radius: 3px;
 }
 .pm-gantt-today { position: absolute; top: 0; width: 0; border-left: 1.5px dashed var(--red); z-index: 2; pointer-events: none; }
+
+/* Project Management — dependency rows in the task edit sheet (Phase 1 Step 3) */
+.pm-dep-row {
+  display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line);
+  font-size: 13.5px;
+}
+.pm-dep-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pm-dep-row-lag { color: var(--ink-soft); font-size: 12px; flex-shrink: 0; }
+.pm-dep-remove { background: none; border: none; color: var(--red); font-size: 16px; padding: 4px 6px; flex-shrink: 0; }

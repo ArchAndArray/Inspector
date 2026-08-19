@@ -980,9 +980,28 @@ const DB = {
     return this.updatePMTask(id, { parentId: newParentId, order: newOrder });
   },
 
-  // --- Project Management: Dependencies (FS/SS/FF/SF, stored now; auto-scheduling engine
-  // to be built in a later pass — see roadmap.md 4.1) ---
+  // --- Project Management: Dependencies (FS/SS/FF/SF, stored now; only FS is actually used
+  // by the scheduling engine so far — see pmschedule.js and roadmap.md 4.1) ---
   async createPMDependency(projectId, predecessorId, successorId, type, lagDays) {
+    if (predecessorId === successorId) throw new Error('A task cannot depend on itself');
+    // Cycle guard — mirrors movePMTask's existing ancestor-walk pattern below, applied to the
+    // dependency graph instead of the WBS parent chain. A CPM engine cannot run on a graph
+    // with cycles (it would either infinite-loop or produce meaningless dates), so this is
+    // enforced here at the data layer, not left to the UI to get right.
+    const existing = await this.getAllByIndex('pmDependencies', 'projectId', projectId);
+    const adjacency = {};
+    for (const d of existing) {
+      (adjacency[d.predecessorId] = adjacency[d.predecessorId] || []).push(d.successorId);
+    }
+    const visited = new Set();
+    const stack = [successorId];
+    while (stack.length) {
+      const node = stack.pop();
+      if (node === predecessorId) throw new Error('That link would create a circular dependency');
+      if (visited.has(node)) continue;
+      visited.add(node);
+      for (const next of (adjacency[node] || [])) stack.push(next);
+    }
     const dep = {
       id: uid(),
       projectId,

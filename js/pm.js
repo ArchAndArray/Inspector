@@ -147,18 +147,11 @@ function pmBuildRows(parentId, depth, wbsPrefix, out) {
 }
 
 // ---------- Gantt (Step 2 — read-only render, no drag/resize/zoom yet) ----------
-// Dates are stored as 'YYYY-MM-DD'. Parsed as UTC midnight throughout so day-difference math
-// can't be thrown off by DST — these are calendar days, not timestamps.
+// Date parsing/formatting lives in pmdate.js (pmParseISODate/pmFormatISODate/pmDaysBetween) —
+// shared with pmschedule.js so the CPM engine can never drift from what the table/Gantt use.
 const PM_GANTT_ROW_H = 44; // must match .pm-row / .pm-gantt-row height in styles.css
 const PM_GANTT_PX_PER_DAY = 20;
 
-function pmParseISODate(str) {
-  if (!str) return null;
-  const [y, m, d] = str.slice(0, 10).split('-').map(Number);
-  if (!y || !m || !d) return null;
-  return Date.UTC(y, m - 1, d);
-}
-function pmDaysBetween(aMs, bMs) { return Math.round((bMs - aMs) / 86400000); }
 function pmFormatDayTick(ms) {
   const d = new Date(ms);
   return `${d.getUTCDate()} ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()]}`;
@@ -337,6 +330,34 @@ async function pmRefreshTasks() {
   pmWorkspaceState.tasks = await DB.listPMTasks(pmWorkspaceState.project.id);
 }
 
+const pmDateFns = { parse: pmParseISODate, format: pmFormatISODate };
+
+function pmLeafTasks() {
+  return pmWorkspaceState.tasks.filter((t) => pmTaskChildren(t.id).length === 0);
+}
+
+// Runs the CPM forward pass, persists any tasks it moved, refreshes state, and returns the
+// list of moved tasks (with names attached) so the caller can tell the user what happened —
+// per the original brief: "clearly indicate the resulting change." Never pulls a task earlier,
+// only pushes tasks later that would otherwise violate a predecessor's finish date + lag.
+async function pmRecomputeSchedule() {
+  const leaf = pmLeafTasks();
+  const deps = await DB.listPMDependencies(pmWorkspaceState.project.id);
+  const changed = PMSchedule.computeForwardPass(leaf, deps, pmDateFns);
+  for (const c of changed) {
+    await DB.updatePMTask(c.id, { start: c.start, finish: c.finish });
+  }
+  await pmRefreshTasks();
+  return changed.map((c) => ({ ...c, name: (leaf.find((t) => t.id === c.id) || {}).name || '' }));
+}
+
+function pmReportScheduleChanges(changed, excludeTaskId) {
+  const others = changed.filter((c) => c.id !== excludeTaskId);
+  if (others.length) {
+    toast(`Also moved: ${others.map((c) => c.name).join(', ')}`);
+  }
+}
+
 async function addPMTaskAndEdit(parentId) {
   const task = await DB.createPMTask(pmWorkspaceState.project.id, {
     parentId,
@@ -393,8 +414,23 @@ async function pmDeleteSelected() {
   drawPMWorkspace();
 }
 
-function openPMTaskSheet(task) {
+async function openPMTaskSheet(task) {
   const hasChildren = pmTaskChildren(task.id).length > 0;
+  const allDeps = hasChildren ? [] : await DB.listPMDependencies(pmWorkspaceState.project.id);
+  const incomingDeps = allDeps.filter((d) => d.successorId === task.id);
+  const leaf = pmLeafTasks();
+
+  const depRowsHtml = incomingDeps.map((d) => {
+    const pred = leaf.find((t) => t.id === d.predecessorId);
+    return `
+      <div class="pm-dep-row" data-dep-id="${d.id}">
+        <span class="pm-dep-row-name">After: ${esc(pred ? pred.name : 'Unknown task')}</span>
+        <span class="pm-dep-row-lag">${d.lagDays ? (d.lagDays > 0 ? '+' : '') + d.lagDays + 'd lag' : ''}</span>
+        <button class="pm-dep-remove" data-dep-id="${d.id}">✕</button>
+      </div>
+    `;
+  }).join('');
+
   const sheet = el(`
     <div class="sheet-backdrop">
       <div class="sheet">
@@ -409,6 +445,12 @@ function openPMTaskSheet(task) {
         <div class="field">
           <label><input type="checkbox" id="f-pmt-milestone" ${task.isMilestone ? 'checked' : ''} style="width:auto; margin-right:8px;">Milestone</label>
           <p class="hint">Milestones have zero duration and start = finish.</p>
+        </div>
+        <div class="field">
+          <label>Dependencies (Finish-to-Start)</label>
+          <div id="pmt-dep-list">${depRowsHtml || '<p class="hint">No predecessors — start date is fully manual.</p>'}</div>
+          <button class="btn btn-secondary btn-block" id="btn-pmt-add-dep" style="margin-top:8px;">+ Add predecessor</button>
+          <p class="hint">Once linked, this task can't start before its predecessor finishes (plus any lag) — but you can still schedule it later than that if you need to.</p>
         </div>
         `}
         <div class="field"><label>Notes</label><textarea id="f-pmt-notes">${esc(task.notes || '')}</textarea></div>
@@ -431,6 +473,24 @@ function openPMTaskSheet(task) {
         sheet.querySelector('#f-pmt-finish').value = sheet.querySelector('#f-pmt-start').value;
       }
     });
+
+    sheet.querySelectorAll('.pm-dep-remove').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        await DB.deletePMDependency(btn.dataset.depId);
+        sheet.remove();
+        await pmRecomputeSchedule();
+        drawPMWorkspace();
+        openPMTaskSheet(pmWorkspaceState.tasks.find((t) => t.id === task.id));
+      });
+    });
+
+    sheet.querySelector('#btn-pmt-add-dep').addEventListener('click', () => {
+      openAddPMDependencySheet(task, incomingDeps, allDeps, leaf, () => {
+        sheet.remove();
+        drawPMWorkspace();
+        openPMTaskSheet(pmWorkspaceState.tasks.find((t) => t.id === task.id));
+      });
+    });
   }
 
   sheet.querySelector('#btn-pmt-save').addEventListener('click', async () => {
@@ -439,16 +499,73 @@ function openPMTaskSheet(task) {
     const patch = { name, notes: sheet.querySelector('#f-pmt-notes').value.trim() };
     if (!hasChildren) {
       const isMilestone = sheet.querySelector('#f-pmt-milestone').checked;
+      const proposedStart = sheet.querySelector('#f-pmt-start').value || null;
+
+      if (proposedStart) {
+        const check = PMSchedule.validateManualStart(task.id, proposedStart, leaf, allDeps, pmDateFns);
+        if (!check.ok) {
+          toast(`Can't start before ${fmtDate(check.minStart)} — blocked by "${check.blockedBy}"`);
+          return;
+        }
+      }
+
       patch.isMilestone = isMilestone;
-      patch.start = sheet.querySelector('#f-pmt-start').value || null;
+      patch.start = proposedStart;
       patch.finish = isMilestone ? patch.start : (sheet.querySelector('#f-pmt-finish').value || null);
       patch.duration = isMilestone ? 0 : Math.max(0, parseInt(sheet.querySelector('#f-pmt-duration').value, 10) || 0);
       patch.percentComplete = Math.min(100, Math.max(0, parseInt(sheet.querySelector('#f-pmt-pct').value, 10) || 0));
     }
     await DB.updatePMTask(task.id, patch);
     sheet.remove();
-    await pmRefreshTasks();
+    const changed = await pmRecomputeSchedule();
+    pmReportScheduleChanges(changed, task.id);
     drawPMWorkspace();
+  });
+}
+
+function openAddPMDependencySheet(task, incomingDeps, allDeps, leaf, onDone) {
+  const linkedIds = new Set(incomingDeps.map((d) => d.predecessorId));
+  const candidates = leaf.filter((t) => {
+    if (t.id === task.id || linkedIds.has(t.id)) return false;
+    // Pre-filter obviously-invalid choices for a better picker experience; db.js still
+    // enforces this authoritatively regardless of what's shown here.
+    return !PMSchedule.wouldCreateCycle(allDeps, t.id, task.id);
+  });
+
+  const rows = candidates.map((t) => `
+    <div class="list-item" data-id="${t.id}">
+      <div class="meta"><h3>${esc(t.name)}</h3></div>
+      <span class="chevron">›</span>
+    </div>
+  `).join('');
+
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Add predecessor</h2>
+        ${candidates.length ? rows : '<p class="hint">No other tasks available to link — add more tasks first, or every remaining task would create a circular dependency.</p>'}
+        <button class="btn btn-ghost btn-block" id="btn-pmt-dep-cancel" style="margin-top:10px;">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-pmt-dep-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelectorAll('.list-item').forEach((row) => {
+    row.addEventListener('click', async () => {
+      try {
+        await DB.createPMDependency(pmWorkspaceState.project.id, row.dataset.id, task.id, 'FS', 0);
+      } catch (err) {
+        toast(err.message);
+        sheet.remove();
+        return;
+      }
+      sheet.remove();
+      const changed = await pmRecomputeSchedule();
+      pmReportScheduleChanges(changed, null);
+      onDone();
+    });
   });
 }
 
