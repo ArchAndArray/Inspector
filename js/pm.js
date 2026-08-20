@@ -101,7 +101,7 @@ async function renderPMWorkspace(projectId) {
   const project = await DB.get('pmProjects', projectId);
   if (!project) { renderPM(); return; }
   const tasks = await DB.listPMTasks(projectId);
-  pmWorkspaceState = { project, tasks, selectedTaskId: null, undoStack: [], redoStack: [] };
+  pmWorkspaceState = { project, tasks, selectedTaskId: null, undoStack: [], redoStack: [], collapsedColumns: pmWorkspaceState ? pmWorkspaceState.collapsedColumns : new Set() };
   drawPMWorkspace();
 }
 
@@ -151,6 +151,23 @@ function pmBuildRows(parentId, depth, wbsPrefix, out) {
 // shared with pmschedule.js so the CPM engine can never drift from what the table/Gantt use.
 const PM_GANTT_ROW_H = 44; // must match .pm-row / .pm-gantt-row height in styles.css
 const PM_GANTT_PX_PER_DAY = 20;
+
+// Column widths for the task table (Phase 2: collapsible columns). WBS and Name are always
+// full width — only Duration/Start/Finish/%Complete can be tapped to collapse, per the user's
+// explicit request. Collapsing frees width from the TABLE itself (not given to the Name
+// column), which lets .pm-gantt-chart's flex:1 automatically expand into the freed space —
+// there's no separate "resize the gantt" step, it's the same flex layout reacting to a smaller
+// sibling, same principle as the table/gantt split itself.
+const PM_COL_WIDTHS = { wbs: 52, name: 150, duration: 64, start: 82, finish: 82, pct: 56 };
+const PM_COL_COLLAPSED_WIDTH = 28;
+const PM_TABLE_ROW_PADDING = 32; // .pm-row's 16px left+right padding
+
+function pmColWidth(col) {
+  return pmWorkspaceState.collapsedColumns.has(col) ? PM_COL_COLLAPSED_WIDTH : PM_COL_WIDTHS[col];
+}
+function pmTableTotalWidth() {
+  return PM_COL_WIDTHS.wbs + PM_COL_WIDTHS.name + pmColWidth('duration') + pmColWidth('start') + pmColWidth('finish') + pmColWidth('pct') + PM_TABLE_ROW_PADDING;
+}
 
 function pmFormatDayTick(ms) {
   const d = new Date(ms);
@@ -369,19 +386,25 @@ function drawPMWorkspace() {
   const rows = [];
   pmBuildRows(null, 0, '', rows);
 
+  const durW = pmColWidth('duration'), startW = pmColWidth('start'), finishW = pmColWidth('finish'), pctW = pmColWidth('pct');
+  const durCollapsed = pmWorkspaceState.collapsedColumns.has('duration');
+  const startCollapsed = pmWorkspaceState.collapsedColumns.has('start');
+  const finishCollapsed = pmWorkspaceState.collapsedColumns.has('finish');
+  const pctCollapsed = pmWorkspaceState.collapsedColumns.has('pct');
+
   const rowsHtml = rows.map(({ task, depth, wbs, hasChildren, eff }) => {
     const r = eff;
     const selected = task.id === selectedTaskId;
     return `
       <div class="pm-row${selected ? ' pm-row-selected' : ''}${hasChildren ? ' pm-row-summary' : ''}" data-id="${task.id}">
         <div class="pm-cell pm-cell-wbs">${wbs}</div>
-        <div class="pm-cell pm-cell-name" style="padding-left:${depth * 20}px;">
+        <div class="pm-cell pm-cell-name" style="width:${PM_COL_WIDTHS.name}px; padding-left:${depth * 20}px;">
           ${task.isMilestone ? '<span class="pm-milestone-diamond">◆</span>' : ''}${esc(task.name)}
         </div>
-        <div class="pm-cell pm-cell-dur">${task.isMilestone ? '—' : (r.duration || 0) + 'd'}</div>
-        <div class="pm-cell pm-cell-date">${r.start ? fmtDate(r.start) : '—'}</div>
-        <div class="pm-cell pm-cell-date">${r.finish ? fmtDate(r.finish) : '—'}</div>
-        <div class="pm-cell pm-cell-pct">${r.percentComplete || 0}%</div>
+        <div class="pm-cell pm-cell-dur" style="width:${durW}px;">${durCollapsed ? '' : (task.isMilestone ? '—' : (r.duration || 0) + 'd')}</div>
+        <div class="pm-cell pm-cell-date" style="width:${startW}px;">${startCollapsed ? '' : (r.start ? fmtDate(r.start) : '—')}</div>
+        <div class="pm-cell pm-cell-date" style="width:${finishW}px;">${finishCollapsed ? '' : (r.finish ? fmtDate(r.finish) : '—')}</div>
+        <div class="pm-cell pm-cell-pct" style="width:${pctW}px;">${pctCollapsed ? '' : (r.percentComplete || 0) + '%'}</div>
       </div>
     `;
   }).join('');
@@ -399,14 +422,14 @@ function drawPMWorkspace() {
     </div>
     <div class="content" id="pm-table-content" style="padding:0;">
       <div class="pm-split-wrap">
-        <div class="pm-table">
+        <div class="pm-table" style="width:${pmTableTotalWidth()}px;">
           <div class="pm-row pm-row-header">
             <div class="pm-cell pm-cell-wbs">WBS</div>
-            <div class="pm-cell pm-cell-name">Task</div>
-            <div class="pm-cell pm-cell-dur">Duration</div>
-            <div class="pm-cell pm-cell-date">Start</div>
-            <div class="pm-cell pm-cell-date">Finish</div>
-            <div class="pm-cell pm-cell-pct">% Complete</div>
+            <div class="pm-cell pm-cell-name" style="width:${PM_COL_WIDTHS.name}px;">Task</div>
+            <div class="pm-cell pm-cell-dur pm-col-toggle" data-col="duration" style="width:${durW}px;">${durCollapsed ? 'D' : 'Duration'}</div>
+            <div class="pm-cell pm-cell-date pm-col-toggle" data-col="start" style="width:${startW}px;">${startCollapsed ? 'S' : 'Start'}</div>
+            <div class="pm-cell pm-cell-date pm-col-toggle" data-col="finish" style="width:${finishW}px;">${finishCollapsed ? 'F' : 'Finish'}</div>
+            <div class="pm-cell pm-cell-pct pm-col-toggle" data-col="pct" style="width:${pctW}px;">%</div>
           </div>
           ${rows.length ? rowsHtml : `
             <div class="empty-state">
@@ -455,6 +478,15 @@ function drawPMWorkspace() {
   });
 
   pmWireGanttDrag();
+
+  appEl.querySelectorAll('.pm-col-toggle').forEach((headerEl) => {
+    headerEl.addEventListener('click', () => {
+      const col = headerEl.dataset.col;
+      if (pmWorkspaceState.collapsedColumns.has(col)) pmWorkspaceState.collapsedColumns.delete(col);
+      else pmWorkspaceState.collapsedColumns.add(col);
+      drawPMWorkspace();
+    });
+  });
 }
 
 async function pmRefreshTasks() {
@@ -686,6 +718,33 @@ async function openPMTaskSheet(task) {
 
   if (!hasChildren) {
     const msBox = sheet.querySelector('#f-pmt-milestone');
+    const startInput = sheet.querySelector('#f-pmt-start');
+    const finishInput = sheet.querySelector('#f-pmt-finish');
+    const durationInput = sheet.querySelector('#f-pmt-duration');
+
+    // Logged bug fix: Start/Finish/Duration could previously drift out of sync in this sheet —
+    // only the Gantt drag/resize (Step 4) kept them consistent. Reuses the same already-tested
+    // PMCalendar functions the engine itself uses, not a second implementation. Validation
+    // against predecessors/non-working-days still only happens on Save, same "validate on
+    // release, not while typing" philosophy already used for the Gantt drag interaction.
+    function pmSheetRecomputeFinishFromDuration() {
+      if (msBox.checked) return;
+      const s = pmParseISODate(startInput.value);
+      const dur = Math.max(1, parseInt(durationInput.value, 10) || 1);
+      if (s == null) return;
+      finishInput.value = pmFormatISODate(PMCalendar.addWorkingDays(s, dur, pmEffectiveCalendar()));
+    }
+    function pmSheetRecomputeDurationFromFinish() {
+      if (msBox.checked) return;
+      const s = pmParseISODate(startInput.value);
+      const f = pmParseISODate(finishInput.value);
+      if (s == null || f == null) return;
+      durationInput.value = PMCalendar.countWorkingDays(s, f, pmEffectiveCalendar());
+    }
+    durationInput.addEventListener('input', pmSheetRecomputeFinishFromDuration);
+    finishInput.addEventListener('input', pmSheetRecomputeDurationFromFinish);
+    startInput.addEventListener('input', pmSheetRecomputeFinishFromDuration); // moving start preserves duration, shifts finish — same as the Gantt "move" drag
+
     msBox.addEventListener('change', () => {
       sheet.querySelector('#f-pmt-duration').disabled = msBox.checked;
       sheet.querySelector('#f-pmt-finish').disabled = msBox.checked;
