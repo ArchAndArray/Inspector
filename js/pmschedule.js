@@ -18,6 +18,15 @@
 // (pmParseISODate / pmFormatISODate), not a second implementation. Dates are UTC-midnight
 // millisecond timestamps internally so day-difference math can't be thrown off by DST —
 // re-deriving that here would risk reintroducing the exact bug it was written to avoid.
+//
+// Calendar-awareness (added alongside pmcalendar.js): every function here now takes an
+// OPTIONAL calendar argument. If omitted, it defaults to PMCalendar.ALL_DAYS — a no-op
+// calendar where every day is a working day — specifically so the original Step 3 tests below
+// keep testing pure dependency/cascade logic unaffected by weekends, exactly as they did before
+// calendars existed. The real app always passes an explicit calendar at call time (pm.js reads
+// it from the project record); PMCalendar.DEFAULT (Mon-Fri) is the product-level default a NEW
+// project gets, set in db.js, not something this engine assumes on its own.
+const PMCalendarRef = (typeof require === 'function') ? require('./pmcalendar.js') : (typeof window !== 'undefined' ? window.PMCalendar : null);
 
 const PMSchedule = {
   // Would linking predecessorId -> successorId create a cycle in the existing dependency graph?
@@ -55,16 +64,26 @@ const PMSchedule = {
   // manual buffer the user chose — the engine only intervenes when a predecessor's finish date
   // moves far enough that the task's current start would violate the dependency.
   //
+  // Calendar behavior: a task's required start (day after predecessor finishes + lag) is snapped
+  // forward to the next working day — UNLESS the task is a milestone, since a milestone is a
+  // marker/event, not work, and can legitimately land on a non-working day (e.g. "client sign-off
+  // received", which might just happen to be recorded on a Saturday). A task's finish is computed
+  // by counting `duration` WORKING days from its start (skipping non-working days), not
+  // `duration` raw calendar days — this is the actual behavior change calendars introduce; a
+  // task's numeric duration value is unchanged, but what it now means is "working days."
+  //
   // tasks: array of LEAF task objects only ({id, name, start, finish, duration, isMilestone}) —
   // summary tasks aren't independently dated and aren't valid dependency endpoints in this pass.
   // deps: array of {predecessorId, successorId, type, lagDays}. Only type === 'FS' is scheduled.
   // dateFns: { parse(str) -> ms|null, format(ms) -> str }.
+  // calendar: optional, defaults to PMCalendar.ALL_DAYS (see file header note).
   //
   // Returns: array of { id, start, finish } for every task that actually moved, in the order
   // they were resolved (predecessors before successors) — pm.js persists these and can report
   // "also moved: X, Y" to the user.
-  computeForwardPass(tasks, deps, dateFns) {
+  computeForwardPass(tasks, deps, dateFns, calendar) {
     const { parse, format } = dateFns;
+    const cal = calendar || PMCalendarRef.ALL_DAYS;
     const taskMap = new Map(tasks.map((t) => [t.id, { ...t }]));
 
     const fsDeps = deps.filter((d) => d.type === 'FS' && taskMap.has(d.predecessorId) && taskMap.has(d.successorId));
@@ -100,6 +119,8 @@ const PMSchedule = {
       const incoming = incomingByTask[id] || [];
       if (incoming.length === 0) continue; // no predecessors — never auto-moved
 
+      // Take the max of the RAW (unsnapped) candidates first, then snap once — equivalent to
+      // snapping each candidate individually since nextWorkingDay is non-decreasing, but simpler.
       let requiredStartMs = null;
       for (const dep of incoming) {
         const pred = taskMap.get(dep.predecessorId);
@@ -111,13 +132,14 @@ const PMSchedule = {
         if (requiredStartMs == null || candidateMs > requiredStartMs) requiredStartMs = candidateMs;
       }
       if (requiredStartMs == null) continue;
+      if (!task.isMilestone) requiredStartMs = PMCalendarRef.nextWorkingDay(requiredStartMs, cal);
 
       const currentStartMs = task.start ? parse(task.start) : null;
       if (currentStartMs != null && currentStartMs >= requiredStartMs) continue; // already satisfies it, has float — leave alone
 
-      const durationDays = task.isMilestone ? 0 : Math.max(0, task.duration || 0);
+      const durationDays = task.isMilestone ? 0 : Math.max(1, task.duration || 1);
       const newStartMs = requiredStartMs;
-      const newFinishMs = task.isMilestone ? newStartMs : newStartMs + Math.max(0, durationDays - 1) * 86400000;
+      const newFinishMs = task.isMilestone ? newStartMs : PMCalendarRef.addWorkingDays(newStartMs, durationDays, cal);
       const newStart = format(newStartMs);
       const newFinish = format(newFinishMs);
       if (newStart !== task.start || newFinish !== task.finish) {
@@ -129,13 +151,20 @@ const PMSchedule = {
     return changed;
   },
 
-  // Validates a proposed manual start-date edit against a task's existing FS predecessors,
-  // without mutating anything. A task can always be pushed later than the minimum (using up
-  // float) but never earlier than what its predecessors require.
-  // Returns { ok: true } or { ok: false, minStart: 'YYYY-MM-DD', blockedBy: 'predecessor name' }.
-  validateManualStart(taskId, proposedStart, tasks, deps, dateFns) {
+  // Validates a proposed manual start-date edit. Checks two independent things for a normal
+  // (non-milestone) task: (1) it doesn't violate an FS predecessor, same rule as the forward
+  // pass — can be later than the minimum (using float) but never earlier; (2) it actually falls
+  // on a working day per the project calendar. Milestones skip both the predecessor-snap and
+  // the working-day check, for the same reason noted in computeForwardPass — they're markers,
+  // not work.
+  // Returns { ok: true } or { ok: false, minStart: 'YYYY-MM-DD', blockedBy, reason }, where
+  // reason is 'predecessor' or 'non-working-day' so the caller can phrase the message correctly.
+  validateManualStart(taskId, proposedStart, tasks, deps, dateFns, calendar) {
     const { parse, format } = dateFns;
+    const cal = calendar || PMCalendarRef.ALL_DAYS;
     const taskMap = new Map(tasks.map((t) => [t.id, t]));
+    const thisTask = taskMap.get(taskId);
+    const isMilestone = !!(thisTask && thisTask.isMilestone);
     const incoming = deps.filter((d) => d.successorId === taskId && d.type === 'FS');
 
     let minStartMs = null, blockedBy = null;
@@ -147,12 +176,17 @@ const PMSchedule = {
       const candidateMs = predFinishMs + 86400000 + (dep.lagDays || 0) * 86400000;
       if (minStartMs == null || candidateMs > minStartMs) { minStartMs = candidateMs; blockedBy = pred.name; }
     }
-    if (minStartMs == null) return { ok: true };
+    if (minStartMs != null && !isMilestone) minStartMs = PMCalendarRef.nextWorkingDay(minStartMs, cal);
 
     const proposedMs = parse(proposedStart);
-    if (proposedMs == null || proposedMs < minStartMs) {
-      return { ok: false, minStart: format(minStartMs), blockedBy };
+    if (minStartMs != null && (proposedMs == null || proposedMs < minStartMs)) {
+      return { ok: false, minStart: format(minStartMs), blockedBy, reason: 'predecessor' };
     }
+
+    if (!isMilestone && proposedMs != null && !PMCalendarRef.isWorkingDay(proposedMs, cal)) {
+      return { ok: false, minStart: format(PMCalendarRef.nextWorkingDay(proposedMs, cal)), blockedBy: null, reason: 'non-working-day' };
+    }
+
     return { ok: true };
   }
 };

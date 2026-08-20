@@ -235,17 +235,27 @@ function pmGanttChartHtml(rows) {
   const todayMs = pmParseISODate(new Date().toISOString());
   const headerHtml = pmGanttHeaderHtml(minMs, totalDays);
   const rowsHtml = rows.map((row) => pmGanttRowHtml(row, minMs, totalDays)).join('');
+  const totalHeight = PM_GANTT_ROW_H + rows.length * PM_GANTT_ROW_H;
+
+  const cal = pmEffectiveCalendar();
+  let shadingHtml = '';
+  for (let i = 0; i < totalDays; i++) {
+    const dayMs = minMs + i * 86400000;
+    if (!PMCalendar.isWorkingDay(dayMs, cal)) {
+      shadingHtml += `<div class="pm-gantt-nonworking" style="left:${i * PM_GANTT_PX_PER_DAY}px; width:${PM_GANTT_PX_PER_DAY}px; height:${totalHeight}px;"></div>`;
+    }
+  }
 
   let todayLineHtml = '';
   if (todayMs >= minMs && todayMs <= maxMs) {
     const left = pmDaysBetween(minMs, todayMs) * PM_GANTT_PX_PER_DAY;
-    const totalHeight = PM_GANTT_ROW_H + rows.length * PM_GANTT_ROW_H;
     todayLineHtml = `<div class="pm-gantt-today" style="left:${left}px; height:${totalHeight}px;"></div>`;
   }
 
   return `
     <div class="pm-gantt-chart">
       <div style="position:relative; width:${totalDays * PM_GANTT_PX_PER_DAY}px;">
+        ${shadingHtml}
         ${headerHtml}
         ${rowsHtml}
         ${todayLineHtml}
@@ -457,6 +467,19 @@ function pmLeafTasks() {
   return pmWorkspaceState.tasks.filter((t) => pmTaskChildren(t.id).length === 0);
 }
 
+// A project created before calendars existed simply won't have this field — treated as the
+// same Mon-Fri default at read time rather than requiring any data migration.
+function pmEffectiveCalendar() {
+  return pmWorkspaceState.project.calendar || PMCalendar.DEFAULT;
+}
+
+function pmExplainValidationFailure(check) {
+  if (check.reason === 'non-working-day') {
+    return `That date isn't a working day on this project's calendar — try ${fmtDate(check.minStart)} or later`;
+  }
+  return `Can't start before ${fmtDate(check.minStart)} — blocked by "${check.blockedBy}"`;
+}
+
 // ---------- Schedule-change undo/redo (Step 4) ----------
 // Scoped deliberately to DATE changes only (manual sheet edits, drag, resize) — not dependency
 // create/remove, and not structural WBS edits (indent/outdent/add/delete). Those remain
@@ -505,9 +528,9 @@ async function pmCommitTaskDates(taskId, primaryPatch) {
 
   const startChanged = primaryPatch.start !== undefined && primaryPatch.start !== primaryTask.start;
   if (startChanged && primaryPatch.start) {
-    const check = PMSchedule.validateManualStart(taskId, primaryPatch.start, leaf, deps, pmDateFns);
+    const check = PMSchedule.validateManualStart(taskId, primaryPatch.start, leaf, deps, pmDateFns, pmEffectiveCalendar());
     if (!check.ok) {
-      return { ok: false, error: `Can't start before ${fmtDate(check.minStart)} — blocked by "${check.blockedBy}"` };
+      return { ok: false, error: pmExplainValidationFailure(check) };
     }
   }
 
@@ -521,7 +544,7 @@ async function pmCommitTaskDates(taskId, primaryPatch) {
   await DB.updatePMTask(taskId, primaryPatch);
 
   const updatedLeaf = leaf.map((t) => (t.id === taskId ? { ...t, ...primaryPatch } : t));
-  const cascaded = PMSchedule.computeForwardPass(updatedLeaf, deps, pmDateFns);
+  const cascaded = PMSchedule.computeForwardPass(updatedLeaf, deps, pmDateFns, pmEffectiveCalendar());
   for (const c of cascaded) await DB.updatePMTask(c.id, { start: c.start, finish: c.finish });
 
   const entryMap = new Map();
@@ -606,7 +629,7 @@ async function pmDeleteSelected() {
 async function pmRecomputeAfterDependencyChange() {
   const leaf = pmLeafTasks();
   const deps = await DB.listPMDependencies(pmWorkspaceState.project.id);
-  const changed = PMSchedule.computeForwardPass(leaf, deps, pmDateFns);
+  const changed = PMSchedule.computeForwardPass(leaf, deps, pmDateFns, pmEffectiveCalendar());
   for (const c of changed) await DB.updatePMTask(c.id, { start: c.start, finish: c.finish });
   await pmRefreshTasks();
   return changed.map((c) => ({ id: c.id, name: (leaf.find((t) => t.id === c.id) || {}).name || '' }));
@@ -636,7 +659,7 @@ async function openPMTaskSheet(task) {
         <h2>Edit task</h2>
         <div class="field"><label>Name</label><input type="text" id="f-pmt-name" value="${esc(task.name)}"></div>
         ${hasChildren ? `<p class="hint">This is a summary task — duration and dates roll up from its subtasks and can't be edited directly here.</p>` : `
-        <div class="field"><label>Duration (days)</label><input type="number" min="0" step="1" id="f-pmt-duration" value="${task.duration}" ${task.isMilestone ? 'disabled' : ''}></div>
+        <div class="field"><label>Duration (working days)</label><input type="number" min="1" step="1" id="f-pmt-duration" value="${task.duration}" ${task.isMilestone ? 'disabled' : ''}></div>
         <div class="field"><label>Start</label><input type="date" id="f-pmt-start" value="${task.start ? task.start.slice(0, 10) : ''}"></div>
         <div class="field"><label>Finish</label><input type="date" id="f-pmt-finish" value="${task.finish ? task.finish.slice(0, 10) : ''}" ${task.isMilestone ? 'disabled' : ''}></div>
         <div class="field"><label>% Complete</label><input type="number" min="0" max="100" step="5" id="f-pmt-pct" value="${task.percentComplete}"></div>
@@ -765,6 +788,23 @@ function openAddPMDependencySheet(task, incomingDeps, allDeps, leaf, onDone) {
 
 function openEditPMProjectSheet() {
   const { project } = pmWorkspaceState;
+  const cal = project.calendar || PMCalendar.DEFAULT;
+  const weekdayLabels = [
+    { day: 1, label: 'Mon' }, { day: 2, label: 'Tue' }, { day: 3, label: 'Wed' },
+    { day: 4, label: 'Thu' }, { day: 5, label: 'Fri' }, { day: 6, label: 'Sat' }, { day: 0, label: 'Sun' }
+  ];
+  const weekdayTogglesHtml = weekdayLabels.map(({ day, label }) => `
+    <label style="display:inline-flex; align-items:center; gap:5px; margin-right:14px; margin-bottom:6px;">
+      <input type="checkbox" class="f-pm-cal-weekday" value="${day}" style="width:auto;" ${cal.workingWeekdays.includes(day) ? 'checked' : ''}>${label}
+    </label>
+  `).join('');
+  const holidayRowsHtml = (cal.holidays || []).slice().sort().map((d) => `
+    <div class="pm-dep-row" data-holiday="${d}">
+      <span class="pm-dep-row-name">${fmtDate(d)}</span>
+      <button class="pm-dep-remove" data-holiday="${d}">✕</button>
+    </div>
+  `).join('');
+
   const sheet = el(`
     <div class="sheet-backdrop">
       <div class="sheet">
@@ -774,6 +814,20 @@ function openEditPMProjectSheet() {
         <div class="field"><label>Structure reference</label><input type="text" id="f-pm-structureRef" value="${esc(project.structureRef || '')}"></div>
         <div class="field"><label>Client</label><input type="text" id="f-pm-client" value="${esc(project.client || '')}"></div>
         <div class="field"><label>Start date</label><input type="date" id="f-pm-start" value="${project.startDate ? project.startDate.slice(0, 10) : ''}"></div>
+        <div class="field">
+          <label>Working days</label>
+          <div>${weekdayTogglesHtml}</div>
+          <p class="hint">Governs how task durations and dependencies are scheduled — a 3-day task skips any day not checked here.</p>
+        </div>
+        <div class="field">
+          <label>Holidays &amp; non-working dates</label>
+          <div id="pmt-holiday-list">${holidayRowsHtml || '<p class="hint">None added.</p>'}</div>
+          <div style="display:flex; gap:8px; margin-top:8px;">
+            <input type="date" id="f-pm-cal-add-holiday" style="flex:1;">
+            <button class="btn btn-secondary" id="btn-pm-cal-add-holiday">Add</button>
+          </div>
+          <p class="hint">Changing the calendar doesn't retroactively move existing task dates — it applies the next time a task is edited, dragged, or its schedule recalculates.</p>
+        </div>
         <div class="field"><label>Notes</label><textarea id="f-pm-notes">${esc(project.notes || '')}</textarea></div>
         <button class="btn btn-primary btn-block" id="btn-pm-save-project" style="margin-top:10px;">Save</button>
         <button class="btn btn-danger btn-block" id="btn-pm-delete-project" style="margin-top:10px;">Delete project</button>
@@ -784,15 +838,45 @@ function openEditPMProjectSheet() {
   presentOverlay(sheet);
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
   sheet.querySelector('#btn-pm-cancel').addEventListener('click', () => sheet.remove());
+
+  let pendingHolidays = (cal.holidays || []).slice();
+  function redrawHolidayList() {
+    const list = sheet.querySelector('#pmt-holiday-list');
+    list.innerHTML = pendingHolidays.slice().sort().map((d) => `
+      <div class="pm-dep-row" data-holiday="${d}">
+        <span class="pm-dep-row-name">${fmtDate(d)}</span>
+        <button class="pm-dep-remove" data-holiday="${d}">✕</button>
+      </div>
+    `).join('') || '<p class="hint">None added.</p>';
+    list.querySelectorAll('.pm-dep-remove').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        pendingHolidays = pendingHolidays.filter((d) => d !== btn.dataset.holiday);
+        redrawHolidayList();
+      });
+    });
+  }
+  redrawHolidayList();
+
+  sheet.querySelector('#btn-pm-cal-add-holiday').addEventListener('click', () => {
+    const val = sheet.querySelector('#f-pm-cal-add-holiday').value;
+    if (!val) return;
+    if (!pendingHolidays.includes(val)) pendingHolidays.push(val);
+    sheet.querySelector('#f-pm-cal-add-holiday').value = '';
+    redrawHolidayList();
+  });
+
   sheet.querySelector('#btn-pm-save-project').addEventListener('click', async () => {
     const name = sheet.querySelector('#f-pm-name').value.trim();
     if (!name) { toast('Enter a project name'); return; }
+    const workingWeekdays = Array.from(sheet.querySelectorAll('.f-pm-cal-weekday:checked')).map((cb) => parseInt(cb.value, 10));
+    if (workingWeekdays.length === 0) { toast('At least one working day is required'); return; }
     await DB.updatePMProject(project.id, {
       name,
       structureRef: sheet.querySelector('#f-pm-structureRef').value.trim(),
       client: sheet.querySelector('#f-pm-client').value.trim(),
       startDate: sheet.querySelector('#f-pm-start').value,
-      notes: sheet.querySelector('#f-pm-notes').value.trim()
+      notes: sheet.querySelector('#f-pm-notes').value.trim(),
+      calendar: { workingWeekdays, holidays: pendingHolidays }
     });
     sheet.remove();
     renderPMWorkspace(project.id);

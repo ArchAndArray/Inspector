@@ -894,6 +894,13 @@ const DB = {
       client: data.client || '',
       startDate: data.startDate || now.slice(0, 10),
       notes: data.notes || '',
+      // Working-day calendar for this project — Mon-Fri, no holidays, by default. This is the
+      // PRODUCT-level default (a plain data literal, not logic, so duplicating it here rather
+      // than importing pmcalendar.js's PMCalendar.DEFAULT is low-risk — see pmcalendar.js's own
+      // note on why the engine's default and the product default are deliberately different
+      // things). Projects created before this field existed simply won't have it; pm.js treats
+      // a missing calendar as this same default at read time rather than requiring a migration.
+      calendar: data.calendar || { workingWeekdays: [1, 2, 3, 4, 5], holidays: [] },
       createdAt: now,
       updatedAt: now
     };

@@ -524,6 +524,7 @@ button {
   transform: translateX(-10px) rotate(45deg); border-radius: 3px;
 }
 .pm-gantt-today { position: absolute; top: 0; width: 0; border-left: 1.5px dashed var(--red); z-index: 2; pointer-events: none; }
+.pm-gantt-nonworking { position: absolute; top: 0; background: rgba(0,0,0,0.035); pointer-events: none; z-index: 0; }
 
 /* Project Management — Gantt drag/resize hit areas (Phase 1 Step 4) */
 /* Hit areas are deliberately taller than the visual bar (full 44px row height, not the bar's
