@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '6.10';
+const APP_VERSION = '1.0.6.11';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -490,6 +490,10 @@ function openSketchTitlePrompt(onConfirm) {
 // ---------- Force update / resync from GitHub ----------
 async function forceUpdate() {
   toast('Checking for updates…');
+  // Recorded right at the start, before the async cache-clearing work — represents "last
+  // attempted" rather than "last successfully completed," and survives the reload that
+  // follows since localStorage is origin-scoped, unaffected by clearing caches/SW registrations.
+  localStorage.setItem('lastUpdateCheck', new Date().toISOString());
   try {
     if ('caches' in window) {
       const keys = await caches.keys();

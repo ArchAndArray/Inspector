@@ -479,7 +479,7 @@ button {
 }
 
 /* Project Management — WBS task table (Phase 1 Step 1, see roadmap.md 4.1) */
-.pm-table { width: 100%; }
+.pm-table { width: 520px; flex-shrink: 0; }
 .pm-row {
   display: flex; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line);
   min-height: 44px; box-sizing: border-box;
@@ -503,7 +503,6 @@ button {
 
 /* Project Management — Gantt (Phase 1 Step 2: read-only render, no drag/resize/zoom yet) */
 .pm-split-wrap { display: flex; align-items: flex-start; }
-.pm-table { flex-shrink: 0; }
 .pm-gantt-chart { flex: 1; min-width: 0; overflow-x: auto; border-left: 1px solid var(--line); }
 .pm-gantt-row { position: relative; height: 44px; box-sizing: border-box; border-bottom: 1px solid var(--line); }
 .pm-gantt-header { background: var(--paper); position: sticky; top: 0; z-index: 1; }
