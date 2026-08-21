@@ -562,3 +562,24 @@ button {
 .pm-dep-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pm-dep-row-lag { color: var(--ink-soft); font-size: 12px; flex-shrink: 0; }
 .pm-dep-remove { background: none; border: none; color: var(--red); font-size: 16px; padding: 4px 6px; flex-shrink: 0; }
+
+/* Project Management — Resource effort entry mode toggle (Phase 2 Resources) */
+.pm-mode-btn { flex: 1; }
+.pm-mode-btn-active { background: var(--ink); color: #fff; border-color: var(--ink); }
+
+/* Project Management — Workload heatmap (Phase 2 Resources) */
+.pm-workload-grid { width: max-content; min-width: 100%; }
+.pm-workload-row { display: flex; align-items: stretch; border-bottom: 1px solid var(--line); min-height: 40px; }
+.pm-workload-header { position: sticky; top: 0; z-index: 1; background: var(--paper); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; color: var(--ink-soft); }
+.pm-workload-name {
+  width: 160px; flex-shrink: 0; padding: 8px 12px; display: flex; align-items: center;
+  font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  border-right: 1px solid var(--line); position: sticky; left: 0; background: var(--paper); z-index: 1;
+}
+.pm-workload-cells { display: flex; }
+.pm-workload-cell {
+  width: 36px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 11.5px; font-weight: 700; color: #fff; border-right: 1px solid rgba(255,255,255,0.4);
+  box-sizing: border-box;
+}
+.pm-workload-date-label { color: var(--ink-soft); font-weight: 700; background: transparent; border-right: 1px solid var(--line); }

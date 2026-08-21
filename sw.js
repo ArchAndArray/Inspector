@@ -1,5 +1,5 @@
 // sw.js - offline-first caching for the Site Inspection PWA
-const CACHE_NAME = 'site-inspection-v61';
+const CACHE_NAME = 'site-inspection-v62';
 
 const APP_SHELL = [
   './',
@@ -17,6 +17,7 @@ const APP_SHELL = [
   './js/pdfeditor.js',
   './js/pmdate.js',
   './js/pmcalendar.js',
+  './js/pmresource.js',
   './js/pmschedule.js',
   './js/pm.js',
   './js/launcher.js',

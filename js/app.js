@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '1.0.6.12';
+const APP_VERSION = '1.0.6.13';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -370,6 +370,7 @@ async function route() {
     else if (p[0] === 'scale-annotate') await renderScaleAnnotate();
     else if (p[0] === 'pdf-editor') await renderPdfEditor();
     else if (p[0] === 'pm') await renderPM();
+    else if (p[0] === 'pm-resources') await renderPMResources();
     else await renderLauncher();
   } catch (err) {
     console.error(err);

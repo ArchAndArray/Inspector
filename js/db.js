@@ -2,7 +2,7 @@
 // Stores: inspections, sections, elements, findings, photos, templates
 
 const DB_NAME = 'siteInspectionDB';
-const DB_VERSION = 6;
+const DB_VERSION = 7;
 
 let dbPromise = null;
 
@@ -94,6 +94,22 @@ function openDB() {
           pdStore.createIndex('projectId', 'projectId', { unique: false });
           pdStore.createIndex('predecessorId', 'predecessorId', { unique: false });
           pdStore.createIndex('successorId', 'successorId', { unique: false });
+        }
+      }
+
+      if (oldVersion < 7) {
+        // Project Management: Resources. Resources are GLOBAL (no projectId) — a named person
+        // or piece of plant is a real-world entity that outlives any one project and gets
+        // reused across them, not duplicated per project. Assignments are what's project-scoped
+        // (a resource linked to a specific task within a specific project).
+        if (!db.objectStoreNames.contains('pmResources')) {
+          db.createObjectStore('pmResources', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('pmAssignments')) {
+          const paStore = db.createObjectStore('pmAssignments', { keyPath: 'id' });
+          paStore.createIndex('projectId', 'projectId', { unique: false });
+          paStore.createIndex('taskId', 'taskId', { unique: false });
+          paStore.createIndex('resourceId', 'resourceId', { unique: false });
         }
       }
     };
@@ -900,7 +916,7 @@ const DB = {
       // note on why the engine's default and the product default are deliberately different
       // things). Projects created before this field existed simply won't have it; pm.js treats
       // a missing calendar as this same default at read time rather than requiring a migration.
-      calendar: data.calendar || { workingWeekdays: [1, 2, 3, 4, 5], holidays: [] },
+      calendar: data.calendar || { workingWeekdays: [1, 2, 3, 4, 5], holidays: [], hoursPerDay: 7.4 },
       createdAt: now,
       updatedAt: now
     };
@@ -921,6 +937,8 @@ const DB = {
     for (const t of tasks) await this.delete('pmTasks', t.id);
     const deps = await this.getAllByIndex('pmDependencies', 'projectId', id);
     for (const d of deps) await this.delete('pmDependencies', d.id);
+    const assignments = await this.getAllByIndex('pmAssignments', 'projectId', id);
+    for (const a of assignments) await this.delete('pmAssignments', a.id);
     await this.delete('pmProjects', id);
   },
 
@@ -941,6 +959,7 @@ const DB = {
       finish: data.finish || null,
       percentComplete: data.percentComplete || 0,
       isMilestone: !!data.isMilestone,
+      hoursPerDayOverride: data.hoursPerDayOverride != null ? data.hoursPerDayOverride : null, // null = use project default (see pmcalendar.js hoursPerDay)
       notes: data.notes || '',
       createdAt: now,
       updatedAt: now
@@ -972,6 +991,8 @@ const DB = {
     for (const d of deps) {
       if (d.predecessorId === id || d.successorId === id) await this.delete('pmDependencies', d.id);
     }
+    const assignments = await this.getAllByIndex('pmAssignments', 'taskId', id);
+    for (const a of assignments) await this.delete('pmAssignments', a.id);
     await this.delete('pmTasks', id);
   },
   async movePMTask(id, newParentId, newOrder) {
@@ -1029,6 +1050,70 @@ const DB = {
   },
   async deletePMDependency(id) {
     return this.delete('pmDependencies', id);
+  },
+
+  // --- Project Management: Resources (global — see deletePMResourceCascade note on why) ---
+  async createPMResource(data) {
+    const now = new Date().toISOString();
+    const resource = {
+      id: uid(),
+      name: data.name || 'Unnamed Resource',
+      role: data.role || '',
+      type: data.type || 'person', // 'person' | 'team' | 'plant' | 'equipment' | 'contractor' | 'material'
+      costRate: data.costRate != null ? data.costRate : null,
+      contactInfo: data.contactInfo || '',
+      notes: data.notes || '',
+      createdAt: now,
+      updatedAt: now
+    };
+    return this.put('pmResources', resource);
+  },
+  async listPMResources() {
+    const all = await this.getAll('pmResources');
+    return all.sort((a, b) => a.name.localeCompare(b.name));
+  },
+  async updatePMResource(id, patch) {
+    const existing = await this.get('pmResources', id);
+    if (!existing) throw new Error('Resource not found');
+    const updated = { ...existing, ...patch, updatedAt: new Date().toISOString() };
+    return this.put('pmResources', updated);
+  },
+  // Resources are global, so deleting one must clean up every assignment referencing it across
+  // every project — not just the current one, since the same resource can be assigned to tasks
+  // in multiple projects.
+  async deletePMResourceCascade(id) {
+    const assignments = await this.getAllByIndex('pmAssignments', 'resourceId', id);
+    for (const a of assignments) await this.delete('pmAssignments', a.id);
+    await this.delete('pmResources', id);
+  },
+
+  // --- Project Management: Assignments (resource <-> task, project-scoped) ---
+  async createPMAssignment(projectId, taskId, resourceId, effortHours, entryMode) {
+    const assignment = {
+      id: uid(),
+      projectId,
+      taskId,
+      resourceId,
+      effortHours: Math.max(0, effortHours || 0),
+      entryMode: entryMode || 'hours', // 'pct' | 'days' | 'hours' — last-used entry mode, display convenience only
+      createdAt: new Date().toISOString()
+    };
+    return this.put('pmAssignments', assignment);
+  },
+  async listPMAssignmentsForTask(taskId) {
+    return this.getAllByIndex('pmAssignments', 'taskId', taskId);
+  },
+  async listPMAssignmentsForProject(projectId) {
+    return this.getAllByIndex('pmAssignments', 'projectId', projectId);
+  },
+  async updatePMAssignment(id, patch) {
+    const existing = await this.get('pmAssignments', id);
+    if (!existing) throw new Error('Assignment not found');
+    const updated = { ...existing, ...patch };
+    return this.put('pmAssignments', updated);
+  },
+  async deletePMAssignment(id) {
+    return this.delete('pmAssignments', id);
   },
 
   // --- Aggregate helpers ---

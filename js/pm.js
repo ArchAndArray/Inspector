@@ -62,6 +62,114 @@ async function renderPM() {
   });
 }
 
+// ---------- Global Resources directory ----------
+// Resources are global (not per-project) — see db.js's note on deletePMResourceCascade for why:
+// a named person/plant item is a real-world entity reused across projects, not duplicated per
+// project. Reached via its own Launcher tile, same route pattern as the PM module itself.
+
+const PM_RESOURCE_TYPES = [
+  { value: 'person', label: 'Person' },
+  { value: 'team', label: 'Team' },
+  { value: 'plant', label: 'Plant' },
+  { value: 'equipment', label: 'Equipment' },
+  { value: 'contractor', label: 'Contractor' },
+  { value: 'material', label: 'Material' }
+];
+
+async function renderPMResources() {
+  const resources = await DB.listPMResources();
+  const rows = resources.map((r) => {
+    const typeLabel = (PM_RESOURCE_TYPES.find((t) => t.value === r.type) || {}).label || r.type;
+    return `
+      <div class="list-item" data-id="${r.id}">
+        <div class="meta">
+          <h3>${esc(r.name)}</h3>
+          <p>${esc(typeLabel)}${r.role ? ' · ' + esc(r.role) : ''}${r.costRate != null ? ' · ' + r.costRate : ''}</p>
+        </div>
+        <span class="chevron">›</span>
+      </div>
+    `;
+  }).join('');
+
+  appEl.innerHTML = `
+    <div class="topbar">
+      <button class="icon-btn" id="btn-pm-resources-back">‹</button>
+      <div style="flex:1; min-width:0;">
+        <h1>Resources</h1>
+        <span class="sub">People, plant &amp; equipment</span>
+      </div>
+    </div>
+    <div class="content" id="pm-resources-content">
+      ${resources.length ? rows : `
+        <div class="empty-state">
+          <div class="glyph">＋</div>
+          <h3>No resources yet</h3>
+          <p>Add people, plant, or equipment to assign them to tasks.</p>
+        </div>
+      `}
+    </div>
+    <button class="fab" id="btn-new-pm-resource">＋</button>
+  `;
+
+  document.getElementById('btn-pm-resources-back').addEventListener('click', () => navigate('#/'));
+  document.getElementById('btn-new-pm-resource').addEventListener('click', () => openPMResourceSheet(null, renderPMResources));
+  appEl.querySelectorAll('#pm-resources-content .list-item').forEach((row) => {
+    const resource = resources.find((r) => r.id === row.dataset.id);
+    row.addEventListener('click', () => openPMResourceSheet(resource, renderPMResources));
+  });
+}
+
+function openPMResourceSheet(resource, onSaved) {
+  const isNew = !resource;
+  const typeOptionsHtml = PM_RESOURCE_TYPES.map((t) => `<option value="${t.value}" ${resource && resource.type === t.value ? 'selected' : ''}>${t.label}</option>`).join('');
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>${isNew ? 'New resource' : 'Edit resource'}</h2>
+        <div class="field"><label>Name</label><input type="text" id="f-pmr-name" value="${resource ? esc(resource.name) : ''}" placeholder="e.g. O Richards"></div>
+        <div class="field"><label>Type</label><select id="f-pmr-type">${typeOptionsHtml}</select></div>
+        <div class="field"><label>Role</label><input type="text" id="f-pmr-role" value="${resource ? esc(resource.role || '') : ''}" placeholder="e.g. Principal Engineer"></div>
+        <div class="field"><label>Cost rate</label><input type="number" min="0" step="0.01" id="f-pmr-costRate" value="${resource && resource.costRate != null ? resource.costRate : ''}" placeholder="Optional"></div>
+        <div class="field"><label>Contact info</label><input type="text" id="f-pmr-contact" value="${resource ? esc(resource.contactInfo || '') : ''}" placeholder="Optional"></div>
+        <div class="field"><label>Notes</label><textarea id="f-pmr-notes">${resource ? esc(resource.notes || '') : ''}</textarea></div>
+        <button class="btn btn-primary btn-block" id="btn-pmr-save" style="margin-top:10px;">${isNew ? 'Add resource' : 'Save'}</button>
+        ${isNew ? '' : '<button class="btn btn-danger btn-block" id="btn-pmr-delete" style="margin-top:10px;">Delete resource</button>'}
+        <button class="btn btn-ghost btn-block" id="btn-pmr-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-pmr-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-pmr-save').addEventListener('click', async () => {
+    const name = sheet.querySelector('#f-pmr-name').value.trim();
+    if (!name) { toast('Enter a resource name'); return; }
+    const costRateVal = sheet.querySelector('#f-pmr-costRate').value;
+    const patch = {
+      name,
+      type: sheet.querySelector('#f-pmr-type').value,
+      role: sheet.querySelector('#f-pmr-role').value.trim(),
+      costRate: costRateVal !== '' ? parseFloat(costRateVal) : null,
+      contactInfo: sheet.querySelector('#f-pmr-contact').value.trim(),
+      notes: sheet.querySelector('#f-pmr-notes').value.trim()
+    };
+    if (isNew) await DB.createPMResource(patch);
+    else await DB.updatePMResource(resource.id, patch);
+    sheet.remove();
+    onSaved();
+  });
+  if (!isNew) {
+    sheet.querySelector('#btn-pmr-delete').addEventListener('click', async () => {
+      if (!confirm(`Delete "${resource.name}"? This removes it from every task it's assigned to, in every project.`)) return;
+      await DB.deletePMResourceCascade(resource.id);
+      sheet.remove();
+      onSaved();
+    });
+  }
+}
+
+
 function openNewPMProjectSheet(onCreated) {
   const sheet = el(`
     <div class="sheet-backdrop">
@@ -418,6 +526,7 @@ function drawPMWorkspace() {
         <h1>${esc(project.name)}</h1>
         <span class="sub">${esc(project.structureRef || 'Project Management')}</span>
       </div>
+      <button class="text-btn" id="btn-pm-workload">Workload</button>
       <button class="text-btn" id="btn-pm-project-info">Info</button>
     </div>
     <div class="content" id="pm-table-content" style="padding:0;">
@@ -454,6 +563,7 @@ function drawPMWorkspace() {
   `;
 
   document.getElementById('btn-pm-workspace-back').addEventListener('click', renderPM);
+  document.getElementById('btn-pm-workload').addEventListener('click', () => renderPMWorkload());
   document.getElementById('btn-pm-project-info').addEventListener('click', () => openEditPMProjectSheet());
   document.getElementById('btn-pm-add-task').addEventListener('click', () => addPMTaskAndEdit(null));
   document.getElementById('btn-pm-add-subtask').addEventListener('click', () => {
@@ -500,9 +610,24 @@ function pmLeafTasks() {
 }
 
 // A project created before calendars existed simply won't have this field — treated as the
-// same Mon-Fri default at read time rather than requiring any data migration.
+// same Mon-Fri default at read time rather than requiring any data migration. Also defensively
+// backfills hoursPerDay for projects created after calendars existed but before hoursPerDay was
+// added to them — same "no migration needed" principle applied twice now.
 function pmEffectiveCalendar() {
-  return pmWorkspaceState.project.calendar || PMCalendar.DEFAULT;
+  const cal = pmWorkspaceState.project.calendar || PMCalendar.DEFAULT;
+  return {
+    workingWeekdays: cal.workingWeekdays || PMCalendar.DEFAULT.workingWeekdays,
+    holidays: cal.holidays || [],
+    hoursPerDay: cal.hoursPerDay != null ? cal.hoursPerDay : PMCalendar.DEFAULT.hoursPerDay
+  };
+}
+
+// A task's own hours-per-day override (e.g. a 12-hour night-shift task) takes precedence;
+// otherwise falls back to the project calendar's default. Per the user's explicit decision,
+// this is a TASK-level setting, uniform for every resource assigned to it — not something that
+// varies per resource on the same task.
+function pmEffectiveHoursPerDay(task) {
+  return task.hoursPerDayOverride != null ? task.hoursPerDayOverride : pmEffectiveCalendar().hoursPerDay;
 }
 
 function pmExplainValidationFailure(check) {
@@ -705,6 +830,16 @@ async function openPMTaskSheet(task) {
           <button class="btn btn-secondary btn-block" id="btn-pmt-add-dep" style="margin-top:8px;">+ Add predecessor</button>
           <p class="hint">Once linked, this task can't start before its predecessor finishes (plus any lag) — but you can still schedule it later than that if you need to.</p>
         </div>
+        <div class="field">
+          <label>Hours per day for this task</label>
+          <input type="number" min="0.1" step="0.1" id="f-pmt-hours-per-day" value="${task.hoursPerDayOverride != null ? task.hoursPerDayOverride : ''}" placeholder="Uses project default (${pmEffectiveCalendar().hoursPerDay}hrs)">
+          <p class="hint">Leave blank to use the project default. Set this for tasks with a different working pattern — e.g. a 12-hour night-shift closure.</p>
+        </div>
+        <div class="field">
+          <label>Resources</label>
+          <div id="pmt-resource-list"></div>
+          <button class="btn btn-secondary btn-block" id="btn-pmt-add-resource" style="margin-top:8px;">+ Assign resource</button>
+        </div>
         `}
         <div class="field"><label>Notes</label><textarea id="f-pmt-notes">${esc(task.notes || '')}</textarea></div>
         <button class="btn btn-primary btn-block" id="btn-pmt-save" style="margin-top:10px;">Save</button>
@@ -771,6 +906,50 @@ async function openPMTaskSheet(task) {
         openPMTaskSheet(pmWorkspaceState.tasks.find((t) => t.id === task.id));
       });
     });
+
+    // Resources — leaf, non-milestone tasks only (a milestone has no duration to spend effort
+    // against, same reasoning as it being exempt from calendar-day scheduling).
+    async function refreshResourceList() {
+      const [assignments, resources] = await Promise.all([DB.listPMAssignmentsForTask(task.id), DB.listPMResources()]);
+      const listEl = sheet.querySelector('#pmt-resource-list');
+      if (!assignments.length) {
+        listEl.innerHTML = '<p class="hint">No resources assigned.</p>';
+        return;
+      }
+      listEl.innerHTML = assignments.map((a) => {
+        const resource = resources.find((r) => r.id === a.resourceId);
+        return `
+          <div class="pm-dep-row" data-assignment-id="${a.id}">
+            <span class="pm-dep-row-name">${esc(resource ? resource.name : 'Unknown resource')} — ${esc(pmFormatEffort(a, task))}</span>
+            <button class="pm-dep-remove" data-assignment-id="${a.id}">✕</button>
+          </div>
+        `;
+      }).join('');
+      listEl.querySelectorAll('.pm-dep-row').forEach((row) => {
+        row.addEventListener('click', (e) => {
+          if (e.target.classList.contains('pm-dep-remove')) return;
+          const assignment = assignments.find((a) => a.id === row.dataset.assignmentId);
+          const resource = resources.find((r) => r.id === assignment.resourceId);
+          openPMEffortSheet(task, resource, assignment, refreshResourceList);
+        });
+      });
+      listEl.querySelectorAll('.pm-dep-remove').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          await DB.deletePMAssignment(btn.dataset.assignmentId);
+          refreshResourceList();
+        });
+      });
+    }
+    refreshResourceList();
+
+    sheet.querySelector('#btn-pmt-add-resource').addEventListener('click', async () => {
+      const [assignments, resources] = await Promise.all([DB.listPMAssignmentsForTask(task.id), DB.listPMResources()]);
+      const assignedIds = new Set(assignments.map((a) => a.resourceId));
+      const candidates = resources.filter((r) => !assignedIds.has(r.id));
+      openPMResourcePickerSheet(candidates, (resource) => {
+        openPMEffortSheet(task, resource, null, refreshResourceList);
+      });
+    });
   }
 
   sheet.querySelector('#btn-pmt-save').addEventListener('click', async () => {
@@ -784,6 +963,8 @@ async function openPMTaskSheet(task) {
       patch.finish = isMilestone ? patch.start : (sheet.querySelector('#f-pmt-finish').value || null);
       patch.duration = isMilestone ? 0 : Math.max(0, parseInt(sheet.querySelector('#f-pmt-duration').value, 10) || 0);
       patch.percentComplete = Math.min(100, Math.max(0, parseInt(sheet.querySelector('#f-pmt-pct').value, 10) || 0));
+      const hpdVal = sheet.querySelector('#f-pmt-hours-per-day').value;
+      patch.hoursPerDayOverride = hpdVal !== '' ? Math.max(0.1, parseFloat(hpdVal)) : null;
 
       const result = await pmCommitTaskDates(task.id, patch);
       if (!result.ok) { toast(result.error); return; }
@@ -845,6 +1026,210 @@ function openAddPMDependencySheet(task, incomingDeps, allDeps, leaf, onDone) {
   });
 }
 
+// ---------- Resource assignment (effort entry with %/Days/Hours toggle) ----------
+
+function pmFormatEffort(assignment, task) {
+  const hoursPerDay = pmEffectiveHoursPerDay(task);
+  const mode = assignment.entryMode || 'hours';
+  if (mode === 'pct') {
+    const pct = PMResource.percentFromEffortHours(assignment.effortHours, task.duration, hoursPerDay);
+    return `${Math.round(pct)}%`;
+  }
+  if (mode === 'days') {
+    const days = PMResource.daysFromEffortHours(assignment.effortHours, hoursPerDay);
+    return `${days.toFixed(1)}d`;
+  }
+  return `${assignment.effortHours.toFixed(1)}h`;
+}
+
+function openPMResourcePickerSheet(candidates, onPick) {
+  const rows = candidates.map((r) => `
+    <div class="list-item" data-id="${r.id}">
+      <div class="meta"><h3>${esc(r.name)}</h3>${r.role ? `<p>${esc(r.role)}</p>` : ''}</div>
+      <span class="chevron">›</span>
+    </div>
+  `).join('');
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Assign resource</h2>
+        ${candidates.length ? rows : '<p class="hint">No resources available — add one from the Resources screen first, or every resource is already assigned to this task.</p>'}
+        <button class="btn btn-ghost btn-block" id="btn-pmr-picker-cancel" style="margin-top:10px;">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-pmr-picker-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelectorAll('.list-item').forEach((row) => {
+    row.addEventListener('click', () => {
+      const resource = candidates.find((r) => r.id === row.dataset.id);
+      sheet.remove();
+      onPick(resource);
+    });
+  });
+}
+
+// The %/Days/Hours toggle. Switching modes CONVERTS the current number rather than clearing
+// it — typing 100 in % then tapping Hours shows the actual hour count for this task's duration
+// and hours-per-day, which doubles as a sanity check without doing the maths by hand.
+function openPMEffortSheet(task, resource, existingAssignment, onSaved) {
+  const hoursPerDay = pmEffectiveHoursPerDay(task);
+  const durationDays = task.duration || 1;
+  let mode = existingAssignment ? (existingAssignment.entryMode || 'hours') : 'pct';
+  let value = existingAssignment
+    ? (mode === 'pct' ? PMResource.percentFromEffortHours(existingAssignment.effortHours, durationDays, hoursPerDay)
+      : mode === 'days' ? PMResource.daysFromEffortHours(existingAssignment.effortHours, hoursPerDay)
+      : existingAssignment.effortHours)
+    : 100; // default a new assignment to full-time — the common case
+
+  const modeLabels = { pct: 'Percent of task duration', days: 'Days of effort', hours: 'Hours of effort' };
+
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Effort — ${esc(resource.name)}</h2>
+        <div class="field">
+          <label>Entry mode</label>
+          <div style="display:flex; gap:8px;">
+            <button class="btn btn-secondary pm-mode-btn" data-mode="pct">%</button>
+            <button class="btn btn-secondary pm-mode-btn" data-mode="days">Days</button>
+            <button class="btn btn-secondary pm-mode-btn" data-mode="hours">Hours</button>
+          </div>
+        </div>
+        <div class="field">
+          <label id="pmt-effort-label"></label>
+          <input type="number" min="0" step="0.1" id="f-pmt-effort-value">
+        </div>
+        <p class="hint" id="pmt-effort-hint"></p>
+        <button class="btn btn-primary btn-block" id="btn-pmt-effort-save" style="margin-top:10px;">Save</button>
+        <button class="btn btn-ghost btn-block" id="btn-pmt-effort-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-pmt-effort-cancel').addEventListener('click', () => sheet.remove());
+
+  const valueInput = sheet.querySelector('#f-pmt-effort-value');
+  const labelEl = sheet.querySelector('#pmt-effort-label');
+  const hintEl = sheet.querySelector('#pmt-effort-hint');
+
+  function redraw() {
+    sheet.querySelectorAll('.pm-mode-btn').forEach((btn) => {
+      btn.classList.toggle('pm-mode-btn-active', btn.dataset.mode === mode);
+    });
+    labelEl.textContent = modeLabels[mode];
+    valueInput.value = Math.round(value * 10) / 10;
+    const hours = mode === 'pct' ? PMResource.effortHoursFromPercent(durationDays, value, hoursPerDay)
+      : mode === 'days' ? PMResource.effortHoursFromDays(value, hoursPerDay)
+      : value;
+    const pct = PMResource.percentFromEffortHours(hours, durationDays, hoursPerDay);
+    const days = PMResource.daysFromEffortHours(hours, hoursPerDay);
+    hintEl.textContent = `≈ ${hours.toFixed(1)} hours · ${days.toFixed(1)} working days · ${Math.round(pct)}% of this task's ${durationDays}-day duration (at ${hoursPerDay}hrs/day)`;
+  }
+  redraw();
+
+  sheet.querySelectorAll('.pm-mode-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const newMode = btn.dataset.mode;
+      value = PMResource.convertEffort(value, mode, newMode, durationDays, hoursPerDay);
+      mode = newMode;
+      redraw();
+    });
+  });
+  valueInput.addEventListener('input', () => {
+    value = Math.max(0, parseFloat(valueInput.value) || 0);
+    redraw();
+  });
+
+  sheet.querySelector('#btn-pmt-effort-save').addEventListener('click', async () => {
+    const hours = mode === 'pct' ? PMResource.effortHoursFromPercent(durationDays, value, hoursPerDay)
+      : mode === 'days' ? PMResource.effortHoursFromDays(value, hoursPerDay)
+      : value;
+    if (existingAssignment) {
+      await DB.updatePMAssignment(existingAssignment.id, { effortHours: hours, entryMode: mode });
+    } else {
+      await DB.createPMAssignment(pmWorkspaceState.project.id, task.id, resource.id, hours, mode);
+    }
+    sheet.remove();
+    onSaved();
+  });
+}
+
+// ---------- Workload view (resource overallocation heatmap) ----------
+// Reached via the "Workload" button in the project workspace topbar — an in-memory screen
+// switch, not a hash route, since it only makes sense inside an already-loaded project
+// workspace (same convention as the workspace itself). Uses pmWorkspaceState directly rather
+// than re-fetching, since it's only reachable from a screen where that's already loaded.
+
+async function renderPMWorkload() {
+  const { project } = pmWorkspaceState;
+  const leaf = pmLeafTasks();
+  const assignments = await DB.listPMAssignmentsForProject(project.id);
+  const resources = await DB.listPMResources();
+  const calendar = pmEffectiveCalendar();
+  const getTaskHoursPerDay = (task) => pmEffectiveHoursPerDay(task);
+  const workload = PMResource.computeWorkload(assignments, leaf, calendar, getTaskHoursPerDay, pmDateFns, PMCalendar);
+
+  const resourceIds = Object.keys(workload);
+  let allDates = [];
+  resourceIds.forEach((rid) => workload[rid].days.forEach((d) => allDates.push(d.date)));
+  allDates = Array.from(new Set(allDates)).sort();
+
+  const dateLabelsHtml = allDates.map((d) => `<div class="pm-workload-cell pm-workload-date-label">${pmFormatDayTick(pmParseISODate(d))}</div>`).join('');
+
+  const rowsHtml = resourceIds.map((rid) => {
+    const resource = resources.find((r) => r.id === rid);
+    const dayMap = Object.fromEntries(workload[rid].days.map((d) => [d.date, d]));
+    const cellsHtml = allDates.map((date) => {
+      const d = dayMap[date];
+      const hours = d ? d.hours : 0;
+      const overallocated = d ? d.overallocated : false;
+      const bg = hours === 0 ? 'transparent' : overallocated ? 'var(--red)' : 'oklch(0.65 0.03 260)';
+      const title = hours > 0 ? `${fmtDate(date)}: ${hours.toFixed(1)}h${overallocated ? ' — overallocated' : ''}` : fmtDate(date);
+      return `<div class="pm-workload-cell" style="background:${bg};" title="${esc(title)}">${hours > 0 ? Math.round(hours) : ''}</div>`;
+    }).join('');
+    return `
+      <div class="pm-workload-row">
+        <div class="pm-workload-name">${esc(resource ? resource.name : 'Unknown resource')}</div>
+        <div class="pm-workload-cells">${cellsHtml}</div>
+      </div>
+    `;
+  }).join('');
+
+  appEl.innerHTML = `
+    <div class="topbar">
+      <button class="icon-btn" id="btn-pm-workload-back">‹</button>
+      <div style="flex:1; min-width:0;">
+        <h1>Workload</h1>
+        <span class="sub">${esc(project.name)}</span>
+      </div>
+    </div>
+    <div class="content" id="pm-workload-content" style="padding:0;">
+      ${resourceIds.length ? `
+        <div class="pm-workload-grid">
+          <div class="pm-workload-row pm-workload-header">
+            <div class="pm-workload-name">Resource</div>
+            <div class="pm-workload-cells">${dateLabelsHtml}</div>
+          </div>
+          ${rowsHtml}
+        </div>
+        <p class="hint" style="padding:16px;">Red cells mean this resource is committed beyond ${calendar.hoursPerDay}hrs on that day, across all overlapping task assignments.</p>
+      ` : `
+        <div class="empty-state">
+          <div class="glyph">👥</div>
+          <h3>No resource commitments yet</h3>
+          <p>Assign resources to tasks to see their workload here.</p>
+        </div>
+      `}
+    </div>
+  `;
+  document.getElementById('btn-pm-workload-back').addEventListener('click', () => drawPMWorkspace());
+}
+
 function openEditPMProjectSheet() {
   const { project } = pmWorkspaceState;
   const cal = project.calendar || PMCalendar.DEFAULT;
@@ -877,6 +1262,11 @@ function openEditPMProjectSheet() {
           <label>Working days</label>
           <div>${weekdayTogglesHtml}</div>
           <p class="hint">Governs how task durations and dependencies are scheduled — a 3-day task skips any day not checked here.</p>
+        </div>
+        <div class="field">
+          <label>Working hours per day</label>
+          <input type="number" min="0.1" step="0.1" id="f-pm-cal-hours-per-day" value="${cal.hoursPerDay != null ? cal.hoursPerDay : 7.4}">
+          <p class="hint">Used for resource effort calculations (e.g. "1 day of effort" = this many hours). Doesn't affect task scheduling dates — only which days are working days does that. Individual tasks can override this (e.g. a 12-hour night shift).</p>
         </div>
         <div class="field">
           <label>Holidays &amp; non-working dates</label>
@@ -929,13 +1319,14 @@ function openEditPMProjectSheet() {
     if (!name) { toast('Enter a project name'); return; }
     const workingWeekdays = Array.from(sheet.querySelectorAll('.f-pm-cal-weekday:checked')).map((cb) => parseInt(cb.value, 10));
     if (workingWeekdays.length === 0) { toast('At least one working day is required'); return; }
+    const hoursPerDay = Math.max(0.1, parseFloat(sheet.querySelector('#f-pm-cal-hours-per-day').value) || 7.4);
     await DB.updatePMProject(project.id, {
       name,
       structureRef: sheet.querySelector('#f-pm-structureRef').value.trim(),
       client: sheet.querySelector('#f-pm-client').value.trim(),
       startDate: sheet.querySelector('#f-pm-start').value,
       notes: sheet.querySelector('#f-pm-notes').value.trim(),
-      calendar: { workingWeekdays, holidays: pendingHolidays }
+      calendar: { workingWeekdays, holidays: pendingHolidays, hoursPerDay }
     });
     sheet.remove();
     renderPMWorkspace(project.id);
