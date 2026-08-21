@@ -32,6 +32,30 @@ function pmDaysFromEffortHours(hours, hoursPerDay) {
   return hours / hoursPerDay;
 }
 
+// Cost of a single assignment, given the resource's rate and how it's interpreted.
+// 'hourly': effort hours x rate. 'daily': effort converted to working days x rate (a day-rate
+// resource is paid per day worked, not per hour, so partial-day effort still costs per full
+// rate-day here — a deliberate simplification, not a bug: real day-rate contracts are rarely
+// pro-rated by the hour). 'fixed': the rate itself, a flat lump sum regardless of effort hours
+// — effort can still be recorded for scheduling/workload purposes, it just doesn't affect cost.
+function pmComputeAssignmentCost(assignment, resource, hoursPerDay) {
+  if (resource.costRate == null) return 0;
+  const rateType = resource.costRateType || 'hourly';
+  if (rateType === 'fixed') return resource.costRate;
+  if (rateType === 'daily') return pmDaysFromEffortHours(assignment.effortHours, hoursPerDay) * resource.costRate;
+  return assignment.effortHours * resource.costRate; // hourly
+}
+
+// Sums cost across every assignment for one task. assignments should already be filtered to
+// this task's id; resourceMap: { [resourceId]: resource }.
+function pmComputeTaskCost(taskAssignments, resourceMap, hoursPerDay) {
+  return taskAssignments.reduce((sum, a) => {
+    const resource = resourceMap[a.resourceId];
+    if (!resource) return sum;
+    return sum + pmComputeAssignmentCost(a, resource, hoursPerDay);
+  }, 0);
+}
+
 // Converts an effort value between entry modes ('pct' | 'days' | 'hours') given a task's
 // duration (working days) and applicable hoursPerDay. Used by the effort-entry toggle so
 // switching modes converts the current number instead of clearing it.
@@ -116,7 +140,9 @@ const PMResource = {
   percentFromEffortHours: pmPercentFromEffortHours,
   daysFromEffortHours: pmDaysFromEffortHours,
   convertEffort: pmConvertEffort,
-  computeWorkload: pmComputeWorkload
+  computeWorkload: pmComputeWorkload,
+  computeAssignmentCost: pmComputeAssignmentCost,
+  computeTaskCost: pmComputeTaskCost
 };
 
 if (typeof window !== 'undefined') window.PMResource = PMResource;

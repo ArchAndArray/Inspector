@@ -42,6 +42,7 @@ async function renderPM() {
         <h1>Project Management</h1>
         <span class="sub">WBS &amp; scheduling</span>
       </div>
+      <button class="text-btn" id="btn-pm-templates">Templates</button>
     </div>
     <div class="content" id="pm-list-content">
       ${projects.length ? rows : `
@@ -56,16 +57,19 @@ async function renderPM() {
   `;
 
   document.getElementById('btn-pm-back').addEventListener('click', () => navigate('#/'));
+  document.getElementById('btn-pm-templates').addEventListener('click', renderPMResourceTemplates);
   document.getElementById('btn-new-pm-project').addEventListener('click', () => openNewPMProjectSheet(renderPM));
   appEl.querySelectorAll('#pm-list-content .list-item').forEach((row) => {
     row.addEventListener('click', () => renderPMWorkspace(row.dataset.id));
   });
 }
 
-// ---------- Global Resources directory ----------
-// Resources are global (not per-project) — see db.js's note on deletePMResourceCascade for why:
-// a named person/plant item is a real-world entity reused across projects, not duplicated per
-// project. Reached via its own Launcher tile, same route pattern as the PM module itself.
+// ---------- Resource Templates (global, reusable rosters) ----------
+// A template is a named, reusable collection of resource profiles (e.g. "Standard Bridge
+// Inspection Team") — NOT itself assignable to any task. Its items get copied into a project
+// as independent pmProjectResources rows (see db.js's copyPMResourceTemplateToProject), which
+// is what tasks actually get assigned to. Reached from a button on the PM project list screen
+// (renderPM), not the Launcher — templates aren't a module of their own.
 
 const PM_RESOURCE_TYPES = [
   { value: 'person', label: 'Person' },
@@ -75,16 +79,97 @@ const PM_RESOURCE_TYPES = [
   { value: 'contractor', label: 'Contractor' },
   { value: 'material', label: 'Material' }
 ];
+const PM_COST_RATE_TYPES = [
+  { value: 'hourly', label: 'Per hour' },
+  { value: 'daily', label: 'Per day' },
+  { value: 'fixed', label: 'Fixed (flat cost)' }
+];
 
-async function renderPMResources() {
-  const resources = await DB.listPMResources();
-  const rows = resources.map((r) => {
-    const typeLabel = (PM_RESOURCE_TYPES.find((t) => t.value === r.type) || {}).label || r.type;
+async function renderPMResourceTemplates() {
+  const templates = await DB.listPMResourceTemplates();
+  const rows = templates.map((t) => `
+    <div class="list-item" data-id="${t.id}">
+      <div class="meta"><h3>${esc(t.name)}</h3>${t.notes ? `<p>${esc(t.notes)}</p>` : ''}</div>
+      <span class="chevron">›</span>
+    </div>
+  `).join('');
+
+  appEl.innerHTML = `
+    <div class="topbar">
+      <button class="icon-btn" id="btn-pm-templates-back">‹</button>
+      <div style="flex:1; min-width:0;">
+        <h1>Resource Templates</h1>
+        <span class="sub">Reusable rosters for new projects</span>
+      </div>
+    </div>
+    <div class="content" id="pm-templates-content">
+      ${templates.length ? rows : `
+        <div class="empty-state">
+          <div class="glyph">＋</div>
+          <h3>No templates yet</h3>
+          <p>Build a reusable team roster to import into new projects.</p>
+        </div>
+      `}
+    </div>
+    <button class="fab" id="btn-new-pm-template">＋</button>
+  `;
+  document.getElementById('btn-pm-templates-back').addEventListener('click', renderPM);
+  document.getElementById('btn-new-pm-template').addEventListener('click', () => openPMResourceTemplateSheet(null, renderPMResourceTemplates));
+  appEl.querySelectorAll('#pm-templates-content .list-item').forEach((row) => {
+    row.addEventListener('click', () => renderPMResourceTemplateDetail(row.dataset.id));
+  });
+}
+
+function openPMResourceTemplateSheet(template, onSaved) {
+  const isNew = !template;
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>${isNew ? 'New template' : 'Edit template'}</h2>
+        <div class="field"><label>Template name</label><input type="text" id="f-pmtpl-name" value="${template ? esc(template.name) : ''}" placeholder="e.g. Standard Bridge Inspection Team"></div>
+        <div class="field"><label>Notes</label><textarea id="f-pmtpl-notes">${template ? esc(template.notes || '') : ''}</textarea></div>
+        <button class="btn btn-primary btn-block" id="btn-pmtpl-save" style="margin-top:10px;">${isNew ? 'Create template' : 'Save'}</button>
+        ${isNew ? '' : '<button class="btn btn-danger btn-block" id="btn-pmtpl-delete" style="margin-top:10px;">Delete template</button>'}
+        <button class="btn btn-ghost btn-block" id="btn-pmtpl-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-pmtpl-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-pmtpl-save').addEventListener('click', async () => {
+    const name = sheet.querySelector('#f-pmtpl-name').value.trim();
+    if (!name) { toast('Enter a template name'); return; }
+    const patch = { name, notes: sheet.querySelector('#f-pmtpl-notes').value.trim() };
+    if (isNew) await DB.createPMResourceTemplate(patch);
+    else await DB.updatePMResourceTemplate(template.id, patch);
+    sheet.remove();
+    onSaved();
+  });
+  if (!isNew) {
+    sheet.querySelector('#btn-pmtpl-delete').addEventListener('click', async () => {
+      if (!confirm(`Delete "${template.name}" and all its resource profiles? Projects that already imported a copy from it are unaffected.`)) return;
+      await DB.deletePMResourceTemplateCascade(template.id);
+      sheet.remove();
+      onSaved();
+    });
+  }
+}
+
+async function renderPMResourceTemplateDetail(templateId) {
+  const templates = await DB.listPMResourceTemplates();
+  const template = templates.find((t) => t.id === templateId);
+  if (!template) { renderPMResourceTemplates(); return; }
+  const items = await DB.listPMResourceTemplateItems(templateId);
+
+  const rows = items.map((item) => {
+    const typeLabel = (PM_RESOURCE_TYPES.find((t) => t.value === item.type) || {}).label || item.type;
     return `
-      <div class="list-item" data-id="${r.id}">
+      <div class="list-item" data-id="${item.id}">
         <div class="meta">
-          <h3>${esc(r.name)}</h3>
-          <p>${esc(typeLabel)}${r.role ? ' · ' + esc(r.role) : ''}${r.costRate != null ? ' · ' + r.costRate : ''}</p>
+          <h3>${esc(item.name)}</h3>
+          <p>${esc(typeLabel)}${item.role ? ' · ' + esc(item.role) : ''}${item.costRate != null ? ' · ' + pmFormatRate(item) : ''}</p>
         </div>
         <span class="chevron">›</span>
       </div>
@@ -93,113 +178,153 @@ async function renderPMResources() {
 
   appEl.innerHTML = `
     <div class="topbar">
-      <button class="icon-btn" id="btn-pm-resources-back">‹</button>
+      <button class="icon-btn" id="btn-pmtpl-detail-back">‹</button>
       <div style="flex:1; min-width:0;">
-        <h1>Resources</h1>
-        <span class="sub">People, plant &amp; equipment</span>
+        <h1>${esc(template.name)}</h1>
+        <span class="sub">Template</span>
       </div>
+      <button class="text-btn" id="btn-pmtpl-edit">Edit</button>
     </div>
-    <div class="content" id="pm-resources-content">
-      ${resources.length ? rows : `
+    <div class="content" id="pmtpl-detail-content">
+      ${items.length ? rows : `
         <div class="empty-state">
           <div class="glyph">＋</div>
-          <h3>No resources yet</h3>
-          <p>Add people, plant, or equipment to assign them to tasks.</p>
+          <h3>No resources in this template yet</h3>
+          <p>Add people, plant, or equipment to build this roster.</p>
         </div>
       `}
     </div>
-    <button class="fab" id="btn-new-pm-resource">＋</button>
+    <button class="fab" id="btn-new-pmtpl-item">＋</button>
   `;
-
-  document.getElementById('btn-pm-resources-back').addEventListener('click', () => navigate('#/'));
-  document.getElementById('btn-new-pm-resource').addEventListener('click', () => openPMResourceSheet(null, renderPMResources));
-  appEl.querySelectorAll('#pm-resources-content .list-item').forEach((row) => {
-    const resource = resources.find((r) => r.id === row.dataset.id);
-    row.addEventListener('click', () => openPMResourceSheet(resource, renderPMResources));
+  document.getElementById('btn-pmtpl-detail-back').addEventListener('click', renderPMResourceTemplates);
+  document.getElementById('btn-pmtpl-edit').addEventListener('click', () => openPMResourceTemplateSheet(template, () => renderPMResourceTemplateDetail(templateId)));
+  document.getElementById('btn-new-pmtpl-item').addEventListener('click', () => openPMResourceTemplateItemSheet(templateId, null, () => renderPMResourceTemplateDetail(templateId)));
+  appEl.querySelectorAll('#pmtpl-detail-content .list-item').forEach((row) => {
+    const item = items.find((i) => i.id === row.dataset.id);
+    row.addEventListener('click', () => openPMResourceTemplateItemSheet(templateId, item, () => renderPMResourceTemplateDetail(templateId)));
   });
 }
 
-function openPMResourceSheet(resource, onSaved) {
-  const isNew = !resource;
-  const typeOptionsHtml = PM_RESOURCE_TYPES.map((t) => `<option value="${t.value}" ${resource && resource.type === t.value ? 'selected' : ''}>${t.label}</option>`).join('');
+function pmFormatRate(resourceLike) {
+  if (resourceLike.costRate == null) return '';
+  const typeLabel = (PM_COST_RATE_TYPES.find((t) => t.value === (resourceLike.costRateType || 'hourly')) || {}).label || '';
+  return `${resourceLike.costRate}${typeLabel ? ' ' + typeLabel.replace('Per ', '/').replace('Fixed (flat cost)', 'fixed') : ''}`;
+}
+
+// Shared fields for both a template item and a project resource — same shape, different store.
+function pmResourceFieldsHtml(prefix, item) {
+  const typeOptionsHtml = PM_RESOURCE_TYPES.map((t) => `<option value="${t.value}" ${item && item.type === t.value ? 'selected' : ''}>${t.label}</option>`).join('');
+  const rateTypeOptionsHtml = PM_COST_RATE_TYPES.map((t) => `<option value="${t.value}" ${item && (item.costRateType || 'hourly') === t.value ? 'selected' : ''}>${t.label}</option>`).join('');
+  return `
+    <div class="field"><label>Name</label><input type="text" id="f-${prefix}-name" value="${item ? esc(item.name) : ''}" placeholder="e.g. O Richards"></div>
+    <div class="field"><label>Type</label><select id="f-${prefix}-type">${typeOptionsHtml}</select></div>
+    <div class="field"><label>Role</label><input type="text" id="f-${prefix}-role" value="${item ? esc(item.role || '') : ''}" placeholder="e.g. Principal Engineer"></div>
+    <div class="field">
+      <label>Cost rate</label>
+      <div style="display:flex; gap:8px;">
+        <input type="number" min="0" step="0.01" id="f-${prefix}-costRate" value="${item && item.costRate != null ? item.costRate : ''}" placeholder="Optional" style="flex:1;">
+        <select id="f-${prefix}-costRateType" style="flex:1;">${rateTypeOptionsHtml}</select>
+      </div>
+    </div>
+    <div class="field"><label>Contact info</label><input type="text" id="f-${prefix}-contact" value="${item ? esc(item.contactInfo || '') : ''}" placeholder="Optional"></div>
+    <div class="field"><label>Notes</label><textarea id="f-${prefix}-notes">${item ? esc(item.notes || '') : ''}</textarea></div>
+  `;
+}
+function pmReadResourceFields(sheet, prefix) {
+  const costRateVal = sheet.querySelector(`#f-${prefix}-costRate`).value;
+  return {
+    name: sheet.querySelector(`#f-${prefix}-name`).value.trim(),
+    type: sheet.querySelector(`#f-${prefix}-type`).value,
+    role: sheet.querySelector(`#f-${prefix}-role`).value.trim(),
+    costRate: costRateVal !== '' ? parseFloat(costRateVal) : null,
+    costRateType: sheet.querySelector(`#f-${prefix}-costRateType`).value,
+    contactInfo: sheet.querySelector(`#f-${prefix}-contact`).value.trim(),
+    notes: sheet.querySelector(`#f-${prefix}-notes`).value.trim()
+  };
+}
+
+function openPMResourceTemplateItemSheet(templateId, item, onSaved) {
+  const isNew = !item;
   const sheet = el(`
     <div class="sheet-backdrop">
       <div class="sheet">
         <div class="sheet-handle"></div>
         <h2>${isNew ? 'New resource' : 'Edit resource'}</h2>
-        <div class="field"><label>Name</label><input type="text" id="f-pmr-name" value="${resource ? esc(resource.name) : ''}" placeholder="e.g. O Richards"></div>
-        <div class="field"><label>Type</label><select id="f-pmr-type">${typeOptionsHtml}</select></div>
-        <div class="field"><label>Role</label><input type="text" id="f-pmr-role" value="${resource ? esc(resource.role || '') : ''}" placeholder="e.g. Principal Engineer"></div>
-        <div class="field"><label>Cost rate</label><input type="number" min="0" step="0.01" id="f-pmr-costRate" value="${resource && resource.costRate != null ? resource.costRate : ''}" placeholder="Optional"></div>
-        <div class="field"><label>Contact info</label><input type="text" id="f-pmr-contact" value="${resource ? esc(resource.contactInfo || '') : ''}" placeholder="Optional"></div>
-        <div class="field"><label>Notes</label><textarea id="f-pmr-notes">${resource ? esc(resource.notes || '') : ''}</textarea></div>
-        <button class="btn btn-primary btn-block" id="btn-pmr-save" style="margin-top:10px;">${isNew ? 'Add resource' : 'Save'}</button>
-        ${isNew ? '' : '<button class="btn btn-danger btn-block" id="btn-pmr-delete" style="margin-top:10px;">Delete resource</button>'}
-        <button class="btn btn-ghost btn-block" id="btn-pmr-cancel">Cancel</button>
+        ${pmResourceFieldsHtml('pmtpli', item)}
+        <button class="btn btn-primary btn-block" id="btn-pmtpli-save" style="margin-top:10px;">${isNew ? 'Add resource' : 'Save'}</button>
+        ${isNew ? '' : '<button class="btn btn-danger btn-block" id="btn-pmtpli-delete" style="margin-top:10px;">Delete</button>'}
+        <button class="btn btn-ghost btn-block" id="btn-pmtpli-cancel">Cancel</button>
       </div>
     </div>
   `);
   presentOverlay(sheet);
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
-  sheet.querySelector('#btn-pmr-cancel').addEventListener('click', () => sheet.remove());
-  sheet.querySelector('#btn-pmr-save').addEventListener('click', async () => {
-    const name = sheet.querySelector('#f-pmr-name').value.trim();
-    if (!name) { toast('Enter a resource name'); return; }
-    const costRateVal = sheet.querySelector('#f-pmr-costRate').value;
-    const patch = {
-      name,
-      type: sheet.querySelector('#f-pmr-type').value,
-      role: sheet.querySelector('#f-pmr-role').value.trim(),
-      costRate: costRateVal !== '' ? parseFloat(costRateVal) : null,
-      contactInfo: sheet.querySelector('#f-pmr-contact').value.trim(),
-      notes: sheet.querySelector('#f-pmr-notes').value.trim()
-    };
-    if (isNew) await DB.createPMResource(patch);
-    else await DB.updatePMResource(resource.id, patch);
+  sheet.querySelector('#btn-pmtpli-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-pmtpli-save').addEventListener('click', async () => {
+    const patch = pmReadResourceFields(sheet, 'pmtpli');
+    if (!patch.name) { toast('Enter a resource name'); return; }
+    if (isNew) await DB.createPMResourceTemplateItem(templateId, patch);
+    else await DB.updatePMResourceTemplateItem(item.id, patch);
     sheet.remove();
     onSaved();
   });
   if (!isNew) {
-    sheet.querySelector('#btn-pmr-delete').addEventListener('click', async () => {
-      if (!confirm(`Delete "${resource.name}"? This removes it from every task it's assigned to, in every project.`)) return;
-      await DB.deletePMResourceCascade(resource.id);
+    sheet.querySelector('#btn-pmtpli-delete').addEventListener('click', async () => {
+      if (!confirm(`Remove "${item.name}" from this template?`)) return;
+      await DB.deletePMResourceTemplateItem(item.id);
       sheet.remove();
       onSaved();
     });
   }
 }
 
-
 function openNewPMProjectSheet(onCreated) {
-  const sheet = el(`
-    <div class="sheet-backdrop">
-      <div class="sheet">
-        <div class="sheet-handle"></div>
-        <h2>New project</h2>
-        <div class="field"><label>Project name</label><input type="text" id="f-pm-name" placeholder="e.g. A487 Bridge Assessment"></div>
-        <div class="field"><label>Structure reference</label><input type="text" id="f-pm-structureRef" placeholder="e.g. BR-0042"></div>
-        <div class="field"><label>Client</label><input type="text" id="f-pm-client" placeholder="Optional"></div>
-        <div class="field"><label>Start date</label><input type="date" id="f-pm-start"></div>
-        <button class="btn btn-primary btn-block" id="btn-create-pm-project" style="margin-top:14px;">Create project</button>
-        <button class="btn btn-ghost btn-block" id="btn-pm-cancel">Cancel</button>
+  DB.listPMResourceTemplates().then((templates) => {
+    const templateOptionsHtml = templates.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
+    const sheet = el(`
+      <div class="sheet-backdrop">
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <h2>New project</h2>
+          <div class="field"><label>Project name</label><input type="text" id="f-pm-name" placeholder="e.g. A487 Bridge Assessment"></div>
+          <div class="field"><label>Structure reference</label><input type="text" id="f-pm-structureRef" placeholder="e.g. BR-0042"></div>
+          <div class="field"><label>Client</label><input type="text" id="f-pm-client" placeholder="Optional"></div>
+          <div class="field"><label>Start date</label><input type="date" id="f-pm-start"></div>
+          ${templates.length ? `
+          <div class="field">
+            <label>Import resources from template</label>
+            <select id="f-pm-import-template">
+              <option value="">None</option>
+              ${templateOptionsHtml}
+            </select>
+            <p class="hint">Copies that template's resources into this project as independent entries — editing them here won't affect the template, or vice versa.</p>
+          </div>
+          ` : ''}
+          <button class="btn btn-primary btn-block" id="btn-create-pm-project" style="margin-top:14px;">Create project</button>
+          <button class="btn btn-ghost btn-block" id="btn-pm-cancel">Cancel</button>
+        </div>
       </div>
-    </div>
-  `);
-  presentOverlay(sheet);
-  sheet.querySelector('#f-pm-start').value = new Date().toISOString().slice(0, 10);
-  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
-  sheet.querySelector('#btn-pm-cancel').addEventListener('click', () => sheet.remove());
-  sheet.querySelector('#btn-create-pm-project').addEventListener('click', async () => {
-    const name = sheet.querySelector('#f-pm-name').value.trim();
-    if (!name) { toast('Enter a project name'); return; }
-    await DB.createPMProject({
-      name,
-      structureRef: sheet.querySelector('#f-pm-structureRef').value.trim(),
-      client: sheet.querySelector('#f-pm-client').value.trim(),
-      startDate: sheet.querySelector('#f-pm-start').value
+    `);
+    presentOverlay(sheet);
+    sheet.querySelector('#f-pm-start').value = new Date().toISOString().slice(0, 10);
+    sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+    sheet.querySelector('#btn-pm-cancel').addEventListener('click', () => sheet.remove());
+    sheet.querySelector('#btn-create-pm-project').addEventListener('click', async () => {
+      const name = sheet.querySelector('#f-pm-name').value.trim();
+      if (!name) { toast('Enter a project name'); return; }
+      const project = await DB.createPMProject({
+        name,
+        structureRef: sheet.querySelector('#f-pm-structureRef').value.trim(),
+        client: sheet.querySelector('#f-pm-client').value.trim(),
+        startDate: sheet.querySelector('#f-pm-start').value
+      });
+      const templateSelect = sheet.querySelector('#f-pm-import-template');
+      if (templateSelect && templateSelect.value) {
+        await DB.copyPMResourceTemplateToProject(templateSelect.value, project.id);
+      }
+      sheet.remove();
+      if (onCreated) onCreated();
     });
-    sheet.remove();
-    if (onCreated) onCreated();
   });
 }
 
@@ -526,6 +651,8 @@ function drawPMWorkspace() {
         <h1>${esc(project.name)}</h1>
         <span class="sub">${esc(project.structureRef || 'Project Management')}</span>
       </div>
+      <button class="text-btn" id="btn-pm-cost">Cost</button>
+      <button class="text-btn" id="btn-pm-resources">Resources</button>
       <button class="text-btn" id="btn-pm-workload">Workload</button>
       <button class="text-btn" id="btn-pm-project-info">Info</button>
     </div>
@@ -563,6 +690,8 @@ function drawPMWorkspace() {
   `;
 
   document.getElementById('btn-pm-workspace-back').addEventListener('click', renderPM);
+  document.getElementById('btn-pm-cost').addEventListener('click', () => renderPMCostReport());
+  document.getElementById('btn-pm-resources').addEventListener('click', () => renderPMProjectResources());
   document.getElementById('btn-pm-workload').addEventListener('click', () => renderPMWorkload());
   document.getElementById('btn-pm-project-info').addEventListener('click', () => openEditPMProjectSheet());
   document.getElementById('btn-pm-add-task').addEventListener('click', () => addPMTaskAndEdit(null));
@@ -910,7 +1039,7 @@ async function openPMTaskSheet(task) {
     // Resources — leaf, non-milestone tasks only (a milestone has no duration to spend effort
     // against, same reasoning as it being exempt from calendar-day scheduling).
     async function refreshResourceList() {
-      const [assignments, resources] = await Promise.all([DB.listPMAssignmentsForTask(task.id), DB.listPMResources()]);
+      const [assignments, resources] = await Promise.all([DB.listPMAssignmentsForTask(task.id), DB.listPMProjectResources(pmWorkspaceState.project.id)]);
       const listEl = sheet.querySelector('#pmt-resource-list');
       if (!assignments.length) {
         listEl.innerHTML = '<p class="hint">No resources assigned.</p>';
@@ -943,7 +1072,7 @@ async function openPMTaskSheet(task) {
     refreshResourceList();
 
     sheet.querySelector('#btn-pmt-add-resource').addEventListener('click', async () => {
-      const [assignments, resources] = await Promise.all([DB.listPMAssignmentsForTask(task.id), DB.listPMResources()]);
+      const [assignments, resources] = await Promise.all([DB.listPMAssignmentsForTask(task.id), DB.listPMProjectResources(pmWorkspaceState.project.id)]);
       const assignedIds = new Set(assignments.map((a) => a.resourceId));
       const candidates = resources.filter((r) => !assignedIds.has(r.id));
       openPMResourcePickerSheet(candidates, (resource) => {
@@ -1159,6 +1288,348 @@ function openPMEffortSheet(task, resource, existingAssignment, onSaved) {
   });
 }
 
+// ---------- Project Resources (per-project independent copies) ----------
+// Reached via the "Resources" button in the project workspace topbar. Distinct from the global
+// Templates screen — these are the actual resources assignable to THIS project's tasks, and can
+// have different cost rates than the same-named resource on another project (competitive bid
+// pricing), per the user's explicit reasoning for why templates and project resources had to be
+// separate concepts in the first place.
+
+async function renderPMProjectResources() {
+  const { project } = pmWorkspaceState;
+  const resources = await DB.listPMProjectResources(project.id);
+  const rows = resources.map((r) => {
+    const typeLabel = (PM_RESOURCE_TYPES.find((t) => t.value === r.type) || {}).label || r.type;
+    return `
+      <div class="list-item" data-id="${r.id}">
+        <div class="meta">
+          <h3>${esc(r.name)}</h3>
+          <p>${esc(typeLabel)}${r.role ? ' · ' + esc(r.role) : ''}${r.costRate != null ? ' · ' + esc(pmFormatRate(r)) : ''}</p>
+        </div>
+        <span class="chevron">›</span>
+      </div>
+    `;
+  }).join('');
+
+  appEl.innerHTML = `
+    <div class="topbar">
+      <button class="icon-btn" id="btn-pm-presources-back">‹</button>
+      <div style="flex:1; min-width:0;">
+        <h1>Resources</h1>
+        <span class="sub">${esc(project.name)}</span>
+      </div>
+    </div>
+    <div class="content" id="pm-presources-content">
+      ${resources.length ? rows : `
+        <div class="empty-state">
+          <div class="glyph">＋</div>
+          <h3>No resources on this project yet</h3>
+          <p>Add one directly, or import a template.</p>
+        </div>
+      `}
+    </div>
+    <div class="pm-toolbar">
+      <button class="btn btn-secondary" id="btn-pm-presources-import">Import from template</button>
+      <button class="btn btn-secondary" id="btn-pm-presources-save-template" ${resources.length ? '' : 'disabled'}>Save as template</button>
+    </div>
+    <button class="fab" id="btn-new-pm-presource">＋</button>
+  `;
+  document.getElementById('btn-pm-presources-back').addEventListener('click', drawPMWorkspace);
+  document.getElementById('btn-new-pm-presource').addEventListener('click', () => openPMProjectResourceSheet(null, renderPMProjectResources));
+  appEl.querySelectorAll('#pm-presources-content .list-item').forEach((row) => {
+    const resource = resources.find((r) => r.id === row.dataset.id);
+    row.addEventListener('click', () => openPMProjectResourceSheet(resource, renderPMProjectResources));
+  });
+  document.getElementById('btn-pm-presources-import').addEventListener('click', async () => {
+    const templates = await DB.listPMResourceTemplates();
+    if (!templates.length) { toast('No templates exist yet — create one from the Templates screen first'); return; }
+    openPMTemplatePickerSheet(templates, async (template) => {
+      await DB.copyPMResourceTemplateToProject(template.id, project.id);
+      renderPMProjectResources();
+    });
+  });
+  document.getElementById('btn-pm-presources-save-template').addEventListener('click', () => {
+    openPMSaveAsTemplateSheet(project.id, () => toast('Saved as a new template'));
+  });
+}
+
+function openPMProjectResourceSheet(resource, onSaved) {
+  const isNew = !resource;
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>${isNew ? 'New resource' : 'Edit resource'}</h2>
+        ${pmResourceFieldsHtml('pmpr', resource)}
+        <button class="btn btn-primary btn-block" id="btn-pmpr-save" style="margin-top:10px;">${isNew ? 'Add resource' : 'Save'}</button>
+        ${isNew ? '' : '<button class="btn btn-danger btn-block" id="btn-pmpr-delete" style="margin-top:10px;">Delete resource</button>'}
+        <button class="btn btn-ghost btn-block" id="btn-pmpr-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-pmpr-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-pmpr-save').addEventListener('click', async () => {
+    const patch = pmReadResourceFields(sheet, 'pmpr');
+    if (!patch.name) { toast('Enter a resource name'); return; }
+    if (isNew) await DB.createPMProjectResource(pmWorkspaceState.project.id, patch);
+    else await DB.updatePMProjectResource(resource.id, patch);
+    sheet.remove();
+    onSaved();
+  });
+  if (!isNew) {
+    sheet.querySelector('#btn-pmpr-delete').addEventListener('click', async () => {
+      if (!confirm(`Delete "${resource.name}" from this project? This removes it from every task it's assigned to here.`)) return;
+      await DB.deletePMProjectResourceCascade(resource.id);
+      sheet.remove();
+      onSaved();
+    });
+  }
+}
+
+function openPMTemplatePickerSheet(templates, onPick) {
+  const rows = templates.map((t) => `
+    <div class="list-item" data-id="${t.id}">
+      <div class="meta"><h3>${esc(t.name)}</h3></div>
+      <span class="chevron">›</span>
+    </div>
+  `).join('');
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Import from template</h2>
+        ${rows}
+        <button class="btn btn-ghost btn-block" id="btn-pmtplpick-cancel" style="margin-top:10px;">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-pmtplpick-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelectorAll('.list-item').forEach((row) => {
+    row.addEventListener('click', () => {
+      const template = templates.find((t) => t.id === row.dataset.id);
+      sheet.remove();
+      onPick(template);
+    });
+  });
+}
+
+function openPMSaveAsTemplateSheet(projectId, onSaved) {
+  const sheet = el(`
+    <div class="sheet-backdrop">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <h2>Save as template</h2>
+        <div class="field"><label>Template name</label><input type="text" id="f-pmsat-name" placeholder="e.g. Standard Bridge Inspection Team"></div>
+        <p class="hint">Creates a new, independent template from this project's current resource list — editing either one afterward won't affect the other.</p>
+        <button class="btn btn-primary btn-block" id="btn-pmsat-save" style="margin-top:10px;">Save template</button>
+        <button class="btn btn-ghost btn-block" id="btn-pmsat-cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#btn-pmsat-cancel').addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#btn-pmsat-save').addEventListener('click', async () => {
+    const name = sheet.querySelector('#f-pmsat-name').value.trim();
+    if (!name) { toast('Enter a template name'); return; }
+    await DB.savePMProjectResourcesAsTemplate(projectId, name);
+    sheet.remove();
+    onSaved();
+  });
+}
+
+// ---------- Cost Report (Phase 2 Costs) ----------
+// Reached via the "Cost" button in the project workspace topbar. Deliberately scoped to PLANNED
+// cost only — Actual/Forecast cost tracking needs a baseline snapshot to compare against, and
+// Baselines aren't built yet (see roadmap.md 4.1). Adding Actual/Forecast now without a real
+// baseline to compare to would just be inventing numbers with nothing meaningful behind them.
+
+function pmCsvEscape(val) {
+  const str = String(val == null ? '' : val);
+  if (/[",\r\n]/.test(str)) return '"' + str.replace(/"/g, '""') + '"';
+  return str;
+}
+
+async function pmGatherCostData() {
+  const { project } = pmWorkspaceState;
+  const leaf = pmLeafTasks();
+  const assignments = await DB.listPMAssignmentsForProject(project.id);
+  const resources = await DB.listPMProjectResources(project.id);
+  const resourceMap = Object.fromEntries(resources.map((r) => [r.id, r]));
+  const assignmentsByTaskId = {};
+  assignments.forEach((a) => { (assignmentsByTaskId[a.taskId] = assignmentsByTaskId[a.taskId] || []).push(a); });
+
+  const leafCosts = {};
+  leaf.forEach((t) => {
+    leafCosts[t.id] = PMResource.computeTaskCost(assignmentsByTaskId[t.id] || [], resourceMap, pmEffectiveHoursPerDay(t));
+  });
+  function costRollup(taskId) {
+    const children = pmTaskChildren(taskId);
+    if (children.length === 0) return leafCosts[taskId] || 0;
+    return children.reduce((sum, c) => sum + costRollup(c.id), 0);
+  }
+
+  const rows = [];
+  pmBuildRows(null, 0, '', rows);
+  const grandTotal = Object.values(leafCosts).reduce((a, b) => a + b, 0);
+
+  const resourceTotals = {};
+  assignments.forEach((a) => {
+    const resource = resourceMap[a.resourceId];
+    const task = pmWorkspaceState.tasks.find((t) => t.id === a.taskId);
+    if (!resource || !task) return;
+    const cost = PMResource.computeAssignmentCost(a, resource, pmEffectiveHoursPerDay(task));
+    resourceTotals[a.resourceId] = (resourceTotals[a.resourceId] || 0) + cost;
+  });
+
+  return { project, rows, costRollup, grandTotal, resourceTotals, resourceMap };
+}
+
+async function renderPMCostReport() {
+  const { project, rows, costRollup, grandTotal, resourceTotals, resourceMap } = await pmGatherCostData();
+
+  const taskRowsHtml = rows.map(({ task, depth, wbs, hasChildren }) => `
+    <div class="pm-row${hasChildren ? ' pm-row-summary' : ''}">
+      <div class="pm-cell pm-cell-wbs">${wbs}</div>
+      <div class="pm-cell pm-cell-name" style="width:220px; padding-left:${depth * 20}px;">${esc(task.name)}</div>
+      <div class="pm-cell pm-cell-pct" style="width:110px;">£${costRollup(task.id).toFixed(2)}</div>
+    </div>
+  `).join('');
+
+  const resourceRowsHtml = Object.keys(resourceTotals).map((rid) => {
+    const r = resourceMap[rid];
+    return `
+      <div class="pm-row">
+        <div class="pm-cell pm-cell-name" style="width:220px;">${esc(r ? r.name : 'Unknown resource')}</div>
+        <div class="pm-cell pm-cell-pct" style="width:110px;">£${resourceTotals[rid].toFixed(2)}</div>
+      </div>
+    `;
+  }).join('');
+
+  appEl.innerHTML = `
+    <div class="topbar">
+      <button class="icon-btn" id="btn-pm-cost-back">‹</button>
+      <div style="flex:1; min-width:0;">
+        <h1>Cost Report</h1>
+        <span class="sub">${esc(project.name)} · Planned cost</span>
+      </div>
+    </div>
+    <div class="content" id="pm-cost-content">
+      <p class="hint">Planned cost only — actual vs. forecast comparison needs a saved baseline, which isn't built yet.</p>
+      <h3 style="margin-top:16px;">By task</h3>
+      <div class="pm-table" style="width:auto;">
+        ${taskRowsHtml || '<p class="hint">No tasks yet.</p>'}
+      </div>
+      <h3 style="margin-top:20px;">By resource</h3>
+      <div class="pm-table" style="width:auto;">
+        ${resourceRowsHtml || '<p class="hint">No resources assigned yet.</p>'}
+      </div>
+      <div class="pm-row" style="margin-top:16px; font-weight:700; border-top:2px solid var(--ink); border-bottom:none;">
+        <div class="pm-cell pm-cell-name" style="width:220px;">Grand total</div>
+        <div class="pm-cell pm-cell-pct" style="width:110px;">£${grandTotal.toFixed(2)}</div>
+      </div>
+    </div>
+    <div class="pm-toolbar">
+      <button class="btn btn-secondary" id="btn-pm-cost-export-pdf">Export PDF</button>
+      <button class="btn btn-secondary" id="btn-pm-cost-export-csv">Export CSV</button>
+    </div>
+  `;
+  document.getElementById('btn-pm-cost-back').addEventListener('click', drawPMWorkspace);
+  document.getElementById('btn-pm-cost-export-pdf').addEventListener('click', pmExportCostPDF);
+  document.getElementById('btn-pm-cost-export-csv').addEventListener('click', pmExportCostCSV);
+}
+
+async function pmExportCostCSV() {
+  const { project, rows, costRollup, grandTotal } = await pmGatherCostData();
+  // Deliberately data only — no chart, per the user's explicit instruction that the CSV export
+  // shouldn't include the Gantt chart, unlike the PDF export below.
+  const lines = [['WBS', 'Task', 'Duration (working days)', 'Start', 'Finish', '% Complete', 'Cost'].map(pmCsvEscape).join(',')];
+  rows.forEach(({ task, wbs, eff }) => {
+    lines.push([
+      wbs, task.name, task.isMilestone ? 0 : (eff.duration || 0),
+      eff.start ? fmtDate(eff.start) : '', eff.finish ? fmtDate(eff.finish) : '',
+      (eff.percentComplete || 0) + '%', costRollup(task.id).toFixed(2)
+    ].map(pmCsvEscape).join(','));
+  });
+  lines.push(['', '', '', '', '', 'Grand total', grandTotal.toFixed(2)].map(pmCsvEscape).join(','));
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/csv' });
+  downloadBlob(blob, `${project.name.replace(/[^a-z0-9]+/gi, '_')}_cost_report.csv`);
+}
+
+async function pmExportCostPDF() {
+  const { project, rows, costRollup, grandTotal } = await pmGatherCostData();
+  if (!window.jspdf) { toast('PDF library not loaded — try again once online at least once'); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+  const margin = 40;
+
+  doc.setFontSize(16);
+  doc.text(project.name, margin, 50);
+  doc.setFontSize(10);
+  doc.text(`Cost Report — ${project.structureRef || ''}`.trim(), margin, 68);
+
+  const body = rows.map(({ task, wbs, depth, eff }) => [
+    wbs, '  '.repeat(depth) + task.name,
+    task.isMilestone ? '—' : (eff.duration || 0) + 'd',
+    eff.start ? fmtDate(eff.start) : '—', eff.finish ? fmtDate(eff.finish) : '—',
+    (eff.percentComplete || 0) + '%', '£' + costRollup(task.id).toFixed(2)
+  ]);
+
+  let finalY = 90;
+  if (doc.autoTable) {
+    doc.autoTable({
+      startY: 90,
+      head: [['WBS', 'Task', 'Duration', 'Start', 'Finish', '% Complete', 'Cost']],
+      body,
+      styles: { fontSize: 8 },
+      margin: { left: margin, right: margin }
+    });
+    finalY = doc.lastAutoTable.finalY + 24;
+  } else {
+    body.forEach((r) => { doc.text(r.join('   '), margin, finalY); finalY += 14; });
+    finalY += 10;
+  }
+
+  doc.setFontSize(11);
+  doc.setFont(undefined, 'bold');
+  doc.text(`Grand total: £${grandTotal.toFixed(2)}`, margin, finalY);
+  doc.setFont(undefined, 'normal');
+
+  // A simple schedule visual on its own page — this is the piece the CSV export deliberately
+  // omits per the user's explicit instruction (CSV is data only).
+  const leaf = pmLeafTasks().filter((t) => t.start && t.finish);
+  if (leaf.length) {
+    doc.addPage();
+    doc.setFontSize(13);
+    doc.text('Schedule overview', margin, 40);
+    const minMs = Math.min(...leaf.map((t) => pmParseISODate(t.start)));
+    const maxMs = Math.max(...leaf.map((t) => pmParseISODate(t.finish)));
+    const totalDays = Math.max(1, pmDaysBetween(minMs, maxMs) + 1);
+    const usableWidth = 595 - margin * 2; // A4 width in pt
+    const pxPerDay = Math.max(1, Math.min(10, usableWidth / totalDays));
+    const rowH = 16;
+    let y = 60;
+    rows.forEach(({ task, wbs, eff, hasChildren }) => {
+      if (!eff.start || !eff.finish) return;
+      doc.setFontSize(7);
+      doc.text(`${wbs} ${task.name}`.slice(0, 30), margin, y + 8);
+      const left = margin + 140 + pmDaysBetween(minMs, pmParseISODate(eff.start)) * pxPerDay;
+      const width = Math.max(2, (pmDaysBetween(pmParseISODate(eff.start), pmParseISODate(eff.finish)) + 1) * pxPerDay);
+      doc.setFillColor(hasChildren ? 60 : 130, hasChildren ? 60 : 150, hasChildren ? 60 : 190);
+      doc.rect(left, y, width, rowH - 4, 'F');
+      y += rowH;
+      if (y > 780) { doc.addPage(); y = 40; }
+    });
+  }
+
+  const blob = doc.output('blob');
+  downloadBlob(blob, `${project.name.replace(/[^a-z0-9]+/gi, '_')}_cost_report.pdf`);
+}
+
 // ---------- Workload view (resource overallocation heatmap) ----------
 // Reached via the "Workload" button in the project workspace topbar — an in-memory screen
 // switch, not a hash route, since it only makes sense inside an already-loaded project
@@ -1169,7 +1640,7 @@ async function renderPMWorkload() {
   const { project } = pmWorkspaceState;
   const leaf = pmLeafTasks();
   const assignments = await DB.listPMAssignmentsForProject(project.id);
-  const resources = await DB.listPMResources();
+  const resources = await DB.listPMProjectResources(pmWorkspaceState.project.id);
   const calendar = pmEffectiveCalendar();
   const getTaskHoursPerDay = (task) => pmEffectiveHoursPerDay(task);
   const workload = PMResource.computeWorkload(assignments, leaf, calendar, getTaskHoursPerDay, pmDateFns, PMCalendar);

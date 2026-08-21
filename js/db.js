@@ -2,7 +2,7 @@
 // Stores: inspections, sections, elements, findings, photos, templates
 
 const DB_NAME = 'siteInspectionDB';
-const DB_VERSION = 7;
+const DB_VERSION = 8;
 
 let dbPromise = null;
 
@@ -98,10 +98,11 @@ function openDB() {
       }
 
       if (oldVersion < 7) {
-        // Project Management: Resources. Resources are GLOBAL (no projectId) — a named person
-        // or piece of plant is a real-world entity that outlives any one project and gets
-        // reused across them, not duplicated per project. Assignments are what's project-scoped
-        // (a resource linked to a specific task within a specific project).
+        // Project Management: Resources. NOTE: this v7 model (a single global "pmResources"
+        // store, assignable directly to any project) was superseded in v8 by a Templates +
+        // per-project-copy model — see the v8 block below for why. The store is left defined
+        // here (harmless if empty/unused) rather than destructively removed, since nothing in
+        // the running app references it anymore as of v8.
         if (!db.objectStoreNames.contains('pmResources')) {
           db.createObjectStore('pmResources', { keyPath: 'id' });
         }
@@ -110,6 +111,27 @@ function openDB() {
           paStore.createIndex('projectId', 'projectId', { unique: false });
           paStore.createIndex('taskId', 'taskId', { unique: false });
           paStore.createIndex('resourceId', 'resourceId', { unique: false });
+        }
+      }
+
+      if (oldVersion < 8) {
+        // Project Management: Resource Templates + per-project Resource copies. Replaces the
+        // v7 "single global resource, assignable anywhere" model — per the user's explicit
+        // reasoning, the SAME person or piece of plant can have different cost rates on
+        // different projects (how competitively you price a bid), so a resource actually
+        // assigned to a project needs to be an independent copy, not a shared/linked record.
+        // Templates are the reusable "starting point" (a named team roster you build once and
+        // reuse), Project Resources are what tasks actually get assigned to.
+        if (!db.objectStoreNames.contains('pmResourceTemplates')) {
+          db.createObjectStore('pmResourceTemplates', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('pmResourceTemplateItems')) {
+          const rtiStore = db.createObjectStore('pmResourceTemplateItems', { keyPath: 'id' });
+          rtiStore.createIndex('templateId', 'templateId', { unique: false });
+        }
+        if (!db.objectStoreNames.contains('pmProjectResources')) {
+          const prStore = db.createObjectStore('pmProjectResources', { keyPath: 'id' });
+          prStore.createIndex('projectId', 'projectId', { unique: false });
         }
       }
     };
@@ -939,6 +961,8 @@ const DB = {
     for (const d of deps) await this.delete('pmDependencies', d.id);
     const assignments = await this.getAllByIndex('pmAssignments', 'projectId', id);
     for (const a of assignments) await this.delete('pmAssignments', a.id);
+    const projectResources = await this.getAllByIndex('pmProjectResources', 'projectId', id);
+    for (const r of projectResources) await this.delete('pmProjectResources', r.id);
     await this.delete('pmProjects', id);
   },
 
@@ -1052,39 +1076,121 @@ const DB = {
     return this.delete('pmDependencies', id);
   },
 
-  // --- Project Management: Resources (global — see deletePMResourceCascade note on why) ---
-  async createPMResource(data) {
+  // --- Project Management: Resource Templates (global, named collections/rosters) ---
+  async createPMResourceTemplate(data) {
     const now = new Date().toISOString();
-    const resource = {
+    const template = { id: uid(), name: data.name || 'Untitled Template', notes: data.notes || '', createdAt: now, updatedAt: now };
+    return this.put('pmResourceTemplates', template);
+  },
+  async listPMResourceTemplates() {
+    const all = await this.getAll('pmResourceTemplates');
+    return all.sort((a, b) => a.name.localeCompare(b.name));
+  },
+  async updatePMResourceTemplate(id, patch) {
+    const existing = await this.get('pmResourceTemplates', id);
+    if (!existing) throw new Error('Template not found');
+    return this.put('pmResourceTemplates', { ...existing, ...patch, updatedAt: new Date().toISOString() });
+  },
+  async deletePMResourceTemplateCascade(id) {
+    const items = await this.getAllByIndex('pmResourceTemplateItems', 'templateId', id);
+    for (const item of items) await this.delete('pmResourceTemplateItems', item.id);
+    await this.delete('pmResourceTemplates', id);
+  },
+
+  // --- Project Management: Resource Template Items (the profiles within a template) ---
+  async createPMResourceTemplateItem(templateId, data) {
+    const item = {
       id: uid(),
+      templateId,
       name: data.name || 'Unnamed Resource',
       role: data.role || '',
       type: data.type || 'person', // 'person' | 'team' | 'plant' | 'equipment' | 'contractor' | 'material'
       costRate: data.costRate != null ? data.costRate : null,
+      costRateType: data.costRateType || 'hourly', // 'hourly' | 'daily' | 'fixed'
+      contactInfo: data.contactInfo || '',
+      notes: data.notes || ''
+    };
+    return this.put('pmResourceTemplateItems', item);
+  },
+  async listPMResourceTemplateItems(templateId) {
+    const all = await this.getAllByIndex('pmResourceTemplateItems', 'templateId', templateId);
+    return all.sort((a, b) => a.name.localeCompare(b.name));
+  },
+  async updatePMResourceTemplateItem(id, patch) {
+    const existing = await this.get('pmResourceTemplateItems', id);
+    if (!existing) throw new Error('Template item not found');
+    return this.put('pmResourceTemplateItems', { ...existing, ...patch });
+  },
+  async deletePMResourceTemplateItem(id) {
+    return this.delete('pmResourceTemplateItems', id);
+  },
+
+  // --- Project Management: Project Resources (independent per-project copies) ---
+  // Deliberately NOT linked back to a template after copying — the same person/plant item can
+  // have a different cost rate on different projects (competitive bid pricing), so a shared/live
+  // link would be actively wrong here, not just unnecessary. `sourceTemplateItemId` is kept only
+  // as a soft reference for the user's own information, never read by any calculation.
+  async createPMProjectResource(projectId, data) {
+    const now = new Date().toISOString();
+    const resource = {
+      id: uid(),
+      projectId,
+      name: data.name || 'Unnamed Resource',
+      role: data.role || '',
+      type: data.type || 'person',
+      costRate: data.costRate != null ? data.costRate : null,
+      costRateType: data.costRateType || 'hourly',
       contactInfo: data.contactInfo || '',
       notes: data.notes || '',
+      sourceTemplateItemId: data.sourceTemplateItemId || null,
       createdAt: now,
       updatedAt: now
     };
-    return this.put('pmResources', resource);
+    return this.put('pmProjectResources', resource);
   },
-  async listPMResources() {
-    const all = await this.getAll('pmResources');
+  async listPMProjectResources(projectId) {
+    const all = await this.getAllByIndex('pmProjectResources', 'projectId', projectId);
     return all.sort((a, b) => a.name.localeCompare(b.name));
   },
-  async updatePMResource(id, patch) {
-    const existing = await this.get('pmResources', id);
+  async updatePMProjectResource(id, patch) {
+    const existing = await this.get('pmProjectResources', id);
     if (!existing) throw new Error('Resource not found');
-    const updated = { ...existing, ...patch, updatedAt: new Date().toISOString() };
-    return this.put('pmResources', updated);
+    return this.put('pmProjectResources', { ...existing, ...patch, updatedAt: new Date().toISOString() });
   },
-  // Resources are global, so deleting one must clean up every assignment referencing it across
-  // every project — not just the current one, since the same resource can be assigned to tasks
-  // in multiple projects.
-  async deletePMResourceCascade(id) {
+  async deletePMProjectResourceCascade(id) {
     const assignments = await this.getAllByIndex('pmAssignments', 'resourceId', id);
     for (const a of assignments) await this.delete('pmAssignments', a.id);
-    await this.delete('pmResources', id);
+    await this.delete('pmProjectResources', id);
+  },
+  // Copies every item from a template into a project as independent pmProjectResources rows.
+  // Used both at project creation (optional import) and later from the project's own Resources
+  // screen ("Import from template").
+  async copyPMResourceTemplateToProject(templateId, projectId) {
+    const items = await this.listPMResourceTemplateItems(templateId);
+    const created = [];
+    for (const item of items) {
+      created.push(await this.createPMProjectResource(projectId, {
+        name: item.name, role: item.role, type: item.type,
+        costRate: item.costRate, costRateType: item.costRateType,
+        contactInfo: item.contactInfo, notes: item.notes,
+        sourceTemplateItemId: item.id
+      }));
+    }
+    return created;
+  },
+  // The reverse direction — saves a project's current resource list as a brand-new template,
+  // for reuse on future projects. Also an independent copy: editing the new template afterward
+  // never touches the project's own resources.
+  async savePMProjectResourcesAsTemplate(projectId, templateName) {
+    const resources = await this.listPMProjectResources(projectId);
+    const template = await this.createPMResourceTemplate({ name: templateName });
+    for (const r of resources) {
+      await this.createPMResourceTemplateItem(template.id, {
+        name: r.name, role: r.role, type: r.type, costRate: r.costRate, costRateType: r.costRateType,
+        contactInfo: r.contactInfo, notes: r.notes
+      });
+    }
+    return template;
   },
 
   // --- Project Management: Assignments (resource <-> task, project-scoped) ---
