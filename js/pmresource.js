@@ -16,20 +16,28 @@
 // with no duration, so "effort spent on it" isn't a meaningful concept, consistent with
 // milestones already being exempt from calendar-day scheduling logic.
 
+// Fix for a real bug (logged, confirmed): if hoursPerDay (or any other numeric input here) ever
+// ends up NaN — e.g. a form field that only checked "not empty" rather than "is a valid number"
+// — Math.max(0, NaN) is itself NaN, and `NaN <= 0` is false, so a bare `<= 0` guard doesn't catch
+// it. Every conversion below now treats a non-finite input as 0 rather than letting NaN silently
+// propagate into a stored value or a displayed "NaNd"/"NaN%".
+function pmSafeNum(x) { return Number.isFinite(x) ? x : 0; }
+
 function pmEffortHoursFromPercent(durationWorkingDays, pct, hoursPerDay) {
-  return Math.max(0, durationWorkingDays) * Math.max(0, hoursPerDay) * (pct / 100);
+  return Math.max(0, pmSafeNum(durationWorkingDays)) * Math.max(0, pmSafeNum(hoursPerDay)) * (pmSafeNum(pct) / 100);
 }
 function pmEffortHoursFromDays(days, hoursPerDay) {
-  return Math.max(0, days) * Math.max(0, hoursPerDay);
+  return Math.max(0, pmSafeNum(days)) * Math.max(0, pmSafeNum(hoursPerDay));
 }
 function pmPercentFromEffortHours(hours, durationWorkingDays, hoursPerDay) {
-  const capacity = durationWorkingDays * hoursPerDay;
-  if (capacity <= 0) return 0;
-  return (hours / capacity) * 100;
+  const capacity = pmSafeNum(durationWorkingDays) * pmSafeNum(hoursPerDay);
+  if (!(capacity > 0)) return 0; // catches <= 0 AND NaN (NaN > 0 is false, so !(...) is true)
+  return (pmSafeNum(hours) / capacity) * 100;
 }
 function pmDaysFromEffortHours(hours, hoursPerDay) {
-  if (hoursPerDay <= 0) return 0;
-  return hours / hoursPerDay;
+  const safeHoursPerDay = pmSafeNum(hoursPerDay);
+  if (!(safeHoursPerDay > 0)) return 0;
+  return pmSafeNum(hours) / safeHoursPerDay;
 }
 
 // Cost of a single assignment, given the resource's rate and how it's interpreted.

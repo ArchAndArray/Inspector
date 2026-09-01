@@ -755,8 +755,17 @@ function pmEffectiveCalendar() {
 // otherwise falls back to the project calendar's default. Per the user's explicit decision,
 // this is a TASK-level setting, uniform for every resource assigned to it — not something that
 // varies per resource on the same task.
+// A task's own hours-per-day override (e.g. a 12-hour night-shift task) takes precedence;
+// otherwise falls back to the project calendar's default. Per the user's explicit decision,
+// this is a TASK-level setting, uniform for every resource assigned to it — not something that
+// varies per resource on the same task.
+// Defensive fix (logged bug): if a task already has a corrupted NaN override stored from before
+// the input-validation fix existed, this falls back to the project default rather than
+// propagating NaN forward — protects existing data, not just prevents new corruption.
 function pmEffectiveHoursPerDay(task) {
-  return task.hoursPerDayOverride != null ? task.hoursPerDayOverride : pmEffectiveCalendar().hoursPerDay;
+  const override = task.hoursPerDayOverride;
+  if (override != null && Number.isFinite(override) && override > 0) return override;
+  return pmEffectiveCalendar().hoursPerDay;
 }
 
 function pmExplainValidationFailure(check) {
@@ -1092,8 +1101,22 @@ async function openPMTaskSheet(task) {
       patch.finish = isMilestone ? patch.start : (sheet.querySelector('#f-pmt-finish').value || null);
       patch.duration = isMilestone ? 0 : Math.max(0, parseInt(sheet.querySelector('#f-pmt-duration').value, 10) || 0);
       patch.percentComplete = Math.min(100, Math.max(0, parseInt(sheet.querySelector('#f-pmt-pct').value, 10) || 0));
-      const hpdVal = sheet.querySelector('#f-pmt-hours-per-day').value;
-      patch.hoursPerDayOverride = hpdVal !== '' ? Math.max(0.1, parseFloat(hpdVal)) : null;
+      // Bug fix (logged, confirmed): previously only checked the input wasn't an empty string,
+      // so a whitespace-only entry passed that check and parseFloat produced NaN, which then
+      // propagated into "NaNd" effort displays. Now validates it's an actual finite positive
+      // number before saving, and rejects with a clear message otherwise rather than silently
+      // storing NaN.
+      const hpdValRaw = sheet.querySelector('#f-pmt-hours-per-day').value.trim();
+      if (hpdValRaw !== '') {
+        const parsedHpd = parseFloat(hpdValRaw);
+        if (!Number.isFinite(parsedHpd) || parsedHpd <= 0) {
+          toast('Hours per day must be a positive number, or leave it blank to use the project default');
+          return;
+        }
+        patch.hoursPerDayOverride = parsedHpd;
+      } else {
+        patch.hoursPerDayOverride = null;
+      }
 
       const result = await pmCommitTaskDates(task.id, patch);
       if (!result.ok) { toast(result.error); return; }
@@ -1463,6 +1486,21 @@ async function pmGatherCostData() {
   const assignmentsByTaskId = {};
   assignments.forEach((a) => { (assignmentsByTaskId[a.taskId] = assignmentsByTaskId[a.taskId] || []).push(a); });
 
+  // Bug fix (logged, confirmed): assignments made before the Templates/Project-Resources
+  // restructuring can reference a resourceId that no longer exists in this project's resource
+  // list — computeTaskCost/computeAssignmentCost correctly treat that as £0 (a genuinely unknown
+  // cost), but nothing surfaced that to the user, so a real £0 was indistinguishable from "this
+  // assignment's resource silently vanished." Counted here so the report can say so explicitly,
+  // rather than a migration attempting to guess which old resource an orphaned ID used to mean.
+  const missingResourceTaskIds = new Set();
+  let missingResourceCount = 0;
+  assignments.forEach((a) => {
+    if (!resourceMap[a.resourceId]) {
+      missingResourceCount++;
+      missingResourceTaskIds.add(a.taskId);
+    }
+  });
+
   const leafCosts = {};
   leaf.forEach((t) => {
     leafCosts[t.id] = PMResource.computeTaskCost(assignmentsByTaskId[t.id] || [], resourceMap, pmEffectiveHoursPerDay(t));
@@ -1486,17 +1524,25 @@ async function pmGatherCostData() {
     resourceTotals[a.resourceId] = (resourceTotals[a.resourceId] || 0) + cost;
   });
 
-  return { project, rows, costRollup, grandTotal, resourceTotals, resourceMap };
+  return { project, rows, costRollup, grandTotal, resourceTotals, resourceMap, missingResourceCount, missingResourceTaskIds };
+}
+
+// Bug fix (logged): no project-level currency setting existed — £ was hardcoded everywhere a
+// cost appeared. A project without one set defaults to £, same as before, but it's now an
+// actual setting (Project Info sheet) rather than baked into the display code.
+function pmEffectiveCurrency() {
+  return pmWorkspaceState.project.currencySymbol || '£';
 }
 
 async function renderPMCostReport() {
-  const { project, rows, costRollup, grandTotal, resourceTotals, resourceMap } = await pmGatherCostData();
+  const { project, rows, costRollup, grandTotal, resourceTotals, resourceMap, missingResourceCount, missingResourceTaskIds } = await pmGatherCostData();
+  const cur = pmEffectiveCurrency();
 
   const taskRowsHtml = rows.map(({ task, depth, wbs, hasChildren }) => `
     <div class="pm-row${hasChildren ? ' pm-row-summary' : ''}">
       <div class="pm-cell pm-cell-wbs">${wbs}</div>
-      <div class="pm-cell pm-cell-name" style="width:220px; padding-left:${depth * 20}px;">${esc(task.name)}</div>
-      <div class="pm-cell pm-cell-pct" style="width:110px;">£${costRollup(task.id).toFixed(2)}</div>
+      <div class="pm-cell pm-cell-name" style="width:220px; padding-left:${depth * 20}px;">${missingResourceTaskIds.has(task.id) ? '⚠ ' : ''}${esc(task.name)}</div>
+      <div class="pm-cell pm-cell-pct" style="width:110px;">${cur}${costRollup(task.id).toFixed(2)}</div>
     </div>
   `).join('');
 
@@ -1505,11 +1551,16 @@ async function renderPMCostReport() {
     return `
       <div class="pm-row">
         <div class="pm-cell pm-cell-name" style="width:220px;">${esc(r ? r.name : 'Unknown resource')}</div>
-        <div class="pm-cell pm-cell-pct" style="width:110px;">£${resourceTotals[rid].toFixed(2)}</div>
+        <div class="pm-cell pm-cell-pct" style="width:110px;">${cur}${resourceTotals[rid].toFixed(2)}</div>
       </div>
     `;
   }).join('');
 
+  // Bug fix (logged, confirmed root cause): export buttons previously sat in a bottom toolbar
+  // after the task/resource tables — on a project with many tasks, #app's min-height layout
+  // means the whole page just grows and scrolls, so the toolbar could end up well below the
+  // fold. Moved into the topbar instead, where it's visible immediately regardless of how long
+  // the report is.
   appEl.innerHTML = `
     <div class="topbar">
       <button class="icon-btn" id="btn-pm-cost-back">‹</button>
@@ -1517,9 +1568,12 @@ async function renderPMCostReport() {
         <h1>Cost Report</h1>
         <span class="sub">${esc(project.name)} · Planned cost</span>
       </div>
+      <button class="text-btn" id="btn-pm-cost-export-csv">CSV</button>
+      <button class="text-btn" id="btn-pm-cost-export-pdf">PDF</button>
     </div>
     <div class="content" id="pm-cost-content">
       <p class="hint">Planned cost only — actual vs. forecast comparison needs a saved baseline, which isn't built yet.</p>
+      ${missingResourceCount ? `<p class="hint" style="color:var(--red); font-weight:600;">⚠ ${missingResourceCount} assignment${missingResourceCount === 1 ? '' : 's'} reference${missingResourceCount === 1 ? 's' : ''} a resource that no longer exists in this project — marked with ⚠ below, and not included in these totals.</p>` : ''}
       <h3 style="margin-top:16px;">By task</h3>
       <div class="pm-table" style="width:auto;">
         ${taskRowsHtml || '<p class="hint">No tasks yet.</p>'}
@@ -1530,12 +1584,8 @@ async function renderPMCostReport() {
       </div>
       <div class="pm-row" style="margin-top:16px; font-weight:700; border-top:2px solid var(--ink); border-bottom:none;">
         <div class="pm-cell pm-cell-name" style="width:220px;">Grand total</div>
-        <div class="pm-cell pm-cell-pct" style="width:110px;">£${grandTotal.toFixed(2)}</div>
+        <div class="pm-cell pm-cell-pct" style="width:110px;">${cur}${grandTotal.toFixed(2)}</div>
       </div>
-    </div>
-    <div class="pm-toolbar">
-      <button class="btn btn-secondary" id="btn-pm-cost-export-pdf">Export PDF</button>
-      <button class="btn btn-secondary" id="btn-pm-cost-export-csv">Export CSV</button>
     </div>
   `;
   document.getElementById('btn-pm-cost-back').addEventListener('click', drawPMWorkspace);
@@ -1545,9 +1595,12 @@ async function renderPMCostReport() {
 
 async function pmExportCostCSV() {
   const { project, rows, costRollup, grandTotal } = await pmGatherCostData();
+  const cur = pmEffectiveCurrency();
+  // Currency goes in the column header, not appended to each value — a CSV is meant to be
+  // re-imported/analyzed, and "£1234.00" as a cell value stops being a number to a spreadsheet.
   // Deliberately data only — no chart, per the user's explicit instruction that the CSV export
   // shouldn't include the Gantt chart, unlike the PDF export below.
-  const lines = [['WBS', 'Task', 'Duration (working days)', 'Start', 'Finish', '% Complete', 'Cost'].map(pmCsvEscape).join(',')];
+  const lines = [['WBS', 'Task', 'Duration (working days)', 'Start', 'Finish', '% Complete', `Cost (${cur})`].map(pmCsvEscape).join(',')];
   rows.forEach(({ task, wbs, eff }) => {
     lines.push([
       wbs, task.name, task.isMilestone ? 0 : (eff.duration || 0),
@@ -1562,6 +1615,7 @@ async function pmExportCostCSV() {
 
 async function pmExportCostPDF() {
   const { project, rows, costRollup, grandTotal } = await pmGatherCostData();
+  const cur = pmEffectiveCurrency();
   if (!window.jspdf) { toast('PDF library not loaded — try again once online at least once'); return; }
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit: 'pt', format: 'a4' });
@@ -1576,7 +1630,7 @@ async function pmExportCostPDF() {
     wbs, '  '.repeat(depth) + task.name,
     task.isMilestone ? '—' : (eff.duration || 0) + 'd',
     eff.start ? fmtDate(eff.start) : '—', eff.finish ? fmtDate(eff.finish) : '—',
-    (eff.percentComplete || 0) + '%', '£' + costRollup(task.id).toFixed(2)
+    (eff.percentComplete || 0) + '%', cur + costRollup(task.id).toFixed(2)
   ]);
 
   let finalY = 90;
@@ -1596,7 +1650,7 @@ async function pmExportCostPDF() {
 
   doc.setFontSize(11);
   doc.setFont(undefined, 'bold');
-  doc.text(`Grand total: £${grandTotal.toFixed(2)}`, margin, finalY);
+  doc.text(`Grand total: ${cur}${grandTotal.toFixed(2)}`, margin, finalY);
   doc.setFont(undefined, 'normal');
 
   // A simple schedule visual on its own page — this is the piece the CSV export deliberately
@@ -1730,6 +1784,11 @@ function openEditPMProjectSheet() {
         <div class="field"><label>Client</label><input type="text" id="f-pm-client" value="${esc(project.client || '')}"></div>
         <div class="field"><label>Start date</label><input type="date" id="f-pm-start" value="${project.startDate ? project.startDate.slice(0, 10) : ''}"></div>
         <div class="field">
+          <label>Currency symbol</label>
+          <input type="text" id="f-pm-currency" maxlength="3" value="${esc(project.currencySymbol || '£')}" placeholder="£">
+          <p class="hint">Used throughout the Cost Report, PDF, and CSV exports for this project.</p>
+        </div>
+        <div class="field">
           <label>Working days</label>
           <div>${weekdayTogglesHtml}</div>
           <p class="hint">Governs how task durations and dependencies are scheduled — a 3-day task skips any day not checked here.</p>
@@ -1791,12 +1850,14 @@ function openEditPMProjectSheet() {
     const workingWeekdays = Array.from(sheet.querySelectorAll('.f-pm-cal-weekday:checked')).map((cb) => parseInt(cb.value, 10));
     if (workingWeekdays.length === 0) { toast('At least one working day is required'); return; }
     const hoursPerDay = Math.max(0.1, parseFloat(sheet.querySelector('#f-pm-cal-hours-per-day').value) || 7.4);
+    const currencySymbol = sheet.querySelector('#f-pm-currency').value.trim() || '£';
     await DB.updatePMProject(project.id, {
       name,
       structureRef: sheet.querySelector('#f-pm-structureRef').value.trim(),
       client: sheet.querySelector('#f-pm-client').value.trim(),
       startDate: sheet.querySelector('#f-pm-start').value,
       notes: sheet.querySelector('#f-pm-notes').value.trim(),
+      currencySymbol,
       calendar: { workingWeekdays, holidays: pendingHolidays, hoursPerDay }
     });
     sheet.remove();

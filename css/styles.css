@@ -227,6 +227,7 @@ button {
 .field input[type="text"],
 .field input[type="date"],
 .field input[type="datetime-local"],
+.field input[type="number"],
 .field select,
 .field textarea {
   width: 100%;

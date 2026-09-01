@@ -938,6 +938,7 @@ const DB = {
       // note on why the engine's default and the product default are deliberately different
       // things). Projects created before this field existed simply won't have it; pm.js treats
       // a missing calendar as this same default at read time rather than requiring a migration.
+      currencySymbol: data.currencySymbol || '£',
       calendar: data.calendar || { workingWeekdays: [1, 2, 3, 4, 5], holidays: [], hoursPerDay: 7.4 },
       createdAt: now,
       updatedAt: now
