@@ -72,15 +72,6 @@ async function renderLauncher() {
             <div style="font-size:13.5px; font-weight:650; text-align:center;">Project<br>Management</div>
           </div>
 
-          <div class="launcher-tile" data-target="pm-resources" style="width:132px; display:flex; flex-direction:column; align-items:center; gap:10px; cursor:pointer; padding:16px 8px;">
-            <div style="width:64px; height:64px; border-radius:16px; background:${t.red}; display:flex; align-items:center; justify-content:center;">
-              <div style="display:flex; align-items:center; justify-content:center;">
-                <div style="width:22px; height:22px; border-radius:50%; border:3px solid #fff; margin-right:-6px;"></div>
-                <div style="width:16px; height:16px; border-radius:50%; border:3px solid #fff; opacity:0.85;"></div>
-              </div>
-            </div>
-            <div style="font-size:13.5px; font-weight:650; text-align:center;">Resources</div>
-          </div>
         </div>
       </div>
 
@@ -138,7 +129,6 @@ async function renderLauncher() {
 async function onLauncherTileClick(target) {
   if (target === 'inspector') { navigate('#/inspector'); return; }
   if (target === 'pm') { navigate('#/pm'); return; }
-  if (target === 'pm-resources') { navigate('#/pm-resources'); return; }
   if (target === 'scale-annotate') { navigate('#/scale-annotate'); return; }
   if (target === 'pdf-editor') { navigate('#/pdf-editor'); return; }
   if (target === 'backup') { openBackupRestoreSheet(); return; }

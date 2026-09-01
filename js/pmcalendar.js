@@ -10,7 +10,7 @@
 // per project, not multiple named calendars or per-resource calendars — those are real brief
 // features (section 10) explicitly deferred, not silently dropped. See roadmap.md 4.1.
 
-const PM_DEFAULT_CALENDAR = { workingWeekdays: [1, 2, 3, 4, 5], holidays: [] };
+const PM_DEFAULT_CALENDAR = { workingWeekdays: [1, 2, 3, 4, 5], holidays: [], hoursPerDay: 7.4 };
 
 // The engine's own default when no calendar is supplied at all is "every day works" — this is
 // NOT the same as PM_DEFAULT_CALENDAR (Mon-Fri), which is the product-level default a new
@@ -18,7 +18,7 @@ const PM_DEFAULT_CALENDAR = { workingWeekdays: [1, 2, 3, 4, 5], holidays: [] };
 // default as a no-op is what lets pmschedule.js's existing Step 3 tests keep passing unchanged
 // — they test dependency/cascade logic and were never meant to be calendar tests. pm.js always
 // passes an explicit calendar at call time in real use.
-const PM_ALL_DAYS_CALENDAR = { workingWeekdays: [0, 1, 2, 3, 4, 5, 6], holidays: [] };
+const PM_ALL_DAYS_CALENDAR = { workingWeekdays: [0, 1, 2, 3, 4, 5, 6], holidays: [], hoursPerDay: 8 };
 
 function pmIsWorkingDay(ms, calendar) {
   const cal = calendar || PM_ALL_DAYS_CALENDAR;
