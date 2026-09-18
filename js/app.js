@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '1.0.6.18';
+const APP_VERSION = '1.0.6.19';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -250,6 +250,25 @@ function loadPdfLib() {
     document.head.appendChild(script);
   });
   return pdfLibLoadPromise;
+}
+
+
+// JSZip: bundles multiple files into one archive — used only by the PDF Editor's Split
+// feature, to work around a real iOS Safari limitation where triggering several
+// programmatic downloads in quick succession silently drops all but the first one. A single
+// zip download sidesteps that entirely rather than working around it per-file.
+let jsZipLoadPromise = null;
+function loadJsZip() {
+  if (window.JSZip) return Promise.resolve();
+  if (jsZipLoadPromise) return jsZipLoadPromise;
+  jsZipLoadPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Failed to load zip library'));
+    document.head.appendChild(script);
+  });
+  return jsZipLoadPromise;
 }
 
 

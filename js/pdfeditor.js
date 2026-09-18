@@ -1141,14 +1141,22 @@ async function pdfEdDuplicateSelection() {
   renderPdfEdBody();
 }
 
+// The actual PDF-building step, factored out so the Split flow can collect several of these
+// (for zipping together) without triggering pdfEdExportPages' own single-file download —
+// Extract/Save/Export's existing single-download behavior is unchanged, this is purely
+// additive.
+async function pdfEdBuildPagesPdfBytes(indices) {
+  const outDoc = await PDFLib.PDFDocument.create();
+  const copied = await outDoc.copyPages(pdfEdWorkingDoc, indices);
+  copied.forEach((p) => outDoc.addPage(p));
+  return outDoc.save();
+}
+
 async function pdfEdExportPages(indices, suggestedName) {
   if (!indices || !indices.length) { toast('Nothing to export'); return; }
   toast('Preparing PDF…');
   try {
-    const outDoc = await PDFLib.PDFDocument.create();
-    const copied = await outDoc.copyPages(pdfEdWorkingDoc, indices);
-    copied.forEach((p) => outDoc.addPage(p));
-    const bytes = await outDoc.save();
+    const bytes = await pdfEdBuildPagesPdfBytes(indices);
     const blob = new Blob([bytes], { type: 'application/pdf' });
     downloadBlob(blob, `${suggestedName}.pdf`);
   } catch (err) {
@@ -1228,7 +1236,7 @@ function pdfEdSplitPrompt() {
       <div class="sheet">
         <div class="sheet-handle"></div>
         <h2>Split PDF</h2>
-        <p class="muted" style="font-size:13px; margin-top:-8px;">Either enter page numbers to split after — e.g. "5, 12" splits a 20-page document into 1–5, 6–12, 13–20 — or enter explicit ranges for each file — e.g. "1-105, 106-210, 211-315, 316-420".</p>
+        <p class="muted" style="font-size:13px; margin-top:-8px;">Either enter page numbers to split after — e.g. "5, 12" splits a 20-page document into 1–5, 6–12, 13–20 — or enter explicit ranges for each file — e.g. "1-105, 106-210, 211-315, 316-420". All the resulting files download together as a single zip.</p>
         <div class="field"><label>Split after page(s), or ranges</label><input type="text" id="f-pdfed-split" placeholder="e.g. 5, 12  or  1-105, 106-210"></div>
         <button class="btn btn-primary btn-block" id="btn-do-split">Split &amp; download</button>
         <button class="btn btn-ghost btn-block" id="btn-cancel-split">Cancel</button>
@@ -1244,13 +1252,27 @@ function pdfEdSplitPrompt() {
     const result = pdfEdParseSplitInput(raw, total);
     if (result.error) { toast(result.error); return; }
     sheet.remove();
-    for (let i = 0; i < result.groups.length; i++) {
-      const { start, end } = result.groups[i];
-      const indices = [];
-      for (let j = start - 1; j < end; j++) indices.push(j);
-      await pdfEdExportPages(indices, `${pdfEdFilename}_part${i + 1}`);
+    toast('Building split files…');
+    try {
+      await loadJsZip();
+      const zip = new window.JSZip();
+      for (let i = 0; i < result.groups.length; i++) {
+        const { start, end } = result.groups[i];
+        const indices = [];
+        for (let j = start - 1; j < end; j++) indices.push(j);
+        const bytes = await pdfEdBuildPagesPdfBytes(indices);
+        zip.file(`${pdfEdFilename}_part${i + 1}.pdf`, bytes);
+      }
+      // compression:'DEFLATE' would spend real time re-compressing content that's already
+      // compressed inside each PDF (images especially) for little size benefit — STORE just
+      // packages the already-built files as-is, which is both faster and the right call here.
+      const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
+      downloadBlob(zipBlob, `${pdfEdFilename}_split.zip`);
+      toast(`Split into ${result.groups.length} files (zipped)`);
+    } catch (err) {
+      console.error('Split failed', err);
+      toast('Split failed — check your connection and try again');
     }
-    toast(`Split into ${result.groups.length} files`);
   });
 }
 
