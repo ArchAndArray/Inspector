@@ -2,7 +2,7 @@
 // Stores: inspections, sections, elements, findings, photos, templates
 
 const DB_NAME = 'siteInspectionDB';
-const DB_VERSION = 8;
+const DB_VERSION = 9;
 
 let dbPromise = null;
 
@@ -132,6 +132,27 @@ function openDB() {
         if (!db.objectStoreNames.contains('pmProjectResources')) {
           const prStore = db.createObjectStore('pmProjectResources', { keyPath: 'id' });
           prStore.createIndex('projectId', 'projectId', { unique: false });
+        }
+      }
+      if (oldVersion < 9) {
+        // Design module: structural design calculations (retaining walls now, other component
+        // types — soil nails/rock anchors, concrete slab, composite deck, assessment — to
+        // follow later, per an explicit "for now just retaining wall" scope decision). Mirrors
+        // the Project/Item/Case nesting pattern already established for PM (Project -> Task),
+        // extended one level deeper since a single item (e.g. one retaining wall) legitimately
+        // needs several saved, named, comparable input sets while iterating toward a design
+        // that passes — the whole point of a "Case" existing as its own record rather than
+        // just overwriting an item's inputs in place.
+        if (!db.objectStoreNames.contains('designProjects')) {
+          db.createObjectStore('designProjects', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('designItems')) {
+          const diStore = db.createObjectStore('designItems', { keyPath: 'id' });
+          diStore.createIndex('projectId', 'projectId', { unique: false });
+        }
+        if (!db.objectStoreNames.contains('designCases')) {
+          const dcStore = db.createObjectStore('designCases', { keyPath: 'id' });
+          dcStore.createIndex('itemId', 'itemId', { unique: false });
         }
       }
     };
@@ -1245,6 +1266,101 @@ const DB = {
       summary.push({ element: elmt, ...s });
     }
     return summary;
+  },
+
+  // --- Design module: Projects -> Items -> Cases ---
+  async createDesignProject(data) {
+    const now = new Date().toISOString();
+    const project = {
+      id: uid(),
+      name: data.name || 'Untitled Project',
+      reference: data.reference || '',
+      client: data.client || '',
+      notes: data.notes || '',
+      createdAt: now,
+      updatedAt: now
+    };
+    return this.put('designProjects', project);
+  },
+  async listDesignProjects() {
+    const all = await this.getAll('designProjects');
+    return all.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+  },
+  async updateDesignProject(id, patch) {
+    const existing = await this.get('designProjects', id);
+    if (!existing) throw new Error('Design project not found');
+    return this.put('designProjects', { ...existing, ...patch, updatedAt: new Date().toISOString() });
+  },
+  async deleteDesignProjectCascade(id) {
+    const items = await this.getAllByIndex('designItems', 'projectId', id);
+    for (const item of items) await this.deleteDesignItemCascade(item.id);
+    await this.delete('designProjects', id);
+  },
+
+  // type is 'retainingWall' for now — an extensible field, not a hardcoded assumption
+  // elsewhere, so soil nails/rock anchors, concrete slab, composite deck, and assessment
+  // items can join later without a schema change. wallType ('mass'|'cantilever') only
+  // applies when type === 'retainingWall'.
+  async createDesignItem(projectId, data) {
+    const now = new Date().toISOString();
+    const existing = await this.listDesignItems(projectId);
+    const item = {
+      id: uid(),
+      projectId,
+      name: data.name || 'Untitled Item',
+      type: data.type || 'retainingWall',
+      wallType: data.wallType || null,
+      order: existing.length,
+      createdAt: now,
+      updatedAt: now
+    };
+    return this.put('designItems', item);
+  },
+  async listDesignItems(projectId) {
+    const all = await this.getAllByIndex('designItems', 'projectId', projectId);
+    return all.sort((a, b) => a.order - b.order);
+  },
+  async updateDesignItem(id, patch) {
+    const existing = await this.get('designItems', id);
+    if (!existing) throw new Error('Design item not found');
+    return this.put('designItems', { ...existing, ...patch, updatedAt: new Date().toISOString() });
+  },
+  async deleteDesignItemCascade(id) {
+    const cases = await this.getAllByIndex('designCases', 'itemId', id);
+    for (const c of cases) await this.delete('designCases', c.id);
+    await this.delete('designItems', id);
+  },
+
+  // A Case holds one complete, named, saved set of calc.js inputs (inp/geo/rebar, shaped
+  // per the item's wallType) — never the computed results, which are always re-derived
+  // fresh from these inputs at view/export time, same "don't store what you can recompute"
+  // principle used throughout this app (PM's rollups, BCI/MDCI, etc).
+  async createDesignCase(itemId, data) {
+    const now = new Date().toISOString();
+    const existing = await this.listDesignCases(itemId);
+    const dcase = {
+      id: uid(),
+      itemId,
+      name: data.name || `Option ${String.fromCharCode(65 + existing.length)}`,
+      inputs: data.inputs || {},
+      notes: data.notes || '',
+      order: existing.length,
+      createdAt: now,
+      updatedAt: now
+    };
+    return this.put('designCases', dcase);
+  },
+  async listDesignCases(itemId) {
+    const all = await this.getAllByIndex('designCases', 'itemId', itemId);
+    return all.sort((a, b) => a.order - b.order);
+  },
+  async updateDesignCase(id, patch) {
+    const existing = await this.get('designCases', id);
+    if (!existing) throw new Error('Design case not found');
+    return this.put('designCases', { ...existing, ...patch, updatedAt: new Date().toISOString() });
+  },
+  async deleteDesignCase(id) {
+    await this.delete('designCases', id);
   }
 };
 

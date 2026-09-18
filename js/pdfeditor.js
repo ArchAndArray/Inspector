@@ -10,6 +10,19 @@
 let pdfEdWorkingDoc = null;   // pdf-lib PDFDocument — the current working state, single source of truth
 let pdfEdFilename = 'document';
 let pdfEdPages = [];          // ordered descriptors: { id, thumbUrl } — rotation is baked directly into the thumbnail's own pixels, not a separate display transform
+// thumbUrl above is always the LOW-RES sidebar/placeholder render (see pdfEdRebuildThumbnails).
+// Full-resolution renders for the main preview are lazy and cached here instead, keyed by
+// page id — rendering all pages at full res upfront is what made very large documents (400+
+// pages) crash from memory pressure. Capped and evicted oldest-first in pdfEdEnsureHighRes so
+// a long scroll session can't just re-grow the same problem.
+let pdfEdHighResCache = new Map();
+let pdfEdPreviewObserver = null;
+// The pdf.js document loaded inside pdfEdRebuildThumbnails, reused by pdfEdEnsureHighRes so
+// scrolling to a newly-visited page doesn't re-serialize and re-parse the entire document
+// (pdfEdWorkingDoc.save() + getDocument()) every single time — only genuinely expensive once
+// per edit, not once per page viewed. Naturally invalidated by pdfEdRebuildThumbnails running
+// again after any structural change, same as pdfEdHighResCache above.
+let pdfEdCachedPdfJsDoc = null;
 let pdfEdSelected = new Set();
 let pdfEdPreviewId = null;
 let pdfEdCommentMode = false;
@@ -141,16 +154,19 @@ async function renderPdfEditor() {
 }
 
 async function pdfEdRebuildThumbnails() {
+  pdfEdHighResCache.clear(); // any cached full-res render is potentially stale once the document changes
   const bytes = await pdfEdWorkingDoc.save();
   const pdfJsDoc = await window.pdfjsLib.getDocument({ data: bytes }).promise;
+  pdfEdCachedPdfJsDoc = pdfJsDoc; // reused by pdfEdEnsureHighRes — see its own comment
   const newPages = [];
   for (let i = 1; i <= pdfJsDoc.numPages; i++) {
     const page = await pdfJsDoc.getPage(i);
-    // Bumped from the original 0.35 — that was reasonable for the small sidebar thumbnails
-    // alone, but is now also used for the enlarged main preview (and its zoom), where it
-    // would look visibly soft. Higher resolution costs more memory for very long documents,
-    // a tradeoff worth knowing about for very large PDFs specifically.
-    const viewport = page.getViewport({ scale: 1.0 });
+    // Low-res on purpose — this is the sidebar thumbnail AND the main preview's placeholder
+    // until a page actually scrolls into view (see pdfEdEnsureHighRes/pdfEdRenderPreview).
+    // Rendering every page at full resolution upfront (the previous approach) is what made
+    // opening a very large document (400+ pages) crash outright from memory pressure — this
+    // scale is cheap regardless of page count.
+    const viewport = page.getViewport({ scale: 0.35 });
     const canvas = document.createElement('canvas');
     canvas.width = viewport.width;
     canvas.height = viewport.height;
@@ -162,6 +178,36 @@ async function pdfEdRebuildThumbnails() {
     });
   }
   pdfEdPages = newPages;
+}
+
+// Renders ONE page at full resolution on demand, caching the result — this is what the main
+// preview swaps to once a page actually scrolls into view (see pdfEdRenderPreview's
+// IntersectionObserver). Capped so a long scroll session can't silently regrow the same
+// memory problem full-upfront rendering had — oldest entries are evicted first, relying on
+// Map's insertion-order iteration.
+async function pdfEdEnsureHighRes(pageId, pageIndex) {
+  if (pdfEdHighResCache.has(pageId)) return pdfEdHighResCache.get(pageId);
+  let pdfJsDoc = pdfEdCachedPdfJsDoc;
+  if (!pdfJsDoc) {
+    // Defensive fallback only — shouldn't normally happen, since pdfEdRebuildThumbnails
+    // always runs before the preview is shown at all.
+    const bytes = await pdfEdWorkingDoc.save();
+    pdfJsDoc = await window.pdfjsLib.getDocument({ data: bytes }).promise;
+    pdfEdCachedPdfJsDoc = pdfJsDoc;
+  }
+  const page = await pdfJsDoc.getPage(pageIndex + 1);
+  const viewport = page.getViewport({ scale: 1.0 });
+  const canvas = document.createElement('canvas');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+  pdfEdHighResCache.set(pageId, dataUrl);
+  if (pdfEdHighResCache.size > 20) {
+    const oldestKey = pdfEdHighResCache.keys().next().value;
+    pdfEdHighResCache.delete(oldestKey);
+  }
+  return dataUrl;
 }
 
 function renderPdfEdBody() {
@@ -295,7 +341,7 @@ function pdfEdRenderPreview() {
   const stack = document.getElementById('pdfed-preview-stack');
   stack.innerHTML = pdfEdPages.map((p, i) => `
     <div id="pdfed-page-${p.id}" class="pdfed-preview-page" data-id="${p.id}" data-pageindex="${i}" style="position:relative; box-shadow:0 4px 20px rgba(0,0,0,0.25); background:#fff;">
-      <img src="${p.thumbUrl}" style="display:block; width:100%; pointer-events:none;">
+      <img src="${p.thumbUrl}" class="pdfed-preview-img" style="display:block; width:100%; pointer-events:none;">
       <div class="pdfed-textlayer" data-pageindex="${i}" style="position:absolute; inset:0; display:none;"></div>
     </div>
   `).join('');
@@ -306,6 +352,27 @@ function pdfEdRenderPreview() {
       pdfEdRenderSidebarActiveOnly();
     });
   });
+
+  // Full resolution is only ever rendered for a page once it's actually (near) visible — see
+  // pdfEdEnsureHighRes's own comment for why rendering every page upfront doesn't work for
+  // large documents. rootMargin pre-loads a little above/below the visible area so scrolling
+  // doesn't visibly wait on it; each page is only swapped once, then unobserved.
+  if (pdfEdPreviewObserver) pdfEdPreviewObserver.disconnect();
+  const wrap = document.getElementById('pdfed-preview-wrap');
+  pdfEdPreviewObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting) return;
+      const container = entry.target;
+      const pageId = container.dataset.id;
+      const pageIndex = Number(container.dataset.pageindex);
+      pdfEdPreviewObserver.unobserve(container);
+      pdfEdEnsureHighRes(pageId, pageIndex).then((dataUrl) => {
+        const img = container.querySelector('.pdfed-preview-img');
+        if (img) img.src = dataUrl;
+      }).catch((err) => console.warn('High-res render failed for page', pageIndex, err));
+    });
+  }, { root: wrap, rootMargin: '600px 0px' });
+  stack.querySelectorAll('.pdfed-preview-page').forEach((el2) => pdfEdPreviewObserver.observe(el2));
 }
 
 // Pinch-to-zoom for the preview pane. Deliberately uses a real CSS width change on each
@@ -1029,6 +1096,11 @@ async function pdfEdRotateSelection(delta) {
     // rotating the current thumbnail in place (rather than re-deriving from some
     // separately-tracked original) is both correct and simpler.
     pdfEdPages[idx].thumbUrl = await pdfEdRotateImageDataUrl(pdfEdPages[idx].thumbUrl, ((delta % 360) + 360) % 360);
+    // Rotation is the one edit that doesn't call pdfEdRebuildThumbnails (it's deliberately
+    // cheaper than a full re-render) — so any cached full-res render for this page needs
+    // explicit invalidation here, or the main preview would show it at its old orientation
+    // until some other edit happens to clear the whole cache.
+    pdfEdHighResCache.delete(pdfEdPages[idx].id);
   }
   renderPdfEdBody();
 }
@@ -1109,14 +1181,55 @@ function pdfEdRenamePrompt() {
   });
 }
 
+// Parses either format the Split dialog accepts:
+//  - "split after" points: bare numbers marking boundaries — "5, 12" on a 20-page doc makes
+//    1–5, 6–12, 13–20.
+//  - explicit ranges: "1-105, 106-210" — each token is exactly one output file's pages.
+// Detected by whether any token contains "-"; a bare number in range mode is treated as a
+// single-page range (start=end). Returns { groups: [{start,end}, ...] } in 1-indexed page
+// numbers, or { error } with a message ready to show directly, rather than silently
+// misinterpreting something like "0-105" the way plain parseInt-per-token used to.
+function pdfEdParseSplitInput(raw, total) {
+  const tokens = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (!tokens.length) return { error: 'Enter at least one split point or range' };
+
+  const hasRange = tokens.some((t) => t.includes('-'));
+  if (hasRange) {
+    const groups = [];
+    for (const t of tokens) {
+      const parts = t.split('-').map((s) => s.trim());
+      let start = parseInt(parts[0], 10);
+      const end = parts.length > 1 ? parseInt(parts[parts.length - 1], 10) : start;
+      if (start === 0) start = 1; // "0-105" unambiguously means "from the start" — a natural off-by-one, not treated as an error
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 1 || end > total || start > end) {
+        return { error: `"${t}" isn't a valid range for this ${total}-page document` };
+      }
+      groups.push({ start, end });
+    }
+    return { groups };
+  }
+
+  const points = tokens.map((s) => parseInt(s, 10));
+  if (points.some((n) => !Number.isFinite(n) || n <= 0 || n >= total)) {
+    return { error: `Enter split points between 1 and ${total - 1}` };
+  }
+  const uniqueSorted = Array.from(new Set(points)).sort((a, b) => a - b);
+  const boundaries = [0, ...uniqueSorted, total];
+  const groups = [];
+  for (let i = 0; i < boundaries.length - 1; i++) {
+    groups.push({ start: boundaries[i] + 1, end: boundaries[i + 1] });
+  }
+  return { groups };
+}
+
 function pdfEdSplitPrompt() {
   const sheet = el(`
     <div class="sheet-backdrop">
       <div class="sheet">
         <div class="sheet-handle"></div>
         <h2>Split PDF</h2>
-        <p class="muted" style="font-size:13px; margin-top:-8px;">Enter page numbers to split after, separated by commas — e.g. "5, 12" splits a 20-page document into pages 1–5, 6–12, and 13–20.</p>
-        <div class="field"><label>Split after page(s)</label><input type="text" id="f-pdfed-split" placeholder="e.g. 5, 12"></div>
+        <p class="muted" style="font-size:13px; margin-top:-8px;">Either enter page numbers to split after — e.g. "5, 12" splits a 20-page document into 1–5, 6–12, 13–20 — or enter explicit ranges for each file — e.g. "1-105, 106-210, 211-315, 316-420".</p>
+        <div class="field"><label>Split after page(s), or ranges</label><input type="text" id="f-pdfed-split" placeholder="e.g. 5, 12  or  1-105, 106-210"></div>
         <button class="btn btn-primary btn-block" id="btn-do-split">Split &amp; download</button>
         <button class="btn btn-ghost btn-block" id="btn-cancel-split">Cancel</button>
       </div>
@@ -1128,18 +1241,16 @@ function pdfEdSplitPrompt() {
   sheet.querySelector('#btn-do-split').addEventListener('click', async () => {
     const raw = sheet.querySelector('#f-pdfed-split').value.trim();
     const total = pdfEdPages.length;
-    const points = raw.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n) && n > 0 && n < total);
-    const uniqueSorted = Array.from(new Set(points)).sort((a, b) => a - b);
-    if (!uniqueSorted.length) { toast('Enter at least one valid split point'); return; }
+    const result = pdfEdParseSplitInput(raw, total);
+    if (result.error) { toast(result.error); return; }
     sheet.remove();
-    const boundaries = [0, ...uniqueSorted, total];
-    for (let i = 0; i < boundaries.length - 1; i++) {
-      const start = boundaries[i], end = boundaries[i + 1];
+    for (let i = 0; i < result.groups.length; i++) {
+      const { start, end } = result.groups[i];
       const indices = [];
-      for (let j = start; j < end; j++) indices.push(j);
+      for (let j = start - 1; j < end; j++) indices.push(j);
       await pdfEdExportPages(indices, `${pdfEdFilename}_part${i + 1}`);
     }
-    toast(`Split into ${boundaries.length - 1} files`);
+    toast(`Split into ${result.groups.length} files`);
   });
 }
 

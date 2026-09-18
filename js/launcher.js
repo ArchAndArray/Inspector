@@ -72,6 +72,13 @@ async function renderLauncher() {
             <div style="font-size:13.5px; font-weight:650; text-align:center;">Project<br>Management</div>
           </div>
 
+          <div class="launcher-tile" data-target="design" style="width:132px; display:flex; flex-direction:column; align-items:center; gap:10px; cursor:pointer; padding:16px 8px;">
+            <div style="width:64px; height:64px; border-radius:16px; background:${t.red}; display:flex; align-items:center; justify-content:center;">
+              <div style="width:0; height:0; border-style:solid; border-width:0 0 26px 20px; border-color:transparent transparent #fff transparent;"></div>
+            </div>
+            <div style="font-size:13.5px; font-weight:650; text-align:center;">Design</div>
+          </div>
+
         </div>
       </div>
 
@@ -129,6 +136,7 @@ async function renderLauncher() {
 async function onLauncherTileClick(target) {
   if (target === 'inspector') { navigate('#/inspector'); return; }
   if (target === 'pm') { navigate('#/pm'); return; }
+  if (target === 'design') { navigate('#/design'); return; }
   if (target === 'scale-annotate') { navigate('#/scale-annotate'); return; }
   if (target === 'pdf-editor') { navigate('#/pdf-editor'); return; }
   if (target === 'backup') { openBackupRestoreSheet(); return; }
