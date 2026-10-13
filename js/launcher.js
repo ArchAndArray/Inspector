@@ -121,6 +121,22 @@ async function renderLauncher() {
             <div style="font-size:13.5px; font-weight:650; text-align:center;">Backup &amp; Restore</div>
           </div>
 
+          <div class="launcher-tile" data-target="quiz" style="width:132px; display:flex; flex-direction:column; align-items:center; gap:10px; cursor:pointer; padding:16px 8px;">
+            <div style="width:64px; height:64px; border-radius:16px; background:${t.toolIconBg}; display:flex; align-items:center; justify-content:center;">
+              <div style="font-size:28px; font-weight:800; color:${t.toolIconFg}; font-family:Georgia,serif;">?</div>
+            </div>
+            <div style="font-size:13.5px; font-weight:650; text-align:center;">Quiz</div>
+          </div>
+
+          <div class="launcher-tile" data-target="graphcalc" style="width:132px; display:flex; flex-direction:column; align-items:center; gap:10px; cursor:pointer; padding:16px 8px;">
+            <div style="width:64px; height:64px; border-radius:16px; background:${t.toolIconBg}; display:flex; align-items:center; justify-content:center;">
+              <div style="position:relative; width:26px; height:20px;">
+                <svg width="26" height="20" viewBox="0 0 26 20"><polyline points="0,16 6,6 12,14 18,2 26,10" fill="none" stroke="${t.toolIconFg}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </div>
+            </div>
+            <div style="font-size:13.5px; font-weight:650; text-align:center;">Calculator</div>
+          </div>
+
         </div>
       </div>
 
@@ -139,6 +155,8 @@ async function onLauncherTileClick(target) {
   if (target === 'design') { navigate('#/design'); return; }
   if (target === 'scale-annotate') { navigate('#/scale-annotate'); return; }
   if (target === 'pdf-editor') { navigate('#/pdf-editor'); return; }
+  if (target === 'quiz') { navigate('#/quiz'); return; }
+  if (target === 'graphcalc') { navigate('#/graphcalc'); return; }
   if (target === 'backup') { openBackupRestoreSheet(); return; }
   if (target === 'sketch') {
     const blank = await createBlankCanvasBlob();

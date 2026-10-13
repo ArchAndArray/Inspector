@@ -12,8 +12,18 @@
   --sev-4: #e0672e;
   --sev-5: #c81e1e;
   --radius: 12px;
-  --safe-top: env(safe-area-inset-top, 0px);
+  /* iPadOS 26/27 draws a glass/blur "scroll edge" over the top of an installed (standalone)
+     web app, roughly 80pt tall, which smears anything sitting under it. --glass-clear is the
+     extra clearance added on top of the real safe-area inset so headers sit below the blur.
+     Only applied when installed to the Home Screen; tune this one number if it needs
+     more or less room. Everything that already pads with var(--safe-top) picks it up. */
+  --glass-clear: 0px;
+  --safe-top: calc(env(safe-area-inset-top, 0px) + var(--glass-clear));
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@media (display-mode: standalone) {
+  :root { --glass-clear: 44px; }
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }

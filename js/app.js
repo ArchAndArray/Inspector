@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '1.0.6.19';
+const APP_VERSION = '1.0.6.22';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -390,6 +390,8 @@ async function route() {
     else if (p[0] === 'pdf-editor') await renderPdfEditor();
     else if (p[0] === 'pm') await renderPM();
     else if (p[0] === 'design') await renderDesign();
+    else if (p[0] === 'quiz') await renderQuiz();
+    else if (p[0] === 'graphcalc') await renderGraphCalc();
     else await renderLauncher();
   } catch (err) {
     console.error(err);
@@ -508,6 +510,23 @@ function openSketchTitlePrompt(onConfirm) {
 }
 
 // ---------- Force update / resync from GitHub ----------
+// The EC2 (Eurocode 2 concrete design) quiz is a fully self-contained standalone HTML app —
+// its own complete :root CSS variables, own dark-mode handling, own internal navigation —
+// built independently of this app's own styles.css. Loaded in an iframe rather than merged
+// into this page, specifically because it defines its own --ink/--line/etc CSS variables
+// that would otherwise silently collide with and override this app's identically-named ones
+// globally. The small back button is an overlay outside the iframe's own DOM, since the quiz
+// itself has no awareness of the launcher it's embedded in.
+async function renderQuiz() {
+  appEl.innerHTML = `
+    <div style="position:fixed; inset:0;">
+      <iframe src="quiz.html" style="width:100%; height:100%; border:none; display:block;" title="EC2 Design Quiz"></iframe>
+      <button id="btn-quiz-back" style="position:fixed; top:calc(10px + var(--safe-top)); left:10px; background:rgba(28,31,38,0.55); color:#fff; border:none; border-radius:20px; padding:8px 16px; font-size:13px; font-weight:600; backdrop-filter:blur(4px);">‹ Launcher</button>
+    </div>
+  `;
+  document.getElementById('btn-quiz-back').addEventListener('click', () => navigate('#/'));
+}
+
 async function forceUpdate() {
   toast('Checking for updates…');
   // Recorded right at the start, before the async cache-clearing work — represents "last
@@ -686,16 +705,10 @@ function openNewInspectionSheet(onCreated) {
         <div class="field"><label>Weather</label><input type="text" id="f-weather" placeholder="e.g. Overcast, 14°C"></div>
         ${locationFieldHTML('')}
 
-        <div class="section-header" style="margin-top:22px;"><h2>Report Style</h2></div>
-        <div class="severity-picker" id="report-style-picker">
-          <button class="chip selected" data-style="old" style="background:var(--ink);">Old Style<span class="chip-label">Current system</span></button>
-          <button class="chip" data-style="new">New Style<span class="chip-label">Flexible sections</span></button>
-        </div>
-        <p class="hint" id="style-hint">The proven, current report system — Introduction, Summary, Conclusion, Drawings, and Appendices exactly as they work today.</p>
-        <div class="field hidden" id="template-field">
+        <div class="field" style="margin-top:14px;">
           <label>Starting template</label>
           <select id="f-template"></select>
-          <p class="hint">Defines the starting set of sections — fully editable afterward.</p>
+          <p class="hint">Defines the starting set of report sections — fully editable afterward.</p>
         </div>
 
         <button class="btn btn-primary btn-block" id="btn-create-inspection" style="margin-top:14px;">Create inspection</button>
@@ -708,23 +721,9 @@ function openNewInspectionSheet(onCreated) {
 
   const locationField = wireLocationField(sheet, null);
 
-  let reportStyle = 'old';
   DB.seedDefaultReportTemplate().then(() => DB.listReportTemplates()).then((templates) => {
     const select = sheet.querySelector('#f-template');
     select.innerHTML = templates.map((t) => `<option value="${t.id}" ${t.id === 'default-template' ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
-  });
-
-  sheet.querySelectorAll('#report-style-picker .chip').forEach((chip) => {
-    chip.addEventListener('click', () => {
-      sheet.querySelectorAll('#report-style-picker .chip').forEach((c) => { c.classList.remove('selected'); c.style.background = ''; });
-      chip.classList.add('selected');
-      chip.style.background = 'var(--ink)';
-      reportStyle = chip.dataset.style;
-      sheet.querySelector('#template-field').classList.toggle('hidden', reportStyle !== 'new');
-      sheet.querySelector('#style-hint').textContent = reportStyle === 'new'
-        ? 'Build the report from an ordered list of sections you choose and arrange yourself — still being tested, so Old Style is recommended for reports you need to finish reliably right now.'
-        : 'The proven, current report system — Introduction, Summary, Conclusion, Drawings, and Appendices exactly as they work today.';
-    });
   });
 
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
@@ -743,12 +742,10 @@ function openNewInspectionSheet(onCreated) {
       location: { ...(coords || {}), manual: locationField.getManualText() },
       title: 'Structural Inspection Report',
       subtitle: '',
-      reportStyle
+      reportStyle: 'new'
     });
-    if (reportStyle === 'new') {
-      const templateId = sheet.querySelector('#f-template').value;
-      if (templateId) await DB.applyReportTemplate(insp.id, templateId);
-    }
+    const templateId = sheet.querySelector('#f-template').value;
+    if (templateId) await DB.applyReportTemplate(insp.id, templateId);
     sheet.remove();
     if (onCreated) onCreated(insp);
     else navigate(`#/inspection/${insp.id}`);
@@ -764,7 +761,8 @@ const REPORT_SECTION_TYPES = {
   inspectionDetails: { label: 'Basic Inspection Information', icon: 'ℹ️' },
   elementSummary: { label: 'Element Summary', icon: '📊' },
   appendices: { label: 'Appendices', icon: '📎' },
-  recommendations: { label: 'Recommendations', icon: '✅' }
+  recommendations: { label: 'Recommendations', icon: '✅' },
+  pageBreak: { label: 'Page break', icon: '⏎' }
 };
 
 async function renderInspectionNewStyle(inspectionId, insp) {
@@ -1516,154 +1514,17 @@ async function renderReportSectionAppendicesList(inspectionId, reportSectionId) 
 }
 
 // ---------- INSPECTION DETAIL ----------
+// Every inspection is a New Style inspection now and lives inside the persistent shell
+// (shell.js). Anything that used to re-render the old standalone inspection screen after an
+// edit now refreshes the shell in place instead (keeping the selected inspection and tab), or
+// opens the shell if it isn't showing yet.
 async function renderInspection(inspectionId) {
-  const insp = await DB.get('inspections', inspectionId);
-  if (!insp) { navigate('#/'); return; }
-  if (insp.reportStyle === 'new') { await renderInspectionNewStyle(inspectionId, insp); return; }
-  const sections = await DB.listSections(inspectionId);
-  const ungroupedElements = await DB.listElementsBySection(inspectionId, null);
-  const coverPhoto = await DB.getCoverPhoto(inspectionId);
-  const riskAssessment = await DB.getRiskAssessment(inspectionId);
-  const drawingCount = (await DB.listDrawings(inspectionId)).length;
-  const isGiBridges = insp.inspectionType === 'GI Bridges';
-  const bciSummary = isGiBridges ? await computeBciSummary(inspectionId) : null;
-
-  async function elementRowHtml(elmt) {
-    const s = await DB.getElementConditionSummary(elmt.id);
-    const badge = s.worstSeverity
-      ? `<span class="badge badge-sev-${s.worstSeverity}">S${s.worstSeverity}</span> <span class="badge badge-extent">${s.worstExtent || '—'}</span>`
-      : s.findingCount
-        ? `<span class="badge badge-none">${s.findingCount} finding${s.findingCount === 1 ? '' : 's'}</span>`
-        : `<span class="badge badge-none">No findings</span>`;
-    const subline = elementSublineParts(elmt, isGiBridges).join(' · ') || `${s.findingCount} finding${s.findingCount === 1 ? '' : 's'}`;
-    return `
-      <div class="list-item" data-el="${elmt.id}">
-        <div class="meta"><h3>${esc(elmt.name)}</h3><p>${esc(subline)}</p></div>
-        ${badge}<span class="chevron">›</span>
-      </div>`;
+  if (document.getElementById('shell-main') && typeof renderShellMainPane === 'function') {
+    await renderShellSidebar();
+    await renderShellMainPane();
+    return;
   }
-
-  const sectionRows = [];
-  for (const sec of sections) {
-    const secElements = await DB.listElementsBySection(inspectionId, sec.id);
-    sectionRows.push(`
-      <div class="list-item" data-sec="${sec.id}">
-        <div class="meta"><h3>${esc(sec.name)}</h3><p>${secElements.length} element${secElements.length === 1 ? '' : 's'}${sec.comments ? ' · ' + esc(sec.comments) : ''}</p></div>
-        <span class="chevron">›</span>
-      </div>`);
-  }
-
-  const ungroupedRows = [];
-  for (const e of ungroupedElements) ungroupedRows.push(await elementRowHtml(e));
-
-  appEl.innerHTML = `
-    <div class="topbar">
-      <button class="icon-btn" id="btn-back">‹</button>
-      <div style="flex:1; min-width:0;">
-        <h1 style="font-size:17px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(insp.structureName)}</h1>
-        <span class="sub">${esc(insp.inspectionType || 'Inspection')} · ${fmtDate(insp.date)}</span>
-      </div>
-      <button class="text-btn muted" id="btn-report-info">Report info</button>
-      <button class="text-btn" id="btn-print">Print</button>
-    </div>
-    <div class="content">
-      <div class="card">
-        <div class="link-row" style="margin-bottom:8px;"><strong style="font-size:15px;">Inspection details</strong><button class="small-btn" id="btn-edit-header">Edit</button></div>
-        <p class="muted" style="margin:4px 0; font-size:14px;">Structure ID: ${esc(insp.structureId || '—')}</p>
-        <p class="muted" style="margin:4px 0; font-size:14px;">Inspector: ${esc(insp.inspector || '—')}</p>
-        <p class="muted" style="margin:4px 0; font-size:14px;">Weather: ${esc(insp.weather || '—')}</p>
-        <p class="muted" style="margin:4px 0; font-size:14px;">Location: ${esc(insp.location && insp.location.manual || '—')}</p>
-      </div>
-
-      ${isGiBridges ? `
-      <div class="card" style="border: 1.5px solid var(--ink);">
-        <strong style="font-size:15px; display:block; margin-bottom:12px;">BCI / MDCI Condition Scores</strong>
-        <div style="display:flex; justify-content:space-between; align-items:baseline;">
-          <span style="font-size:13px; font-weight:600; color:var(--ink-soft);">Official BCI</span>
-          <span style="font-size:14px;">Ave: <b>${bciSummary.vanilla.bciAv != null ? Math.round(bciSummary.vanilla.bciAv) : '—'}</b>&nbsp;&nbsp;Crit: <b>${bciSummary.vanilla.bciCrit != null ? Math.round(bciSummary.vanilla.bciCrit) : '—'}</b></span>
-        </div>
-        <p class="muted" style="font-size:11px; margin:2px 0 10px; text-align:right;">BCS Ave: ${bciSummary.vanilla.bcsAv != null ? bciSummary.vanilla.bcsAv.toFixed(2) : '—'} · BCS Crit: ${bciSummary.vanilla.bcsCrit != null ? bciSummary.vanilla.bcsCrit.toFixed(2) : '—'}</p>
-        <div style="display:flex; justify-content:space-between; align-items:baseline;">
-          <span style="font-size:13px; font-weight:600; color:var(--ink-soft);">House MDCI</span>
-          <span style="font-size:14px;">Ave: <b>${bciSummary.mdci.bciAv != null ? Math.round(bciSummary.mdci.bciAv) : '—'}</b>&nbsp;&nbsp;Crit: <b>${bciSummary.mdci.bciCrit != null ? Math.round(bciSummary.mdci.bciCrit) : '—'}</b></span>
-        </div>
-        <p class="muted" style="font-size:11px; margin:2px 0 10px; text-align:right;">BCS Ave: ${bciSummary.mdci.bcsAv != null ? bciSummary.mdci.bcsAv.toFixed(2) : '—'} · BCS Crit: ${bciSummary.mdci.bcsCrit != null ? bciSummary.mdci.bcsCrit.toFixed(2) : '—'}</p>
-        <p class="muted" style="font-size:11.5px; margin:10px 0 0; line-height:1.4;">MDCI is a house-developed condition index that blends multiple defects per element more granularly than the official method. It is not directly comparable to another authority's BCI figures.</p>
-        <p class="muted" style="font-size:11px; margin:6px 0 0; line-height:1.4;">Official BCI's multi-defect interaction rule is an algorithmic approximation — engineer judgement should override where defects genuinely compound in severity. ${bciSummary.excludedCount ? `${bciSummary.excludedCount} element${bciSummary.excludedCount === 1 ? '' : 's'} excluded (no Element Type set, or marked Not Inspected).` : ''}</p>
-      </div>
-      ` : ''}
-
-      <div class="card">
-        <div class="link-row" style="margin-bottom:10px;"><strong style="font-size:15px;">Cover photo</strong>${!coverPhoto ? '<button class="small-btn" id="btn-add-cover">＋ Add</button>' : ''}</div>
-        ${coverPhoto
-          ? `<div class="photo-thumb" id="cover-thumb" style="width:120px; height:120px;"><img src="${blobUrl(coverPhoto.originalBlob)}">${coverPhoto.annotatedBlob ? '<div class="annotated-dot"></div>' : ''}</div>`
-          : `<p class="muted" style="font-size:13px; margin:0;">Used on the report cover page.</p>`}
-      </div>
-
-      <div class="list-item" id="btn-open-risk-assessment">
-        <div class="meta">
-          <h3>Risk Assessment</h3>
-          <p>${riskAssessment ? `${(riskAssessment.risks || []).length} risk${(riskAssessment.risks || []).length === 1 ? '' : 's'} logged` : 'Not started'}</p>
-        </div>
-        <span class="chevron">›</span>
-      </div>
-
-      <div class="list-item" id="btn-open-drawings">
-        <div class="meta">
-          <h3>Drawings</h3>
-          <p>${drawingCount ? `${drawingCount} imported` : 'No drawings imported'}</p>
-        </div>
-        <span class="chevron">›</span>
-      </div>
-
-      <div class="section-header"><h2>Sections</h2><button class="small-btn" id="btn-add-section">＋ Add section</button></div>
-      ${sections.length ? sectionRows.join('') : `<p class="muted" style="font-size:13px; padding:0 2px;">Optional — use sections to group elements by span, zone, or area.</p>`}
-
-      <div class="section-header"><h2>Elements</h2><button class="small-btn" id="btn-add-element">＋ Add</button></div>
-      ${ungroupedElements.length ? ungroupedRows.join('') : (sections.length ? `<p class="muted" style="font-size:13px; padding:0 2px;">Elements not assigned to a section appear here.</p>` : `
-        <div class="empty-state">
-          <div class="glyph">▦</div>
-          <h3>No elements yet</h3>
-          <p>Add structural elements to begin logging findings.</p>
-        </div>
-      `)}
-    </div>
-    <button class="fab" id="btn-add-element-fab">＋</button>
-  `;
-
-  document.getElementById('btn-back').addEventListener('click', () => navigate('#/'));
-  document.getElementById('btn-print').addEventListener('click', () => {
-    try { exportInspectionPDF(inspectionId); } catch (err) { console.error(err); toast('Error: ' + err.message); }
-  });
-  document.getElementById('btn-report-info').addEventListener('click', () => openReportInfoSheet(inspectionId));
-  document.getElementById('btn-edit-header').addEventListener('click', () => openEditHeaderSheet(insp));
-  document.getElementById('btn-add-section').addEventListener('click', () => openAddSectionSheet(inspectionId));
-  document.getElementById('btn-open-risk-assessment').addEventListener('click', () => navigate(`#/inspection/${inspectionId}/risk-assessment`));
-  document.getElementById('btn-open-drawings').addEventListener('click', () => navigate(`#/inspection/${inspectionId}/drawings`));
-  document.getElementById('btn-add-element').addEventListener('click', () => openAddElementSheet(inspectionId, null));
-  document.getElementById('btn-add-element-fab').addEventListener('click', () => openAddElementSheet(inspectionId, null));
-
-  const addCoverBtn = document.getElementById('btn-add-cover');
-  if (addCoverBtn) addCoverBtn.addEventListener('click', () => {
-    openPhotoSourceSheet({
-      onFiles: async (files) => {
-        const normalized = await normalizeImageFile(files[0]);
-        await DB.setCoverPhoto(inspectionId, normalized);
-        toast('Cover photo saved');
-        renderInspection(inspectionId);
-      }
-    });
-  });
-  const coverThumb = document.getElementById('cover-thumb');
-  if (coverThumb) coverThumb.addEventListener('click', () => {
-    openPhotoActionSheet(coverPhoto.id, {
-      onAnnotated: () => renderInspection(inspectionId),
-      onRemoved: () => renderInspection(inspectionId)
-    });
-  });
-
-  appEl.querySelectorAll('.list-item[data-sec]').forEach((row) => row.addEventListener('click', () => navigate(`#/inspection/${inspectionId}/section/${row.dataset.sec}`)));
-  appEl.querySelectorAll('.list-item[data-el]').forEach((row) => row.addEventListener('click', () => navigate(`#/inspection/${inspectionId}/element/${row.dataset.el}`)));
+  await redirectLegacyInspectionRoute(inspectionId);
 }
 
 function openEditHeaderSheet(insp) {
@@ -1726,7 +1587,6 @@ async function openReportInfoSheet(inspectionId) {
   let companyLogo = await DB.getLogoByRole(inspectionId, 'company');
   let clientLogo = await DB.getLogoByRole(inspectionId, 'client');
   let customMapImage = await DB.getCustomLocationMap(inspectionId);
-  let appendices = await DB.listAppendices(inspectionId);
 
   const sheet = el(`
     <div class="sheet-backdrop">
@@ -1793,19 +1653,7 @@ async function openReportInfoSheet(inspectionId) {
           <div class="photo-grid" id="custom-map-grid"></div>
         </div>
         <input type="file" id="map-file-input" accept="image/*" style="display:none;">
-        <p class="hint">Placed after the Introduction. Auto mode needs internet at export time; if the structure has no coordinates set, the map section is skipped with a warning.</p>
-
-        <div class="section-header" style="margin-top:22px;"><h2>Appendices</h2><button class="small-btn" id="btn-add-appendix">＋ Add</button></div>
-        <div id="appendix-list"></div>
-        <div class="checkbox-row" style="margin-top:6px;">
-          <input type="checkbox" id="f-include-ra-appendix" ${insp.includeRiskAssessmentAppendix ? 'checked' : ''}>
-          <label for="f-include-ra-appendix">Include Risk Assessment as an appendix (always last)</label>
-        </div>
-
-        <div class="section-header" style="margin-top:22px;"><h2>Report content</h2></div>
-        <button class="btn btn-secondary btn-block" id="btn-intro">📝 Introduction${insp.introduction ? ' — added' : ''}</button>
-        <button class="btn btn-secondary btn-block" id="btn-summary" style="margin-top:10px;">📝 Summary${insp.summary ? ' — added' : ''}</button>
-        <button class="btn btn-secondary btn-block" id="btn-conclusion" style="margin-top:10px;">📋 Conclusion &amp; Recommendations${(insp.conclusion || (insp.recommendations && insp.recommendations.length)) ? ' — added' : ''}</button>
+        <p class="hint">Auto mode needs internet at export time; if the structure has no coordinates set, the map section is skipped with a warning.</p>
 
         <button class="btn btn-primary btn-block" id="btn-save" style="margin-top:22px;">Save</button>
         <button class="btn btn-danger btn-block" id="btn-delete" style="margin-top:8px;">Delete inspection</button>
@@ -1823,8 +1671,7 @@ async function openReportInfoSheet(inspectionId) {
   });
 
   // Reads the current state of every field in this sheet and persists it — used both by
-  // the Save button and before navigating to the Introduction/Conclusion sub-sheets, so
-  // in-progress edits are never silently discarded.
+  // the Save button.
   async function persistFields() {
     const styleBtn = sheet.querySelector('#cover-style-picker .chip.selected');
     const currencyBtn = sheet.querySelector('#currency-picker .chip.selected');
@@ -1840,26 +1687,9 @@ async function openReportInfoSheet(inspectionId) {
       coverStyle: styleBtn ? styleBtn.dataset.style : 'basic',
       includeCoverPage: sheet.querySelector('#f-include-cover').checked,
       locationMapMode: mapModeBtn ? mapModeBtn.dataset.mapmode : 'auto',
-      locationMapScale: Number(sheet.querySelector('#f-map-scale').value) || 2500,
-      includeRiskAssessmentAppendix: sheet.querySelector('#f-include-ra-appendix').checked
+      locationMapScale: Number(sheet.querySelector('#f-map-scale').value) || 2500
     });
   }
-
-  sheet.querySelector('#btn-intro').addEventListener('click', async () => {
-    await persistFields();
-    sheet.remove();
-    openRichTextFieldSheet(inspectionId, 'introduction', 'Introduction');
-  });
-  sheet.querySelector('#btn-summary').addEventListener('click', async () => {
-    await persistFields();
-    sheet.remove();
-    openRichTextFieldSheet(inspectionId, 'summary', 'Summary');
-  });
-  sheet.querySelector('#btn-conclusion').addEventListener('click', async () => {
-    await persistFields();
-    sheet.remove();
-    openConclusionSheet(inspectionId);
-  });
 
   sheet.querySelectorAll('#cover-style-picker .chip').forEach((chip) => {
     chip.addEventListener('click', () => {
@@ -1912,60 +1742,6 @@ async function openReportInfoSheet(inspectionId) {
     customMapImage = await DB.setCustomLocationMap(inspectionId, normalized);
     renderCustomMapGrid();
     e.target.value = '';
-  });
-
-  function renderAppendixList() {
-    const list = sheet.querySelector('#appendix-list');
-    if (!appendices.length) {
-      list.innerHTML = `<p class="muted" style="font-size:13px; padding:0 2px;">No appendices yet.</p>`;
-      return;
-    }
-    list.innerHTML = appendices.map((a, i) => `
-      <div class="tpl-row" data-appendix="${a.id}" style="cursor:pointer;">
-        <span>Appendix ${appendixLetter(i)} - ${esc(a.name)}</span>
-        <span class="chevron">›</span>
-      </div>
-    `).join('');
-    list.querySelectorAll('[data-appendix]').forEach((row) => {
-      row.addEventListener('click', async () => {
-        await persistFields();
-        sheet.remove();
-        navigate(`#/inspection/${inspectionId}/appendix/${row.dataset.appendix}`);
-      });
-    });
-  }
-  renderAppendixList();
-  sheet.querySelector('#btn-add-appendix').addEventListener('click', () => {
-    const letter = appendixLetter(appendices.length);
-    const nameSheet = el(`
-      <div class="sheet-backdrop">
-        <div class="sheet">
-          <div class="sheet-handle"></div>
-          <h2>New appendix</h2>
-          <div class="field">
-            <label>Name</label>
-            <div class="link-row">
-              <span style="font-weight:700; color:var(--ink-soft); margin-right:6px; white-space:nowrap;">Appendix ${letter} -</span>
-              <input type="text" id="f-appendix-name" placeholder="e.g. Site Photos" style="flex:1;">
-            </div>
-          </div>
-          <p class="hint">The letter updates automatically if appendices are added, removed, or reordered later.</p>
-          <button class="btn btn-primary btn-block" id="btn-save-appendix">Add</button>
-          <button class="btn btn-ghost btn-block" id="btn-cancel-appendix">Cancel</button>
-        </div>
-      </div>
-    `);
-    presentOverlay(nameSheet);
-    nameSheet.addEventListener('click', (e) => { if (e.target === nameSheet) nameSheet.remove(); });
-    nameSheet.querySelector('#btn-cancel-appendix').addEventListener('click', () => nameSheet.remove());
-    nameSheet.querySelector('#btn-save-appendix').addEventListener('click', async () => {
-      const name = nameSheet.querySelector('#f-appendix-name').value.trim();
-      if (!name) { toast('Enter a name'); return; }
-      const appendix = await DB.addAppendix(inspectionId, name);
-      appendices.push(appendix);
-      nameSheet.remove();
-      renderAppendixList();
-    });
   });
 
   function renderLogoSlot(role) {
@@ -2112,103 +1888,6 @@ function wireRichTextEditor(container, idPrefix, initialValue) {
   return { getHTML: () => editor.innerHTML };
 }
 
-function openRichTextFieldSheet(inspectionId, fieldKey, label) {
-  DB.get('inspections', inspectionId).then((insp) => {
-    const sheet = el(`
-      <div class="sheet-backdrop">
-        <div class="sheet">
-          <div class="sheet-handle"></div>
-          <h2>${esc(label)}</h2>
-          ${richTextToolbarHTML('rtf')}
-          <div class="rt-editor" id="rtf-editor" contenteditable="true"></div>
-          <button class="btn btn-primary btn-block" id="btn-save" style="margin-top:14px;">Save</button>
-          <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
-        </div>
-      </div>
-    `);
-    presentOverlay(sheet);
-    const editorApi = wireRichTextEditor(sheet, 'rtf', insp[fieldKey]);
-    sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
-    sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
-    sheet.querySelector('#btn-save').addEventListener('click', async () => {
-      await DB.updateInspection(inspectionId, { [fieldKey]: editorApi.getHTML() });
-      sheet.remove();
-      toast(`${label} saved`);
-      openReportInfoSheet(inspectionId);
-    });
-  });
-}
-
-function openConclusionSheet(inspectionId) {
-  DB.get('inspections', inspectionId).then((insp) => {
-    let recommendations = (insp.recommendations && insp.recommendations.length) ? [...insp.recommendations] : [''];
-
-    const sheet = el(`
-      <div class="sheet-backdrop">
-        <div class="sheet">
-          <div class="sheet-handle"></div>
-          <h2>Conclusion &amp; Recommendations</h2>
-          <div class="field">
-            <label>Conclusion</label>
-            ${richTextToolbarHTML('rtc')}
-            <div class="rt-editor" id="rtc-editor" contenteditable="true"></div>
-          </div>
-          <div class="field">
-            <label>Recommendations</label>
-            <div id="reco-list"></div>
-            <button class="small-btn" id="btn-add-reco">＋ Add recommendation</button>
-          </div>
-          <button class="btn btn-primary btn-block" id="btn-save" style="margin-top:8px;">Save</button>
-          <button class="btn btn-ghost btn-block" id="btn-cancel">Cancel</button>
-        </div>
-      </div>
-    `);
-    presentOverlay(sheet);
-    const editorApi = wireRichTextEditor(sheet, 'rtc', insp.conclusion);
-
-    function renderRecoList() {
-      const list = sheet.querySelector('#reco-list');
-      list.innerHTML = recommendations.map((text, i) => `
-        <div class="reco-row">
-          <span class="reco-num">${i + 1}.</span>
-          <input type="text" class="reco-input" data-i="${i}" value="${esc(text)}" placeholder="Recommendation text">
-          <button class="reco-remove" data-remove="${i}">✕</button>
-        </div>
-      `).join('');
-      list.querySelectorAll('.reco-input').forEach((input) => {
-        input.addEventListener('input', (e) => { recommendations[Number(e.target.dataset.i)] = e.target.value; });
-      });
-      list.querySelectorAll('[data-remove]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          recommendations.splice(Number(btn.dataset.remove), 1);
-          if (!recommendations.length) recommendations = [''];
-          renderRecoList();
-        });
-      });
-    }
-    renderRecoList();
-
-    sheet.querySelector('#btn-add-reco').addEventListener('click', () => {
-      recommendations.push('');
-      renderRecoList();
-    });
-
-    sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
-    sheet.querySelector('#btn-cancel').addEventListener('click', () => sheet.remove());
-    sheet.querySelector('#btn-save').addEventListener('click', async () => {
-      const cleaned = recommendations.map((r) => r.trim()).filter(Boolean);
-      await DB.updateInspection(inspectionId, {
-        conclusion: editorApi.getHTML(),
-        recommendations: cleaned
-      });
-      sheet.remove();
-      toast('Conclusion saved');
-      openReportInfoSheet(inspectionId);
-    });
-  });
-}
-
-// ---------- ADD SECTION ----------
 function openAddSectionSheet(inspectionId, onDone) {
   const sheet = el(`
     <div class="sheet-backdrop">

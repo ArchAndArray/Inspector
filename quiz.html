@@ -1,0 +1,896 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>EC2 Site Check — RC Design Quiz</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spectral:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#EDE7DA;
+    --card:#F8F4EA;
+    --ink:#211F1C;
+    --ink-soft:#5B5548;
+    --line:#C7BFAE;
+    --steel:#2F5670;
+    --steel-soft:#DCE6EA;
+    --rust:#A8412A;
+    --rust-soft:#F3DFD8;
+    --brass:#9C7A3F;
+    --focus:#2F5670;
+  }
+  :root:not([data-theme="light"]){
+    @media (prefers-color-scheme: dark){
+      --paper:#171B1F;
+      --card:#1E2328;
+      --ink:#EAE4D6;
+      --ink-soft:#A79E8C;
+      --line:#3A4046;
+      --steel:#7FAAC4;
+      --steel-soft:#233542;
+      --rust:#E07C5C;
+      --rust-soft:#3A241E;
+      --brass:#C7A05C;
+      --focus:#7FAAC4;
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#171B1F;
+    --card:#1E2328;
+    --ink:#EAE4D6;
+    --ink-soft:#A79E8C;
+    --line:#3A4046;
+    --steel:#7FAAC4;
+    --steel-soft:#233542;
+    --rust:#E07C5C;
+    --rust-soft:#3A241E;
+    --brass:#C7A05C;
+    --focus:#7FAAC4;
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font-family:'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+    min-height:100vh;
+    display:flex;
+    justify-content:center;
+    -webkit-font-smoothing:antialiased;
+  }
+  h1,h2,h3,.serif{font-family:'Spectral', Georgia, 'Times New Roman', serif;}
+
+  .app{
+    width:100%;
+    max-width:520px;
+    min-height:100vh;
+    display:flex;
+    flex-direction:column;
+    padding:0 0 32px;
+  }
+
+  header.top{
+    padding:22px 20px 16px;
+    border-bottom:1px solid var(--line);
+  }
+  header.top .brand{
+    display:flex;
+    align-items:baseline;
+    justify-content:space-between;
+    gap:12px;
+  }
+  header.top h1{
+    font-size:1.28rem;
+    font-weight:600;
+    margin:0;
+    letter-spacing:0.01em;
+  }
+  header.top .rev{
+    font-size:0.72rem;
+    color:var(--ink-soft);
+    border:1px solid var(--line);
+    padding:2px 7px;
+    white-space:nowrap;
+  }
+  header.top p{
+    margin:6px 0 0;
+    font-size:0.86rem;
+    color:var(--ink-soft);
+  }
+
+  main{flex:1; display:flex; flex-direction:column; padding:20px;}
+
+  /* ---- Home screen ---- */
+  .modules{display:flex; flex-direction:column; gap:10px; margin-top:6px;}
+  .module-row{
+    border:1px solid var(--line);
+    background:var(--card);
+    padding:14px 14px;
+    display:flex;
+    align-items:center;
+    gap:14px;
+    cursor:pointer;
+    transition:border-color .15s ease;
+  }
+  .module-row:hover{border-color:var(--steel);}
+  .module-row.selected{border-color:var(--steel); box-shadow: inset 0 0 0 1px var(--steel);}
+  .module-row input{accent-color:var(--steel); width:17px; height:17px; flex:none;}
+  .module-row .m-num{
+    font-family:'Spectral', serif;
+    font-size:1.4rem;
+    font-weight:600;
+    color:var(--steel);
+    width:28px;
+    flex:none;
+    text-align:center;
+  }
+  .module-row .m-text{flex:1; min-width:0;}
+  .module-row .m-title{font-weight:600; font-size:0.98rem;}
+  .module-row .m-sub{font-size:0.8rem; color:var(--ink-soft); margin-top:2px;}
+  .module-row .m-best{font-size:0.76rem; color:var(--brass); margin-top:4px; font-weight:500;}
+
+  .count-row{
+    display:flex; align-items:center; justify-content:space-between;
+    margin:22px 0 4px; font-size:0.86rem; color:var(--ink-soft);
+  }
+  .stepper{display:flex; align-items:center; gap:10px;}
+  .stepper button{
+    width:30px; height:30px; border:1px solid var(--line); background:var(--card);
+    color:var(--ink); font-size:1rem; cursor:pointer;
+  }
+  .stepper span{min-width:22px; text-align:center; font-weight:600; color:var(--ink);}
+
+  .btn{
+    appearance:none; border:none; cursor:pointer;
+    font-family:'IBM Plex Sans', sans-serif; font-weight:600; font-size:0.95rem;
+    padding:14px 20px;
+    background:var(--steel); color:var(--paper);
+    letter-spacing:0.01em;
+  }
+  .btn:disabled{opacity:0.4; cursor:default;}
+  .btn.block{width:100%; margin-top:18px;}
+  .btn.ghost{background:transparent; color:var(--steel); border:1px solid var(--steel);}
+  .btn:focus-visible, .module-row:focus-visible, .opt:focus-visible{outline:2px solid var(--focus); outline-offset:2px;}
+
+  .hint{font-size:0.78rem; color:var(--ink-soft); margin-top:10px; line-height:1.5;}
+
+  /* ---- Quiz screen ---- */
+  .track{
+    display:flex; gap:3px; margin-bottom:18px;
+  }
+  .tick{
+    flex:1; height:6px; background:var(--line);
+  }
+  .tick.correct{background:var(--steel);}
+  .tick.wrong{background:var(--rust);}
+  .tick.current{background:var(--brass);}
+
+  .q-meta{
+    display:flex; justify-content:space-between; align-items:baseline;
+    font-size:0.76rem; color:var(--ink-soft); margin-bottom:10px;
+  }
+  .q-meta .ref{font-variant-numeric: tabular-nums;}
+
+  .q-text{
+    font-size:1.18rem; line-height:1.45; font-weight:600; margin:0 0 20px;
+  }
+
+  .options{display:flex; flex-direction:column; gap:0; border-top:1px solid var(--line);}
+  .opt{
+    display:flex; align-items:flex-start; gap:12px;
+    padding:14px 4px;
+    border-bottom:1px solid var(--line);
+    background:transparent;
+    text-align:left;
+    cursor:pointer;
+    font-family:'IBM Plex Sans', sans-serif;
+    font-size:0.95rem;
+    color:var(--ink);
+    width:100%;
+  }
+  .opt .letter{
+    flex:none; width:26px; height:26px;
+    border:1px solid var(--line);
+    display:flex; align-items:center; justify-content:center;
+    font-size:0.8rem; font-weight:600; color:var(--ink-soft);
+    margin-top:1px;
+  }
+  .opt .label{flex:1; padding-top:2px; line-height:1.4;}
+  .opt.correct{background:var(--steel-soft);}
+  .opt.correct .letter{background:var(--steel); color:var(--paper); border-color:var(--steel);}
+  .opt.wrong{background:var(--rust-soft);}
+  .opt.wrong .letter{background:var(--rust); color:var(--paper); border-color:var(--rust);}
+  .opt.disabled{cursor:default;}
+
+  .feedback{
+    margin-top:16px; padding:12px 14px;
+    border-left:3px solid var(--line);
+    font-size:0.86rem; line-height:1.5; color:var(--ink-soft);
+    display:none;
+  }
+  .feedback.show{display:block;}
+  .feedback.right{border-color:var(--steel);}
+  .feedback.miss{border-color:var(--rust);}
+  .feedback b{color:var(--ink); font-weight:600;}
+
+  .quiz-footer{margin-top:auto; padding-top:24px;}
+
+  /* ---- Results screen ---- */
+  .score-big{
+    font-family:'Spectral', serif; font-weight:700;
+    font-size:3rem; line-height:1; margin:18px 0 4px;
+  }
+  .score-label{font-size:0.9rem; color:var(--ink-soft);}
+  .breakdown{margin:22px 0; border-top:1px solid var(--line);}
+  .b-row{
+    display:flex; justify-content:space-between; align-items:center;
+    padding:10px 0; border-bottom:1px solid var(--line); font-size:0.9rem;
+  }
+  .b-row .b-name{color:var(--ink-soft);}
+  .b-row .b-score{font-weight:600; font-variant-numeric: tabular-nums;}
+  .row-2{display:flex; gap:10px; margin-top:8px;}
+  .row-2 .btn{flex:1;}
+
+  .badge-best{
+    display:inline-block; margin-top:10px; font-size:0.78rem; color:var(--brass); font-weight:500;
+  }
+
+  .hidden{display:none !important;}
+
+  ::selection{background:var(--steel); color:var(--paper);}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header class="top">
+    <div class="brand">
+      <h1>EC2 Site Check</h1>
+      <span class="rev">Rev 1</span>
+    </div>
+    <p>Multiple-choice review — Modules 1&ndash;3</p>
+  </header>
+
+  <main>
+
+    <!-- HOME -->
+    <section id="screen-home">
+      <div class="modules" id="module-list"></div>
+
+      <div class="count-row">
+        <span id="count-label">10 questions</span>
+        <div class="stepper">
+          <button id="dec" aria-label="Fewer questions">&minus;</button>
+          <span id="count-val">10</span>
+          <button id="inc" aria-label="More questions">&plus;</button>
+        </div>
+      </div>
+
+      <button class="btn block" id="start-btn">Begin</button>
+      <p class="hint" id="pool-hint"></p>
+    </section>
+
+    <!-- QUIZ -->
+    <section id="screen-quiz" class="hidden">
+      <div class="track" id="track"></div>
+      <div class="q-meta">
+        <span id="q-module"></span>
+        <span class="ref" id="q-ref"></span>
+      </div>
+      <p class="q-text" id="q-text"></p>
+      <div class="options" id="options"></div>
+      <div class="feedback" id="feedback"></div>
+      <div class="quiz-footer">
+        <button class="btn block" id="next-btn" disabled>Next</button>
+      </div>
+    </section>
+
+    <!-- RESULTS -->
+    <section id="screen-results" class="hidden">
+      <h2 class="serif" style="font-size:1.1rem; font-weight:600; margin-bottom:0;">Result</h2>
+      <div class="score-big" id="score-big">0/0</div>
+      <div class="score-label" id="score-pct"></div>
+      <div id="best-badge" class="badge-best hidden"></div>
+
+      <div class="breakdown" id="breakdown"></div>
+
+      <div class="row-2">
+        <button class="btn ghost" id="retry-btn">Retry set</button>
+        <button class="btn" id="home-btn">Choose modules</button>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script>
+(function(){
+
+  var MODULES = {
+    m1: { key:'m1', num:'1', title:'Foundations of the Code', sub:'EN 1990 basis, materials, partial factors, exposure & cover' },
+    m2: { key:'m2', num:'2', title:'Structural Analysis Basics', sub:'Imperfections, second-order effects, actions from EN 1991' },
+    m3: { key:'m3', num:'3', title:'ULS: Bending and Shear', sub:'Section 6.1 bending, 6.2 shear, 6.3 torsion' },
+    m4: { key:'m4', num:'4', title:'Slabs', sub:'One-way/two-way behaviour, detailing, punching shear, deflection' },
+    m5: { key:'m5', num:'5', title:'Beams', sub:'Curtailment, shear links, deep beams and strut-and-tie' },
+    m6: { key:'m6', num:'6', title:'Columns and Piers', sub:'Slenderness, biaxial bending, detailing, bridge piers' },
+    m7: { key:'m7', num:'7', title:'Retaining Walls', sub:'Wall detailing, geotechnical actions, crack control, stability' },
+    m8: { key:'m8', num:'8', title:'Serviceability & Detailing', sub:'Stress limitation, crack control, anchorage/laps, tying systems' }
+  };
+
+  var BANK = [
+    // ---- Module 1 ----
+    {m:'m1', ref:'EN 1990, Table 2.1', q:'Under EN 1990, what indicative design working life is assigned to bridges and other civil engineering structures (Category 5)?',
+      opts:['10 years','50 years','100 years','120 years'], correct:2,
+      note:'Category 5 (monumental buildings, bridges and other civil engineering structures) carries an indicative design working life of 100 years.'},
+    {m:'m1', ref:'EN 1992-1-1, Table 2.1N', q:'What is the recommended partial factor \u03B3C for concrete in persistent and transient design situations?',
+      opts:['1.15','1.5','1.2','1.0'], correct:1,
+      note:'\u03B3C = 1.5 for persistent/transient situations (reduced to 1.2 for accidental situations).'},
+    {m:'m1', ref:'EN 1992-1-1, Table 2.1N', q:'What is the recommended partial factor \u03B3S for reinforcing steel in persistent and transient design situations?',
+      opts:['1.0','1.15','1.5','1.2'], correct:1,
+      note:'\u03B3S = 1.15 for persistent/transient situations (reduced to 1.0 for accidental situations).'},
+    {m:'m1', ref:'EN 1992-1-1, Table 2.1N', q:'For accidental design situations, which pair of material partial factors applies?',
+      opts:['\u03B3C = 1.5, \u03B3S = 1.15','\u03B3C = 1.2, \u03B3S = 1.0','\u03B3C = 1.0, \u03B3S = 1.0','\u03B3C = 1.35, \u03B3S = 1.05'], correct:1,
+      note:'The accidental case relaxes the factors to \u03B3C = 1.2 and \u03B3S = 1.0.'},
+    {m:'m1', ref:'EN 1992-1-1, \u00A73.1.6', q:'The design compressive strength is fcd = \u03B1cc\u00B7fck/\u03B3C. What does \u03B1cc primarily account for?',
+      opts:['Variability of the material only','Long-term effects on compressive strength and unfavourable effects from the way the load is applied','The ductility class of the reinforcement','The exposure class of the concrete'], correct:1,
+      note:'\u03B1cc is a coefficient covering long-term and loading-rate effects, distinct from the material partial factor \u03B3C.'},
+    {m:'m1', ref:'EN 1992-1-1, Table 4.1', q:'Which exposure class describes reinforcement at risk of carbonation-induced corrosion under cyclic wet and dry conditions?',
+      opts:['XC1','XC2','XC3','XC4'], correct:3,
+      note:'XC4 covers cyclic wet and dry exposure — the most severe of the carbonation classes.'},
+    {m:'m1', ref:'EN 1992-1-1, Table 4.1', q:'Which exposure class family covers corrosion induced by chlorides from sea water?',
+      opts:['XD','XS','XF','XA'], correct:1,
+      note:'XS covers marine/sea-water chloride exposure; XD covers chlorides from sources other than sea water, such as de-icing salts.'},
+    {m:'m1', ref:'EN 1992-1-1, \u00A74.4.1', q:'What does the minimum cover component cmin,b primarily ensure?',
+      opts:['Fire resistance','Adequate bond and transmission of forces between reinforcement and concrete','Freeze-thaw resistance','Resistance to chemical attack'], correct:1,
+      note:'cmin,b is the bond requirement; durability and fire each have their own minimum-cover checks that are combined to find the governing value.'},
+    {m:'m1', ref:'EN 1992-1-1, \u00A74.4.1.3', q:'Nominal cover is calculated as cnom = cmin + \u0394cdev. What does \u0394cdev represent?',
+      opts:['An allowance for construction deviation','An additional fire safety margin','A durability safety margin on top of cmin,dur','The bond length allowance'], correct:0,
+      note:'\u0394cdev is an execution tolerance allowing for deviations in reinforcement placement on site.'},
+    {m:'m1', ref:'EN 1992-1-1, \u00A73.1.7', q:'In the parabola-rectangle stress-strain model for concrete (fck \u2264 50 MPa), what is the ultimate compressive strain \u03B5cu2?',
+      opts:['0.0020','0.0035','0.0050','0.0100'], correct:1,
+      note:'\u03B5cu2 = 0.0035 for normal-strength concrete; the strain at peak stress \u03B5c2 is 0.0020.'},
+    {m:'m1', ref:'EN 1992-1-1, \u00A73.2.7', q:'Design yield strength of reinforcement is calculated as:',
+      opts:['fyd = fyk \u00D7 \u03B3S','fyd = fyk / \u03B3S','fyd = fyk \u00D7 \u03B1cc / \u03B3S','fyd = fyk / \u03B3C'], correct:1,
+      note:'fyd = fyk / \u03B3S, mirroring the concrete relationship fcd = \u03B1cc\u00B7fck/\u03B3C.'},
+    {m:'m1', ref:'EN 1992-3', q:'Which Eurocode 2 part gives design rules for liquid-retaining and containment structures, including crack control under restrained or imposed deformation?',
+      opts:['EN 1992-2','EN 1992-3','EN 1992-1-2','EN 1990'], correct:1,
+      note:'EN 1992-3 covers liquid-retaining and containment structures; EN 1992-2 is the bridges part and EN 1992-1-2 covers fire design.'},
+
+    // ---- Module 2 ----
+    {m:'m2', ref:'EN 1992-1-1, \u00A75.2', q:'Which clause of EN 1992-1-1 deals with geometric imperfections in structural analysis?',
+      opts:['\u00A75.2','\u00A75.8','\u00A76.1','\u00A79.5'], correct:0,
+      note:'Clause 5.2 sets out how imperfections (out-of-plumb, etc.) are represented in analysis, typically as an equivalent inclination or eccentricity.'},
+    {m:'m2', ref:'EN 1992-1-1, \u00A75.2(5)', q:'The recommended basic value of the inclination \u03B80 used to represent imperfections is:',
+      opts:['1/100','1/200','1/300','1/400'], correct:1,
+      note:'\u03B80 = 1/200 is the recommended basic value, subsequently modified by \u03B1h and \u03B1m.'},
+    {m:'m2', ref:'EN 1992-1-1, \u00A75.2(5)', q:'The length-reduction factor \u03B1h = 2/\u221Al is bounded within which limits?',
+      opts:['1/3 and 1','2/3 and 1','1/2 and 2','1 and 2'], correct:1,
+      note:'\u03B1h is limited to 2/3 \u2264 \u03B1h \u2264 1, so very short or very long members don\u2019t get an unrealistic multiplier.'},
+    {m:'m2', ref:'EN 1991-1-4', q:'Which loading Eurocode covers wind actions, relevant to the design of slender bridge piers?',
+      opts:['EN 1991-1-1','EN 1991-1-4','EN 1991-1-5','EN 1991-1-7'], correct:1,
+      note:'EN 1991-1-4 is the wind actions part of the loading suite.'},
+    {m:'m2', ref:'EN 1991-1-5', q:'Which loading Eurocode covers thermal actions, relevant to retaining walls and bridge piers/decks?',
+      opts:['EN 1991-1-1','EN 1991-1-4','EN 1991-1-5','EN 1991-2'], correct:2,
+      note:'EN 1991-1-5 deals with thermal actions, including temperature differentials through bridge decks.'},
+    {m:'m2', ref:'EN 1991-2', q:'Traffic loading on bridge decks and the piers that support them is defined in which Eurocode part?',
+      opts:['EN 1991-1-1','EN 1991-1-7','EN 1991-2','EN 1990'], correct:2,
+      note:'EN 1991-2 is dedicated to traffic loads on bridges (road, footway and rail).'},
+    {m:'m2', ref:'EN 1992-1-1, \u00A75.4\u20135.7', q:'Which of the following is NOT one of the ULS analysis methods set out in Section 5 of EN 1992-1-1?',
+      opts:['Linear elastic analysis','Linear elastic analysis with limited redistribution','Plastic analysis','Reliability-based probabilistic analysis'], correct:3,
+      note:'Section 5 covers linear elastic, linear elastic with limited redistribution, plastic and non-linear analysis \u2014 reliability-based methods sit outside the standard partial-factor approach.'},
+    {m:'m2', ref:'EN 1992-1-1, \u00A75.8.3.1', q:'Second-order effects on a member may generally be ignored if its slenderness is:',
+      opts:['Above the slenderness limit \u03BBlim','Below the slenderness limit \u03BBlim','Equal to zero','Equal to the effective length'], correct:1,
+      note:'If \u03BB < \u03BBlim, second-order effects are considered negligible and a first-order analysis is sufficient.'},
+    {m:'m2', ref:'EN 1992-1-1, \u00A75.8.3.2', q:'For a cantilever column (fixed at the base, free at the top), the effective length l0 is approximately:',
+      opts:['0.5l','0.7l','l','2l'], correct:3,
+      note:'A cantilever behaves like half of a pin-ended member of twice the length, giving l0 \u2248 2l.'},
+    {m:'m2', ref:'EN 1990, \u00A76.4.3', q:'Which combination expression in EN 1990 is commonly used for the ULS persistent/transient design situation?',
+      opts:['Expression 6.10 (or 6.10a/6.10b)','Expression 6.4','Expression 6.8','Expression 6.14'], correct:0,
+      note:'Expression 6.10, or the less conservative pair 6.10a/6.10b, covers persistent and transient design situations.'},
+    {m:'m2', ref:'EN 1991-1-7', q:'Accidental actions such as vehicle impact on a structure are covered under which loading Eurocode?',
+      opts:['EN 1991-1-1','EN 1991-1-5','EN 1991-1-7','EN 1991-2'], correct:2,
+      note:'EN 1991-1-7 covers accidental actions from impact and explosions.'},
+    {m:'m2', ref:'EN 1991-1-1', q:'Self-weight and imposed (occupancy/use) loads for general structures are defined in:',
+      opts:['EN 1991-1-1','EN 1991-1-4','EN 1991-1-5','EN 1991-2'], correct:0,
+      note:'EN 1991-1-1 covers densities, self-weight and imposed loads for buildings and general structures.'},
+
+    // ---- Module 3 ----
+    {m:'m3', ref:'EN 1992-1-1, \u00A76.1', q:'Which section of EN 1992-1-1 covers bending, with or without axial force, at ULS?',
+      opts:['6.1','6.2','6.3','6.4'], correct:0,
+      note:'Section 6.1 is the base tool used for beams, slabs, walls and columns/piers under bending and axial load.'},
+    {m:'m3', ref:'EN 1992-1-1, \u00A76.2', q:'Which section of EN 1992-1-1 covers shear resistance at ULS?',
+      opts:['6.1','6.2','6.3','6.4'], correct:1,
+      note:'Section 6.2 covers beam shear; punching shear for slabs is treated separately in Section 6.4.'},
+    {m:'m3', ref:'EN 1992-1-1, \u00A76.3', q:'Which section of EN 1992-1-1 covers torsion?',
+      opts:['6.1','6.2','6.3','6.4'], correct:2,
+      note:'Section 6.3 covers torsion, generally a lower priority except where equilibrium torsion governs.'},
+    {m:'m3', ref:'EN 1992-1-1, \u00A76.1(2)', q:'A fundamental assumption of the bending design method in Section 6.1 is that:',
+      opts:['Concrete carries tension across cracks','Plane sections remain plane','Reinforcement remains elastic to failure','Shear and bending are always independent of one another'], correct:1,
+      note:'The plane-sections-remain-plane assumption underlies the strain compatibility used to derive the stress block.'},
+    {m:'m3', ref:'EN 1992-1-1, \u00A76.2.2', q:'In the shear resistance expression VRd,c, the recommended value of the coefficient CRd,c is:',
+      opts:['0.12','0.15/\u03B3C','0.18/\u03B3C','0.20/\u03B3C'], correct:2,
+      note:'CRd,c = 0.18/\u03B3C is the recommended value in the concrete-only shear resistance formula.'},
+    {m:'m3', ref:'EN 1992-1-1, \u00A76.2.2', q:'The size-effect factor k = 1 + \u221A(200/d) in the VRd,c expression is subject to an upper limit of:',
+      opts:['1.5','2.0','2.5','3.0'], correct:1,
+      note:'k is capped at 2.0 (reached when d \u2264 200 mm), reflecting the reduced benefit of the size effect in shallow members.'},
+    {m:'m3', ref:'UK NA to EN 1992-1-1, \u00A76.2.3', q:'For members requiring shear reinforcement, the variable strut inclination method lets the designer choose cot \u03B8 within a range. Per the UK National Annex, this range is:',
+      opts:['0.5 to 1.0','1.0 to 2.0','1.0 to 2.5','1.5 to 3.0'], correct:2,
+      note:'The UK NA permits 1.0 \u2264 cot \u03B8 \u2264 2.5, i.e. a strut angle between 21.8\u00B0 and 45\u00B0.'},
+    {m:'m3', ref:'Trigonometry check', q:'A strut angle \u03B8 of 45\u00B0 corresponds to a cot \u03B8 value of:',
+      opts:['0.5','1.0','1.5','2.0'], correct:1,
+      note:'cot 45\u00B0 = 1.0 \u2014 the steepest strut angle normally used in design.'},
+    {m:'m3', ref:'EN 1992-1-1, \u00A76.2.3', q:'The maximum shear resistance VRd,max (as opposed to VRd,s) is governed by:',
+      opts:['Yielding of the shear reinforcement','Crushing of the concrete compression strut','Bond failure of the longitudinal bars','Cracking of the concrete cover'], correct:1,
+      note:'VRd,max caps the shear capacity based on crushing of the diagonal concrete strut, independent of how much shear steel is provided.'},
+    {m:'m3', ref:'EN 1992-1-1, \u00A76.2.3', q:'In the absence of a more rigorous calculation, the lever arm z for shear and bending is commonly approximated as:',
+      opts:['0.8d','0.9d','d','1.1d'], correct:1,
+      note:'z \u2248 0.9d is the standard simplification used for reinforced concrete sections in bending and shear.'},
+    {m:'m3', ref:'EN 1992-1-1, \u00A76.2.2', q:'The minimum shear resistance vmin, applied when the longitudinal reinforcement ratio \u03C1l is very low, is primarily dependent on which material property?',
+      opts:['fyk','fck (via an fck^0.5 / fck^1.5 relationship)','Ec, the elastic modulus','Es, the steel modulus'], correct:1,
+      note:'vmin is derived from the concrete tensile capacity, expressed through fck, and is independent of reinforcement yield strength.'},
+    {m:'m3', ref:'EN 1992-1-1, \u00A76.3', q:'Torsion design under Section 6.3 is generally treated as a lower design priority for typical beams, slabs and piers because:',
+      opts:['Torsion never occurs in reinforced concrete elements','Most elements experience compatibility torsion, where a full torsional design is not required, unlike equilibrium torsion','EN 1992-1-1 provides no torsion design rules','Torsion is always resisted by shear reinforcement alone'], correct:1,
+      note:'Where torsion is only needed for compatibility (not equilibrium), it can often be disregarded provided adequate rotational capacity exists elsewhere.'},
+
+    // ---- Module 4 ----
+    {m:'m4', ref:'EN 1992-1-1, \u00A79.3.1.1', q:'The minimum slab reinforcement formula As,min = 0.26\u00B7(fctm/fyk)\u00B7bt\u00B7d uses bt as:',
+      opts:['The mean width of the tension zone','The overall slab depth','The full slab area Ac','The width of the compression zone'], correct:0,
+      note:'bt is the mean width of the tension zone \u2014 for a rectangular slab strip this is simply the strip width.'},
+    {m:'m4', ref:'EN 1992-1-1, \u00A79.2.1.1', q:'Maximum slab (and beam) longitudinal reinforcement is capped at:',
+      opts:['0.02\u00B7Ac','0.04\u00B7Ac','0.06\u00B7Ac','0.08\u00B7Ac'], correct:1,
+      note:'As,max = 0.04\u00B7Ac outside lap zones (rising to 0.08\u00B7Ac within laps for columns).'},
+    {m:'m4', ref:'EN 1992-1-1, \u00A79.3.1.1(2)', q:'In a one-way spanning slab, secondary (transverse) reinforcement must be at least what proportion of the main reinforcement?',
+      opts:['10%','15%','20%','25%'], correct:2,
+      note:'20% is the minimum recommended proportion for secondary/distribution steel.'},
+    {m:'m4', ref:'EN 1992-1-1, \u00A79.3.1.1', q:'Maximum bar spacing for principal slab reinforcement is:',
+      opts:['min(2h, 300 mm)','min(3h, 400 mm)','min(3.5h, 450 mm)','min(4h, 450 mm)'], correct:1,
+      note:'Principal steel: min(3h, 400 mm). Secondary steel gets a slightly looser limit of min(3.5h, 450 mm).'},
+    {m:'m4', ref:'EN 1992-1-1, \u00A76.4.2', q:'The basic control perimeter u1 used for punching shear checks is taken at what distance from the loaded area?',
+      opts:['d','1.5d','2d','3d'], correct:2,
+      note:'u1 is defined at 2d from the face of the loaded area (e.g. a column).'},
+    {m:'m4', ref:'General slab behaviour', q:'A slab panel is generally treated as one-way spanning when the ratio of the longer to shorter span (ly/lx) exceeds:',
+      opts:['1.5','2','2.5','3'], correct:1,
+      note:'Beyond ly/lx \u2248 2, spanning in the shorter direction dominates and the slab is treated as one-way.'},
+    {m:'m4', ref:'EN 1992-1-1, \u00A77.4.2', q:'The span/depth deflection check modifies the basic allowable ratio by a steel-stress factor of:',
+      opts:['250/\u03C3s','310/\u03C3s','500/\u03C3s','fyk/\u03C3s'], correct:1,
+      note:'The 310/\u03C3s factor scales the basic span/depth ratio for the actual service stress in the tension steel.'},
+    {m:'m4', ref:'EN 1992-1-1, \u00A77.4.2', q:'The reference reinforcement ratio \u03C10 used in the span/depth formula is calculated as:',
+      opts:['\u221Afck \u00D7 10\u207B\u00B3','fck / 100','fctm / fyk','a fixed value of 0.0013'], correct:0,
+      note:'\u03C10 = \u221Afck \u00D7 10\u207B\u00B3 (fck in MPa) \u2014 it sets the boundary between the two branches of the span/depth formula.'},
+    {m:'m4', ref:'Module 4 worked example', q:'In the worked 4.5 m simply supported slab example, the required steel area (536 mm\u00B2/m) was governed by:',
+      opts:['As,min','Strength (bending)','Punching shear','Crack width'], correct:1,
+      note:'As,min was only 266 mm\u00B2/m in that example \u2014 well below the 536 mm\u00B2/m needed for the applied moment, so strength governed.'},
+    {m:'m4', ref:'EN 1992-1-1, Annex I', q:'Moment design in flat slabs splits the total moment between which two strip types?',
+      opts:['Edge strip and interior strip','Column strip and middle strip','Support strip and span strip','Top strip and bottom strip'], correct:1,
+      note:'Annex I splits the panel into column strips (over the columns) and middle strips, each taking a defined share of the total moment.'},
+    {m:'m4', ref:'Module 4 worked example', q:'In the worked slab example, which bar arrangement was selected for the main (bottom) reinforcement?',
+      opts:['H10 @ 200 c/c','H12 @ 200 c/c','H16 @ 200 c/c','H12 @ 300 c/c'], correct:1,
+      note:'H12 @ 200 c/c gives 565 mm\u00B2/m, just above the 536 mm\u00B2/m required.'},
+    {m:'m4', ref:'EN 1992-1-1, \u00A76.4', q:'Punching shear around a column or concentrated load, as distinct from ordinary beam shear, is covered under which section?',
+      opts:['6.2','6.4','9.3','9.4'], correct:1,
+      note:'Section 6.4 is dedicated to punching shear; 6.2 covers linear (beam) shear.'},
+
+    // ---- Module 5 ----
+    {m:'m5', ref:'EN 1992-1-1, \u00A79.2.1.3', q:'The "shift rule" used to extend curtailed bars past their theoretical cut-off point is given by al =',
+      opts:['z\u00B7cot\u03B8','z\u00B7cot\u03B8 / 2','d\u00B7cot\u03B8','0.9d\u00B7cot\u03B8'], correct:1,
+      note:'al = z\u00B7cot\u03B8/2 accounts for the way diagonal shear cracking shifts the tension force envelope along the member.'},
+    {m:'m5', ref:'EN 1992-1-1, \u00A79.2.2', q:'The minimum shear reinforcement ratio \u03C1w,min is given by:',
+      opts:['0.08\u221Afck / fyk','0.18 / \u03B3C','the CRd,c coefficient directly','0.04\u00B7Ac'], correct:0,
+      note:'\u03C1w,min = 0.08\u221Afck/fyk sets a floor on shear link provision regardless of the calculated VEd.'},
+    {m:'m5', ref:'EN 1992-1-1, \u00A79.2.2', q:'For vertical shear links, the maximum longitudinal spacing sl,max is:',
+      opts:['0.5d','0.6d','0.75d','d'], correct:2,
+      note:'sl,max = 0.75d(1+cot\u03B1), which reduces to 0.75d for vertical links (\u03B1 = 90\u00B0).'},
+    {m:'m5', ref:'EN 1992-1-1, \u00A79.7', q:'Deep beam behaviour (plane sections no longer applying) typically governs when the shear-span-to-depth ratio is roughly:',
+      opts:['Less than 2','Between 2 and 4','Greater than 4','Greater than 6'], correct:0,
+      note:'Short, deep spans (avL/h below about 2) load-path through direct struts and ties rather than classical bending theory.'},
+    {m:'m5', ref:'EN 1992-1-1, \u00A76.5', q:'The general method for strut-and-tie design in EN 1992-1-1 is set out in:',
+      opts:['Section 6.5','Section 9.7','Section 9.9','Section 8.4'], correct:0,
+      note:'Section 6.5 gives the general strut-and-tie design method; 9.7 and 9.9 then give detailing rules for specific cases.'},
+    {m:'m5', ref:'EN 1992-1-1, \u00A79.7', q:'Section 9.7 specifically covers detailing of:',
+      opts:['Foundations','Deep beams','Walls','Tying systems'], correct:1,
+      note:'9.7 gives the detailing rules (reinforcement mesh, anchorage) specific to deep beams.'},
+    {m:'m5', ref:'EN 1992-1-1, \u00A79.9', q:'Section 9.9 covers detailing of:',
+      opts:['Deep beams only','Regions with a discontinuity in geometry or action','Tying systems','Column bar laps'], correct:1,
+      note:'9.9 addresses discontinuity regions generally \u2014 corbels, dapped ends, openings \u2014 beyond the specific deep-beam case in 9.7.'},
+    {m:'m5', ref:'Concrete hinge detailing', q:'A concrete hinge of the Mesnager/Freyssinet type is best described as:',
+      opts:['A pinned steel bearing embedded in the concrete','A throated section that channels compression into a narrow strut while tie steel carries the resultant tension, allowing rotation','A full-depth expansion joint','A form of punching shear reinforcement'], correct:1,
+      note:'The throat forces a strut-and-tie load path in miniature, permitting rotation while still transmitting axial force and limited shear.'},
+    {m:'m5', ref:'Module 5 worked example', q:'In the worked two-span continuous beam example, the interior support (hogging) design moment with no redistribution (\u03B4 = 1.0) was:',
+      opts:['101 kNm','144 kNm','180 kNm','200 kNm'], correct:2,
+      note:'M = wL\u00B2/8 = 40\u00D76\u00B2/8 = 180 kNm for the interior support of the two equal 6 m spans.'},
+    {m:'m5', ref:'Module 5 worked example', q:'In the worked beam example, what triggered the need for shear links at the support?',
+      opts:['VEd exceeded VRd,c','VEd exceeded VRd,max','As exceeded As,max','The crack width limit was exceeded'], correct:0,
+      note:'VEd (144 kN) exceeded the concrete-only shear resistance VRd,c (\u2248 78 kN), so calculated shear reinforcement was required.'},
+    {m:'m5', ref:'UK NA to EN 1992-1-1, \u00A75.5', q:'Where moments are redistributed (\u03B4 < 1) per the UK National Annex, the neutral axis depth ratio is limited to:',
+      opts:['xu/d \u2264 \u03B4','xu/d \u2264 \u03B4 \u2212 0.4','xu/d \u2264 0.45 always','xu/d \u2264 1.0 \u2212 \u03B4'], correct:1,
+      note:'xu/d \u2264 (\u03B4 \u2212 0.4) for fck \u2264 50 \u2014 the more moment is redistributed, the shallower the neutral axis must stay.'},
+    {m:'m5', ref:'EN 1992-1-1, \u00A79.2.1.4', q:'At a simple support, at least what fraction of a span\u2019s peak span (bottom) steel must be carried through and anchored at the support?',
+      opts:['10%','25%','50%','100%'], correct:1,
+      note:'A minimum of 25% of the mid-span reinforcement is required to continue to and be anchored at simple supports.'},
+
+    // ---- Module 6 ----
+    {m:'m6', ref:'EN 1992-1-1, \u00A75.8.3.2', q:'Slenderness ratio \u03BB is defined as:',
+      opts:['l0/h','l0/i','i/l0','l0\u00B2/i'], correct:1,
+      note:'\u03BB = l0/i, where i is the radius of gyration of the uncracked concrete section.'},
+    {m:'m6', ref:'EN 1992-1-1, \u00A75.8.3.1', q:'The slenderness limit formula \u03BBlim = 20\u00B7A\u00B7B\u00B7C/\u221An includes a division by:',
+      opts:['\u221An','n\u00B2','1/n','log(n)'], correct:0,
+      note:'\u03BBlim = 20ABC/\u221An \u2014 higher relative axial load (n) reduces the slenderness limit.'},
+    {m:'m6', ref:'EN 1992-1-1, \u00A75.8.3.1', q:'In the \u03BBlim formula, n represents:',
+      opts:['The number of longitudinal bars','The relative axial load, NEd/(Ac\u00B7fcd)','The number of storeys','The slenderness ratio itself'], correct:1,
+      note:'n = NEd/(Ac\u00B7fcd) is the normalised axial load on the section.'},
+    {m:'m6', ref:'EN 1992-1-1, \u00A75.8.3.1', q:'If a member\u2019s slenderness \u03BB is less than or equal to \u03BBlim:',
+      opts:['Second-order effects must still be calculated','A first-order analysis is generally sufficient','The member automatically fails','Biaxial bending must be checked'], correct:1,
+      note:'\u03BB \u2264 \u03BBlim means second-order effects can be treated as negligible.'},
+    {m:'m6', ref:'EN 1992-1-1, \u00A75.8.8', q:'In the nominal curvature method, the additional second-order moment is calculated as M2 =',
+      opts:['NEd \u00D7 e2','MEd \u00D7 e2','NEd / e2','NEd \u00D7 l0'], correct:0,
+      note:'M2 = NEd\u00B7e2, where e2 is derived from the estimated curvature 1/r and the effective length l0.'},
+    {m:'m6', ref:'EN 1992-1-1, \u00A75.8.9', q:'For the simplified biaxial bending interaction check, the exponent \u2018a\u2019 typically ranges over:',
+      opts:['0.5 to 1.0','1.0 to 2.0','2.0 to 3.0','0 to 0.5'], correct:1,
+      note:'a = 1.0 for low axial load, rising towards 2.0 for circular sections or axial loads approaching NRd.'},
+    {m:'m6', ref:'EN 1992-1-1, \u00A79.5.2', q:'Minimum longitudinal column reinforcement is the greater of 0.002\u00B7Ac and:',
+      opts:['0.05\u00B7NEd/fyd','0.10\u00B7NEd/fyd','0.15\u00B7NEd/fyd','0.20\u00B7NEd/fyd'], correct:1,
+      note:'As,min = max(0.10\u00B7NEd/fyd, 0.002\u00B7Ac) \u2014 the axial-load-based term often governs for heavily loaded columns.'},
+    {m:'m6', ref:'EN 1992-1-1, \u00A79.5.3', q:'Maximum column link spacing scl,tmax = min(20\u00B7\u03C6min, b, ...):',
+      opts:['300 mm','350 mm','400 mm','450 mm'], correct:2,
+      note:'The third limit in the min() expression is 400 mm.'},
+    {m:'m6', ref:'EN 1992-1-1, \u00A79.5.3', q:'Near beam/slab joints and lap locations, the standard column link spacing should be reduced by a factor of:',
+      opts:['0.5','0.6','0.7','0.8'], correct:1,
+      note:'A 0.6 reduction factor tightens link spacing where confinement matters most.'},
+    {m:'m6', ref:'Effective length \u2014 bridge piers', q:'For a free-standing pier fixed at the base with a sliding bearing at the top (cantilever behaviour), the effective length l0 is typically taken as:',
+      opts:['0.7l','l','1.5l','2l'], correct:3,
+      note:'A cantilever pier is treated like half of a pin-ended member of twice the length, giving l0 \u2248 2l.'},
+    {m:'m6', ref:'Module 6 worked example', q:'In the worked slender bridge pier example (\u03BB = 69.3, \u03BBlim = 26.0), what was the conclusion?',
+      opts:['\u03BB < \u03BBlim, so first-order analysis suffices','\u03BB \u226B \u03BBlim, so second-order effects must be included','The result was inconclusive','Biaxial bending could be ignored'], correct:1,
+      note:'With \u03BB far above \u03BBlim, the pier is genuinely slender and the nominal curvature method must be carried through.'},
+    {m:'m6', ref:'EN 1992-2, Sections 5\u20136', q:'EN 1992-2\u2019s additions for bridge substructure piers particularly interact with which two Module 2 loading Eurocode parts?',
+      opts:['EN 1991-1-1 and EN 1991-1-7','EN 1991-1-4 (wind) and EN 1991-1-5 (thermal)','EN 1991-1-1 and EN 1991-1-2','EN 1991-2 and EN 1991-1-1'], correct:1,
+      note:'Slender piers are particularly sensitive to wind and thermal actions alongside the vertical/traffic loads.'},
+
+    // ---- Module 7 ----
+    {m:'m7', ref:'EN 1992-1-1, \u00A79.6.2', q:'Minimum vertical reinforcement in a wall, As,vmin, is:',
+      opts:['0.001\u00B7Ac','0.002\u00B7Ac','0.004\u00B7Ac','0.01\u00B7Ac'], correct:1,
+      note:'As,vmin = 0.002\u00B7Ac for wall vertical reinforcement.'},
+    {m:'m7', ref:'EN 1992-1-1, \u00A79.6.3', q:'Minimum horizontal/transverse wall reinforcement, relative to the vertical reinforcement provided, is:',
+      opts:['10%','15%','20%','25%'], correct:3,
+      note:'Horizontal steel must be at least 25% of the vertical reinforcement (or a stated minimum, whichever governs).'},
+    {m:'m7', ref:'EN 1997', q:'Which code governs the geotechnical loading and stability geometry (base width, key, toe/heel) before EN 1992 section design of a retaining wall begins?',
+      opts:['EN 1990','EN 1991-1-1','EN 1997','EN 1992-3'], correct:2,
+      note:'EN 1997 sets earth pressures, water pressure, surcharge and the stability checks that fix the wall geometry.'},
+    {m:'m7', ref:'Retaining wall stability', q:'Overturning stability of a cantilever retaining wall is checked about:',
+      opts:['The heel','The toe','The centreline of the base','The base of the stem'], correct:1,
+      note:'Overturning moments are taken about the toe, the point the wall would rotate about if it failed in overturning.'},
+    {m:'m7', ref:'Retaining wall stability', q:'A simplified bearing pressure check requires the resultant vertical force to fall within:',
+      opts:['The middle half of the base','The middle third of the base','The outer third of the base','Anywhere on the base'], correct:1,
+      note:'Keeping the resultant within the middle third avoids the simplified triangular pressure distribution going negative (uplift).'},
+    {m:'m7', ref:'EN 1992-1-1, \u00A77.3', q:'For a standard (non liquid-retaining) wall under XC/XD exposure, the typical SLS crack width limit under the quasi-permanent combination is:',
+      opts:['0.1 mm','0.2 mm','0.3 mm','0.4 mm'], correct:2,
+      note:'wmax = 0.3 mm is the standard limit for these exposure classes under EN 1992-1-1 \u00A77.3.'},
+    {m:'m7', ref:'EN 1992-3', q:'Which document\u2019s Annexes L and M address restrained-shrinkage crack control for liquid-retaining structures?',
+      opts:['EN 1992-1-1','EN 1992-2','EN 1992-3','EN 1997-1'], correct:2,
+      note:'EN 1992-3 Annexes L/M give the extended methods needed once a structure also retains liquid.'},
+    {m:'m7', ref:'Module 7 worked example', q:'In the worked cantilever wall stem example, the required reinforcement area (708 mm\u00B2/m) was governed by:',
+      opts:['As,min','Strength (bending)','Shear','Crack width'], correct:1,
+      note:'As,min was only about 457 mm\u00B2/m \u2014 well below the 708 mm\u00B2/m needed for the bending moment, so strength governed.'},
+    {m:'m7', ref:'Module 7 worked example', q:'In the worked wall stem example, was shear reinforcement required in the stem?',
+      opts:['Yes, throughout','No \u2014 VRd,c comfortably exceeded VEd','Only near the base','Only near mid-height'], correct:1,
+      note:'VRd,c (\u2248 142 kN/m, governed by vmin) was well above VEd (63.6 kN/m) \u2014 typical for retaining wall stems.'},
+    {m:'m7', ref:'Rankine active pressure', q:'The Rankine active earth pressure coefficient Ka is calculated from the soil friction angle \u03C6\u2032 as:',
+      opts:['(1+sin\u03C6\u2032)/(1\u2212sin\u03C6\u2032)','(1\u2212sin\u03C6\u2032)/(1+sin\u03C6\u2032)','sin\u03C6\u2032','tan\u03C6\u2032'], correct:1,
+      note:'Ka = (1\u2212sin\u03C6\u2032)/(1+sin\u03C6\u2032) \u2014 the reciprocal expression gives the passive coefficient Kp.'},
+    {m:'m7', ref:'Retaining wall stability', q:'Sliding stability is checked by comparing the driving horizontal thrust against:',
+      opts:['Bearing capacity of the founding soil','Base friction, plus passive resistance if reliably mobilised','The overturning moment','The crack width limit'], correct:1,
+      note:'Sliding resistance comes from friction at the base (and passive pressure where it can be relied upon), not from bearing or overturning checks.'},
+    {m:'m7', ref:'EN 1992-1-1, \u00A79.8', q:'Footing and pile cap design in \u00A79.8 reuses which two structural checks already applied to slabs?',
+      opts:['\u00A76.1 (bending) and \u00A76.2 (shear)','\u00A76.3 (torsion) and \u00A76.4 (punching)','\u00A77.2 (stress) and \u00A77.3 (cracking)','\u00A79.5 and \u00A79.6'], correct:0,
+      note:'Footings are designed with the same bending and shear tools as slabs, plus anchorage/lap and (for piled bases) punching checks.'},
+
+    // ---- Module 8 ----
+    {m:'m8', ref:'EN 1992-1-1, \u00A77.2', q:'Under the characteristic load combination, concrete compressive stress is limited to:',
+      opts:['0.45\u00B7fck','0.6\u00B7fck','0.7\u00B7fck','0.8\u00B7fck'], correct:1,
+      note:'0.6\u00B7fck under the characteristic combination avoids longitudinal micro-cracking.'},
+    {m:'m8', ref:'EN 1992-1-1, \u00A77.2', q:'Under the quasi-permanent combination, concrete compressive stress is limited to:',
+      opts:['0.3\u00B7fck','0.45\u00B7fck','0.6\u00B7fck','0.8\u00B7fck'], correct:1,
+      note:'0.45\u00B7fck under quasi-permanent load keeps creep behaviour within its (roughly) linear range.'},
+    {m:'m8', ref:'EN 1992-1-1, \u00A77.2', q:'Under the characteristic combination, reinforcement stress is limited to:',
+      opts:['0.6\u00B7fyk','0.7\u00B7fyk','0.8\u00B7fyk','1.0\u00B7fyk'], correct:2,
+      note:'0.8\u00B7fyk avoids inelastic strain in the reinforcement and the associated wide crack widths.'},
+    {m:'m8', ref:'EN 1992-1-1, \u00A77.3', q:'The "simplified" crack-control route (Tables 7.2N/7.3N) keys the check to:',
+      opts:['Bar diameter/spacing against steel stress','Concrete grade alone','Exposure class alone','Element thickness alone'], correct:0,
+      note:'The tables let the designer pick a bar size or spacing directly from the calculated service stress in the reinforcement.'},
+    {m:'m8', ref:'EN 1992-1-1, \u00A77.3.4', q:'The direct crack width calculation formula is:',
+      opts:['wk = sr,max \u00D7 (\u03B5sm \u2212 \u03B5cm)','wk = sr,max / (\u03B5sm \u2212 \u03B5cm)','wk = sr,max \u00D7 fctm','wk = \u03B5sm \u00D7 fyk'], correct:0,
+      note:'wk = sr,max\u00B7(\u03B5sm\u2212\u03B5cm): maximum crack spacing multiplied by the difference in mean strains between steel and concrete.'},
+    {m:'m8', ref:'EN 1992-1-1, \u00A78.4', q:'The basic anchorage length lbd is proportional to:',
+      opts:['\u03C6 \u00D7 \u03C3sd / fbd','(\u03C6/4) \u00D7 \u03C3sd / fbd','\u03C6\u00B2 \u00D7 fbd','d \u00D7 fbd'], correct:1,
+      note:'lbd = (\u03C6/4)\u00B7(\u03C3sd/fbd), with the ultimate bond stress fbd depending on concrete tensile strength and bar bond condition.'},
+    {m:'m8', ref:'EN 1992-1-1, \u00A78.7', q:'Which of the following is NOT one of the \u03B1-factors used to derive lap length l0 from the basic required anchorage length?',
+      opts:['Bar shape','Cover','Transverse reinforcement / confinement','Exposure class'], correct:3,
+      note:'Exposure class governs cover and durability requirements separately \u2014 it is not one of the \u03B1-factors (\u03B11, \u03B12, \u03B13, \u03B15, \u03B16) in the lap length formula.'},
+    {m:'m8', ref:'EN 1992-1-1, \u00A79.10', q:'Tying systems (peripheral, internal, horizontal-to-column/wall, vertical) are primarily intended to provide:',
+      opts:['Additional flexural capacity','An alternative load path that limits disproportionate collapse','Reduced deflection','Improved fire resistance'], correct:1,
+      note:'Ties give the structure a way to redistribute load if a member is lost, rather than adding everyday strength or stiffness.'},
+    {m:'m8', ref:'EN 1991-1-7 / robustness', q:'For bridges, robustness under accidental actions is more often addressed through:',
+      opts:['The generic tying-force rules of \u00A79.10','Specific detailing (anti-lift bearings, restraint systems) and EN 1991-1-7 accidental design situations','Increasing the exposure class','Reducing cover to reinforcement'], correct:1,
+      note:'Building-style tying forces are less directly applicable to bridges, which instead rely on targeted detailing and defined accidental load cases.'},
+    {m:'m8', ref:'RC Design Training Module Plan', q:'The suggested teaching sequence recommends that Module 8 (SLS/detailing) should be:',
+      opts:['Left entirely to the end of the course','Woven in alongside each element module (4\u20137) rather than left to the end','Skipped for bridge structures','Applied only to slabs'], correct:1,
+      note:'Running the \u00A77/\u00A78 checks alongside each element module keeps serviceability and detailing part of the design process, not an afterthought.'},
+    {m:'m8', ref:'EN 1992-1-1, Section 7', q:'Which section of EN 1992-1-1 groups the three SLS checks \u2014 stress limitation, crack control and deflection?',
+      opts:['Section 5','Section 6','Section 7','Section 8'], correct:2,
+      note:'Section 7 covers all three serviceability checks; Section 6 covers ULS, Section 8 covers general detailing.'},
+    {m:'m8', ref:'EN 1992-1-1, Section 8', q:'Which section covers general detailing rules such as bond, anchorage and laps?',
+      opts:['Section 6','Section 7','Section 8','Section 9'], correct:2,
+      note:'Section 8 sets out the general bond, anchorage and lap rules that Section 9 then applies to specific element types.'}
+  ];
+
+  // ---------- state ----------
+  var state = { mods:['m1'], count:10, queue:[], idx:0, correctCount:0, perModule:{}, answered:false };
+
+  function shuffled(arr){
+    var a = arr.slice();
+    for(var i=a.length-1;i>0;i--){
+      var j = Math.floor(Math.random()*(i+1));
+      var t=a[i]; a[i]=a[j]; a[j]=t;
+    }
+    return a;
+  }
+
+  function bestKey(mods){
+    return 'ec2quiz-best-' + mods.slice().sort().join('-');
+  }
+  function getBest(mods){
+    try{
+      var v = localStorage.getItem(bestKey(mods));
+      return v ? JSON.parse(v) : null;
+    }catch(e){ return null; }
+  }
+  function setBest(mods, correct, total){
+    try{
+      var cur = getBest(mods);
+      var pct = correct/total;
+      if(!cur || pct > cur.correct/cur.total || (pct === cur.correct/cur.total && total > cur.total)){
+        localStorage.setItem(bestKey(mods), JSON.stringify({correct:correct, total:total}));
+        return true;
+      }
+    }catch(e){}
+    return false;
+  }
+
+  // ---------- render home ----------
+  var moduleListEl = document.getElementById('module-list');
+
+  function renderHome(){
+    moduleListEl.innerHTML = '';
+    Object.keys(MODULES).forEach(function(key){
+      var mod = MODULES[key];
+      var row = document.createElement('label');
+      row.className = 'module-row' + (state.mods.indexOf(key) > -1 ? ' selected' : '');
+      row.setAttribute('tabindex','0');
+
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = state.mods.indexOf(key) > -1;
+      cb.addEventListener('change', function(){
+        toggleModule(key);
+      });
+
+      var numEl = document.createElement('div');
+      numEl.className = 'm-num';
+      numEl.textContent = mod.num;
+
+      var textEl = document.createElement('div');
+      textEl.className = 'm-text';
+      var t = document.createElement('div'); t.className='m-title'; t.textContent = mod.title;
+      var s = document.createElement('div'); s.className='m-sub'; s.textContent = mod.sub;
+      textEl.appendChild(t); textEl.appendChild(s);
+
+      var best = getBest([key]);
+      if(best){
+        var b = document.createElement('div');
+        b.className = 'm-best';
+        b.textContent = 'Best: ' + best.correct + '/' + best.total;
+        textEl.appendChild(b);
+      }
+
+      row.appendChild(cb);
+      row.appendChild(numEl);
+      row.appendChild(textEl);
+      moduleListEl.appendChild(row);
+    });
+    updatePoolHint();
+    updateCountBounds();
+  }
+
+  function toggleModule(key){
+    var i = state.mods.indexOf(key);
+    if(i > -1){
+      if(state.mods.length > 1){ state.mods.splice(i,1); }
+    } else {
+      state.mods.push(key);
+    }
+    renderHome();
+  }
+
+  function poolFor(mods){
+    return BANK.filter(function(q){ return mods.indexOf(q.m) > -1; });
+  }
+
+  function updatePoolHint(){
+    var pool = poolFor(state.mods);
+    document.getElementById('pool-hint').textContent =
+      pool.length + ' questions available in the selected module' + (state.mods.length>1?'s':'') + '. Options are reshuffled each attempt.';
+  }
+
+  function updateCountBounds(){
+    var pool = poolFor(state.mods);
+    var max = pool.length;
+    if(state.count > max) state.count = max;
+    if(state.count < 1) state.count = Math.min(5, max);
+    document.getElementById('count-val').textContent = state.count;
+    document.getElementById('count-label').textContent = state.count + (state.count===1?' question':' questions');
+  }
+
+  document.getElementById('dec').addEventListener('click', function(){
+    state.count = Math.max(3, state.count - 1);
+    updateCountBounds();
+  });
+  document.getElementById('inc').addEventListener('click', function(){
+    var max = poolFor(state.mods).length;
+    state.count = Math.min(max, state.count + 1);
+    updateCountBounds();
+  });
+
+  document.getElementById('start-btn').addEventListener('click', startQuiz);
+
+  // ---------- quiz flow ----------
+  var screenHome = document.getElementById('screen-home');
+  var screenQuiz = document.getElementById('screen-quiz');
+  var screenResults = document.getElementById('screen-results');
+
+  function startQuiz(){
+    var pool = shuffled(poolFor(state.mods));
+    state.queue = pool.slice(0, state.count).map(function(q){
+      var order = shuffled(q.opts.map(function(o,i){ return i; }));
+      return {
+        m:q.m, ref:q.ref, q:q.q, note:q.note,
+        opts: order.map(function(i){ return q.opts[i]; }),
+        correctIdx: order.indexOf(q.correct)
+      };
+    });
+    state.idx = 0;
+    state.correctCount = 0;
+    state.perModule = {};
+    state.mods.forEach(function(m){ state.perModule[m] = {correct:0,total:0}; });
+
+    screenHome.classList.add('hidden');
+    screenResults.classList.add('hidden');
+    screenQuiz.classList.remove('hidden');
+    renderTrack();
+    renderQuestion();
+  }
+
+  function renderTrack(){
+    var track = document.getElementById('track');
+    track.innerHTML = '';
+    state.queue.forEach(function(item, i){
+      var t = document.createElement('div');
+      t.className = 'tick';
+      if(item.result === 'correct') t.className += ' correct';
+      else if(item.result === 'wrong') t.className += ' wrong';
+      else if(i === state.idx) t.className += ' current';
+      track.appendChild(t);
+    });
+  }
+
+  function renderQuestion(){
+    var item = state.queue[state.idx];
+    state.answered = false;
+    document.getElementById('q-module').textContent = 'Module ' + MODULES[item.m].num + ' \u00B7 Q' + (state.idx+1) + '/' + state.queue.length;
+    document.getElementById('q-ref').textContent = item.ref;
+    document.getElementById('q-text').textContent = item.q;
+
+    var optsEl = document.getElementById('options');
+    optsEl.innerHTML = '';
+    var letters = ['A','B','C','D'];
+    item.opts.forEach(function(opt, i){
+      var btn = document.createElement('button');
+      btn.className = 'opt';
+      btn.type = 'button';
+      var l = document.createElement('span'); l.className='letter'; l.textContent = letters[i];
+      var lab = document.createElement('span'); lab.className='label'; lab.textContent = opt;
+      btn.appendChild(l); btn.appendChild(lab);
+      btn.addEventListener('click', function(){ selectAnswer(i); });
+      optsEl.appendChild(btn);
+    });
+
+    document.getElementById('feedback').className = 'feedback';
+    document.getElementById('feedback').textContent = '';
+    document.getElementById('next-btn').disabled = true;
+    document.getElementById('next-btn').textContent = (state.idx === state.queue.length-1) ? 'See result' : 'Next';
+    renderTrack();
+  }
+
+  function selectAnswer(i){
+    if(state.answered) return;
+    state.answered = true;
+    var item = state.queue[state.idx];
+    var isRight = (i === item.correctIdx);
+    item.result = isRight ? 'correct' : 'wrong';
+
+    if(isRight){
+      state.correctCount++;
+    }
+    state.perModule[item.m].total++;
+    if(isRight) state.perModule[item.m].correct++;
+
+    var opts = document.querySelectorAll('.opt');
+    opts.forEach(function(btn, idx){
+      btn.classList.add('disabled');
+      btn.disabled = true;
+      if(idx === item.correctIdx) btn.classList.add('correct');
+      if(idx === i && !isRight) btn.classList.add('wrong');
+    });
+
+    var fb = document.getElementById('feedback');
+    fb.className = 'feedback show ' + (isRight ? 'right' : 'miss');
+    fb.innerHTML = '<b>' + (isRight ? 'Correct.' : 'Not quite.') + '</b> ' + item.note;
+
+    document.getElementById('next-btn').disabled = false;
+    renderTrack();
+  }
+
+  document.getElementById('next-btn').addEventListener('click', function(){
+    if(state.idx < state.queue.length - 1){
+      state.idx++;
+      renderQuestion();
+    } else {
+      showResults();
+    }
+  });
+
+  function showResults(){
+    screenQuiz.classList.add('hidden');
+    screenResults.classList.remove('hidden');
+
+    var total = state.queue.length;
+    document.getElementById('score-big').textContent = state.correctCount + '/' + total;
+    document.getElementById('score-pct').textContent = Math.round(100*state.correctCount/total) + '% correct';
+
+    var isNewBest = setBest(state.mods, state.correctCount, total);
+    if(state.mods.length === 1) isNewBest = setBest([state.mods[0]], state.perModule[state.mods[0]].correct, state.perModule[state.mods[0]].total) || isNewBest;
+    var bestBadge = document.getElementById('best-badge');
+    if(isNewBest){
+      bestBadge.classList.remove('hidden');
+      bestBadge.textContent = 'New best for this set.';
+    } else {
+      bestBadge.classList.add('hidden');
+    }
+
+    var bd = document.getElementById('breakdown');
+    bd.innerHTML = '';
+    state.mods.forEach(function(m){
+      var s = state.perModule[m];
+      if(!s || s.total === 0) return;
+      var row = document.createElement('div');
+      row.className = 'b-row';
+      row.innerHTML = '<span class="b-name">Module ' + MODULES[m].num + ' \u2014 ' + MODULES[m].title + '</span><span class="b-score">' + s.correct + '/' + s.total + '</span>';
+      bd.appendChild(row);
+    });
+  }
+
+  document.getElementById('retry-btn').addEventListener('click', startQuiz);
+  document.getElementById('home-btn').addEventListener('click', function(){
+    screenResults.classList.add('hidden');
+    screenQuiz.classList.add('hidden');
+    screenHome.classList.remove('hidden');
+    renderHome();
+  });
+
+  renderHome();
+})();
+</script>
+</body>
+</html>

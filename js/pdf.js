@@ -228,7 +228,7 @@ function drawInspectionDetailsBlock(doc, insp, y, { margin, contentW }) {
 }
 
 function drawElementSummaryTableForGroups(doc, groups, y, { margin, contentW, pageH, title }) {
-  if (y > pageH - 150) { doc.addPage(); y = margin; }
+  if (y > pageH - 150) { doc.addPage(); y = margin; } // backstop only — callers apply the bottom-quarter rule first
   y = pageHeading(doc, title || 'Element Summary', y);
 
   const rows = [];
@@ -301,8 +301,16 @@ function drawGroupFindings(doc, insp, g, y, { margin, contentW, pageH, pageW }) 
     y += 20;
   }
 
+  // Elements after the first in a group follow the same bottom-quarter rule as sections: an
+  // element heading never starts in the bottom quarter of a page. The first element sits
+  // right under its group/section heading (already quarter-checked by the caller), so it
+  // only needs the small safety margin — otherwise the heading would be stranded alone.
+  const quarterStart = margin + (pageH - margin * 2) * 0.75;
+  let elementIndex = 0;
   for (const ed of g.elementData) {
-    if (y > pageH - margin - 60) { doc.addPage(); y = margin; }
+    const needsBreak = elementIndex > 0 ? y > quarterStart : y > pageH - margin - 60;
+    elementIndex++;
+    if (needsBreak) { doc.addPage(); y = margin; }
 
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(15);
@@ -471,340 +479,6 @@ async function buildAllElementGroups(inspectionId) {
     groups.push({ section: null, elementData });
   }
   return groups;
-}
-
-async function exportInspectionPDF(inspectionId) {
-  if (!window.jspdf) {
-    toast('PDF library not loaded. Connect to the internet once to cache it, then try again.');
-    return;
-  }
-  toast('Building report…');
-  try {
-    await buildAndSaveInspectionPDF(inspectionId);
-  } catch (err) {
-    console.error('PDF export failed', err);
-    toast('Export failed: ' + (err && err.message ? err.message : 'unknown error'));
-  }
-}
-
-async function buildAndSaveInspectionPDF(inspectionId) {
-  const insp = await DB.get('inspections', inspectionId);
-  const sections = await DB.listSections(inspectionId);
-  const coverPhoto = await DB.getCoverPhoto(inspectionId);
-  const companyLogoPhoto = await DB.getLogoByRole(inspectionId, 'company');
-  const clientLogoPhoto = await DB.getLogoByRole(inspectionId, 'client');
-
-  let coverData = null;
-  if (coverPhoto) coverData = await loadNormalizedImage(coverPhoto.annotatedBlob || coverPhoto.originalBlob);
-
-  const companyLogoData = companyLogoPhoto ? await loadNormalizedImage(companyLogoPhoto.originalBlob) : null;
-  const clientLogoData = clientLogoPhoto ? await loadNormalizedImage(clientLogoPhoto.originalBlob) : null;
-  const logoData = [companyLogoData, clientLogoData].filter(Boolean);
-
-  async function loadElementData(elmt) {
-    const refPhotos = [];
-    for (const p of await DB.listPhotosForElement(elmt.id)) {
-      refPhotos.push({ ...(await loadNormalizedImage(p.annotatedBlob || p.originalBlob)), caption: p.caption || '' });
-    }
-
-    const findings = await DB.listFindings(elmt.id);
-    const findingsWithPhotos = [];
-    for (const f of findings) {
-      const photoData = [];
-      for (const p of await DB.listPhotosForFinding(f.id)) {
-        photoData.push({ ...(await loadNormalizedImage(p.annotatedBlob || p.originalBlob)), caption: p.caption || '' });
-      }
-      findingsWithPhotos.push({ ...f, photos: photoData });
-    }
-    return { element: elmt, refPhotos, findings: findingsWithPhotos };
-  }
-
-  // Build ordered group list: named sections first (in order), then an "Ungrouped" bucket if it has elements
-  const groups = [];
-  for (const sec of sections) {
-    const elements = await DB.listElementsBySection(inspectionId, sec.id);
-    const elementData = [];
-    for (const e of elements) elementData.push(await loadElementData(e));
-    groups.push({ section: sec, elementData });
-  }
-  const ungrouped = await DB.listElementsBySection(inspectionId, null);
-  if (ungrouped.length) {
-    const elementData = [];
-    for (const e of ungrouped) elementData.push(await loadElementData(e));
-    groups.push({ section: null, elementData });
-  }
-
-  const { jsPDF } = window.jspdf;
-  const doc = new jsPDF({ unit: 'pt', format: 'a4' });
-  const pageW = doc.internal.pageSize.getWidth();
-  const pageH = doc.internal.pageSize.getHeight();
-  const margin = 48;
-  const contentW = pageW - margin * 2;
-
-  // ---------- Cover page ----------
-  const includeCover = insp.includeCoverPage !== false;
-  if (includeCover) {
-    if (insp.coverStyle === 'archarray') {
-      drawArchArrayCover(doc, { insp, coverData, companyLogoData, clientLogoData, pageW, pageH, margin, contentW });
-    } else {
-      drawBasicCover(doc, { insp, coverData, logoData, pageW, pageH, margin, contentW });
-    }
-  }
-
-  // ---------- Table of Contents (reserved blank page; backfilled at the very end once
-  // every section's actual page number is known — the standard two-pass jsPDF technique).
-  // jsPDF always creates page 1 automatically; when the cover is included that page holds
-  // it and this addPage() moves to a fresh page 2 for the ToC. When the cover is excluded,
-  // that same unused page 1 becomes the ToC directly instead. ----------
-  if (includeCover) doc.addPage();
-  const tocPageNum = doc.internal.getNumberOfPages();
-  const tocEntries = [];
-
-  // ---------- Introduction ----------
-  if (insp.introduction) {
-    doc.addPage();
-    tocEntries.push({ label: 'Introduction', page: doc.internal.getNumberOfPages(), group: 'report' });
-    let iy = margin;
-    iy = drawRefinedPageTitle(doc, 'Introduction', insp.structureName, iy, { margin, contentW });
-    drawRichHtmlContent(doc, insp.introduction, iy, { margin, contentW, pageH });
-  }
-
-  // ---------- Summary ----------
-  if (insp.summary) {
-    doc.addPage();
-    tocEntries.push({ label: 'Summary', page: doc.internal.getNumberOfPages(), group: 'report' });
-    let sy = margin;
-    sy = drawRefinedPageTitle(doc, 'Summary', insp.structureName, sy, { margin, contentW });
-    drawRichHtmlContent(doc, insp.summary, sy, { margin, contentW, pageH });
-  }
-
-  // ---------- Location Map ----------
-  const mapMode = insp.locationMapMode || 'auto';
-  if (mapMode !== 'off') {
-    const mapResult = await buildLocationMapForReport(insp, { pageW, margin, contentW });
-    if (mapResult) {
-      doc.addPage();
-      tocEntries.push({ label: 'Location Map', page: doc.internal.getNumberOfPages(), group: 'report' });
-      let my = margin;
-      my = pageHeading(doc, 'Location Map', my);
-      doc.addImage(mapResult.url, 'JPEG', margin, my, mapResult.w, mapResult.h, undefined, 'FAST');
-    } else if (mapMode === 'auto' && (!insp.location || insp.location.lat == null)) {
-      toast('No coordinates set for this structure — location map skipped');
-    } else if (mapMode === 'auto') {
-      toast('Could not generate the location map — check your internet connection. Section skipped.');
-    }
-  }
-
-  // ---------- Details page ----------
-  doc.addPage();
-  tocEntries.push({ label: 'Inspection Details', page: doc.internal.getNumberOfPages(), group: 'report' });
-  let y = margin;
-  y = pageHeading(doc, 'Inspection Details', y);
-  y = drawInspectionDetailsBlock(doc, insp, y, { margin, contentW });
-
-  // ---- BCI / MDCI summary (GI Bridges inspections only) ----
-  if (insp.inspectionType === 'GI Bridges') {
-    const bci = await computeBciSummary(inspectionId);
-    y += 26;
-    if (y + 150 > pageH - margin) { doc.addPage(); y = margin; }
-    y = pageHeading(doc, 'BCI / MDCI Condition Scores', y);
-
-    doc.setDrawColor(28, 31, 38);
-    doc.setLineWidth(1);
-    const boxTop = y;
-    const boxH = 108;
-    doc.rect(margin, boxTop, contentW, boxH);
-
-    function scoreLine(label, track, ly) {
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(10.5);
-      doc.setTextColor(74, 79, 90);
-      doc.text(label, margin + 12, ly);
-      doc.setTextColor(28, 31, 38);
-      doc.setFontSize(11);
-      const aveTxt = track.bciAv != null ? String(Math.round(track.bciAv)) : '—';
-      const critTxt = track.bciCrit != null ? String(Math.round(track.bciCrit)) : '—';
-      doc.text(`Ave: ${aveTxt}     Crit: ${critTxt}`, pageW - margin - 12, ly, { align: 'right' });
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8.5);
-      doc.setTextColor(120, 124, 132);
-      const bcsAveTxt = track.bcsAv != null ? track.bcsAv.toFixed(2) : '—';
-      const bcsCritTxt = track.bcsCrit != null ? track.bcsCrit.toFixed(2) : '—';
-      doc.text(`BCS Ave: ${bcsAveTxt}   ·   BCS Crit: ${bcsCritTxt}`, pageW - margin - 12, ly + 12, { align: 'right' });
-    }
-    scoreLine('Official BCI', bci.vanilla, boxTop + 22);
-    doc.setDrawColor(220, 223, 228);
-    doc.line(margin + 8, boxTop + 42, pageW - margin - 8, boxTop + 42);
-    scoreLine('House MDCI', bci.mdci, boxTop + 64);
-
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8);
-    doc.setTextColor(120, 124, 132);
-    const noteLines = doc.splitTextToSize(
-      "MDCI is a house-developed condition index that blends multiple defects per element more granularly than the official method. It is not directly comparable to another authority's BCI figures.",
-      contentW - 24
-    );
-    doc.text(noteLines, margin + 12, boxTop + 88);
-
-    y = boxTop + boxH + 14;
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8);
-    doc.setTextColor(120, 124, 132);
-    const approxLines = doc.splitTextToSize(
-      "Official BCI's multi-defect interaction rule is an algorithmic approximation — engineer judgement should override where defects genuinely compound in severity." +
-      (bci.excludedCount ? ` ${bci.excludedCount} element${bci.excludedCount === 1 ? '' : 's'} excluded from scoring (no Element Type set, or marked Not Inspected).` : ''),
-      contentW
-    );
-    doc.text(approxLines, margin, y);
-    y += approxLines.length * 11 + 10;
-  }
-
-  // Element summary table (grouped by section) — skipped entirely if extent/severity
-  // isn't used anywhere in this inspection, since "Worst Sev." and "Worst Ext." would
-  // just show "—" for every row, making the table uninformative rather than useful.
-  const anySeverityOrExtent = groups.some((g) => g.elementData.some((ed) => ed.findings.some((f) => f.severity || f.extent)));
-  if (anySeverityOrExtent) {
-    y += 20;
-    y = drawElementSummaryTableForGroups(doc, groups, y, { margin, contentW, pageH });
-  }
-
-  // ---------- Detailed findings, grouped by section ----------
-  let isFirstGroup = true;
-  for (const g of groups) {
-    doc.addPage();
-    if (isFirstGroup) { tocEntries.push({ label: 'Findings', page: doc.internal.getNumberOfPages(), group: 'report' }); isFirstGroup = false; }
-    y = margin;
-    y = drawGroupFindings(doc, insp, g, y, { margin, contentW, pageH, pageW });
-  }
-
-  // ---------- Conclusion & Recommendations ----------
-  if (insp.conclusion || (insp.recommendations && insp.recommendations.length)) {
-    doc.addPage();
-    tocEntries.push({ label: 'Conclusion & Recommendations', page: doc.internal.getNumberOfPages(), group: 'report' });
-    let cy = margin;
-    if (insp.conclusion) {
-      cy = drawRefinedPageTitle(doc, 'Conclusion', insp.structureName, cy, { margin, contentW });
-      cy = drawRichHtmlContent(doc, insp.conclusion, cy, { margin, contentW, pageH });
-    }
-    if (insp.recommendations && insp.recommendations.length) {
-      cy += 20;
-      if (cy > pageH - margin - 60) { doc.addPage(); cy = margin; }
-      cy = pageHeading(doc, 'Recommendations', cy);
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(11);
-      doc.setTextColor(28, 31, 38);
-      insp.recommendations.forEach((rec, i) => {
-        const lines = doc.splitTextToSize(`${i + 1}. ${rec}`, contentW);
-        if (cy + lines.length * 15 > pageH - margin) { doc.addPage(); cy = margin; }
-        doc.text(lines, margin, cy);
-        cy += lines.length * 15 + 6;
-      });
-    }
-  }
-
-  // ---------- Back matter: Drawings, named Appendices, and Risk Assessment — each gets its
-  // own lettered cover page ("Appendix A - Name"), computed live from position so it's
-  // always correct regardless of what's included. Each image item gets its own page sized
-  // to its native orientation (a landscape drawing gets a landscape page, not squeezed onto
-  // portrait), rather than flowing multiple items down a shared page. ----
-  const backMatterSections = [];
-  const drawingsToInclude = (await DB.listDrawings(inspectionId)).filter((d) => d.includeInReport);
-  if (drawingsToInclude.length) backMatterSections.push({ type: 'images', title: 'Drawings', items: drawingsToInclude });
-
-  const appendices = await DB.listAppendices(inspectionId);
-  for (const appendix of appendices) {
-    const items = await DB.listAppendixItems(appendix.id);
-    if (items.length) backMatterSections.push({ type: 'images', title: appendix.name, items });
-  }
-
-  if (insp.includeRiskAssessmentAppendix) {
-    const ra = await DB.getRiskAssessment(inspectionId);
-    if (ra) backMatterSections.push({ type: 'riskAssessment', title: 'Risk Assessment', ra });
-  }
-
-  const APPENDIX_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  for (let i = 0; i < backMatterSections.length; i++) {
-    const section = backMatterSections[i];
-    const letter = APPENDIX_LETTERS[i] || String(i + 1);
-    const fullTitle = `Appendix ${letter} - ${section.title}`;
-
-    // Cover page
-    doc.addPage('a4', 'portrait');
-    tocEntries.push({ label: fullTitle, page: doc.internal.getNumberOfPages(), group: 'appendix' });
-    let cvy = margin;
-    drawRefinedPageTitle(doc, fullTitle, insp.structureName, cvy, { margin, contentW });
-
-    if (section.type === 'riskAssessment') {
-      doc.addPage('a4', 'portrait');
-      const sigData = await loadRiskAssessmentSignatures(section.ra);
-      drawRiskAssessmentContent(doc, insp, section.ra, sigData);
-    } else {
-      for (const item of section.items) {
-        const data = await loadNormalizedImage(item.annotatedBlob || item.originalBlob);
-        const isLandscape = data.w > data.h;
-        doc.addPage('a4', isLandscape ? 'landscape' : 'portrait');
-        const pw = doc.internal.pageSize.getWidth();
-        const ph = doc.internal.pageSize.getHeight();
-        const cw2 = pw - margin * 2;
-        let iy = margin;
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(10.5);
-        doc.setTextColor(28, 31, 38);
-        doc.text(item.title || 'Untitled', margin, iy);
-        iy += 14;
-        const maxH = ph - margin - iy;
-        let w = cw2, h = (data.h / data.w) * w;
-        if (h > maxH) { h = maxH; w = (data.w / data.h) * h; }
-        doc.addImage(data.url, 'JPEG', margin, iy, w, h, undefined, 'FAST');
-      }
-    }
-  }
-
-  // ---------- Backfill the Table of Contents now that every section's actual page is known ----------
-  doc.setPage(tocPageNum);
-  let ty = margin;
-  ty = drawRefinedPageTitle(doc, 'Contents', null, ty, { margin, contentW });
-
-  function drawTocGroup(label, entries) {
-    if (!entries.length) return;
-    // No addPage() here deliberately: this runs during the backfill pass with the cursor
-    // pinned to the reserved ToC page via setPage(). Calling addPage() would append a new
-    // page at the very END of the whole document (that's how jsPDF works — it can't insert
-    // mid-document), which would silently corrupt every other section's already-recorded
-    // page number. In the extreme case of far more entries than fit, later ones are simply
-    // not drawn rather than risking that.
-    if (ty > pageH - margin - 40) return;
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10.5);
-    doc.setTextColor(200, 30, 30);
-    drawTrackedText(doc, label.toUpperCase(), margin, ty, 1.6);
-    ty += 22;
-    for (const entry of entries) {
-      if (ty > pageH - margin) break;
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(11.5);
-      doc.setTextColor(28, 31, 38);
-      doc.text(entry.label, margin, ty, { maxWidth: contentW - 50 });
-      const pageLabel = String(entry.page);
-      doc.setFont('helvetica', 'bold');
-      doc.setTextColor(91, 96, 105);
-      doc.text(pageLabel, pageW - margin, ty, { align: 'right' });
-      const labelW = doc.getTextWidth(entry.label);
-      const pageLabelW = doc.getTextWidth(pageLabel);
-      drawDotLeader(doc, margin + labelW + 8, pageW - margin - pageLabelW - 8, ty - 3);
-      ty += 25;
-    }
-    ty += 14;
-  }
-
-  drawTocGroup('Report', tocEntries.filter((e) => e.group === 'report'));
-  drawTocGroup('Appendices', tocEntries.filter((e) => e.group === 'appendix'));
-
-  doc.setPage(doc.internal.getNumberOfPages()); // don't leave the cursor on the ToC page
-
-  const filename = `${(insp.structureName || 'inspection').replace(/[^a-z0-9]+/gi, '_')}_${(insp.date || '').slice(0, 10)}.pdf`;
-  doc.save(filename);
-  toast('Report saved');
 }
 
 // Draws a photo properly contained (never distorted — both dimensions recalculated
@@ -989,7 +663,10 @@ function drawPhotoBlock(doc, data, caption, y, { margin, contentW, pageH }) {
   const maxH = (pageH - margin * 2) * 0.42;
   let w = contentW, h = (data.h / data.w) * w;
   if (h > maxH) { h = maxH; w = (data.w / data.h) * h; }
-  const captionLines = caption ? doc.splitTextToSize(caption, contentW) : [];
+  // Caption wraps to roughly the image's own width (never narrower than a readable minimum,
+  // never wider than the page) and is centred under the picture, not left-aligned to the margin.
+  const captionW = Math.min(contentW, Math.max(w, 220));
+  const captionLines = caption ? doc.splitTextToSize(caption, captionW) : [];
   const captionH = captionLines.length ? captionLines.length * 12 + 6 : 0;
   if (y + h + captionH > pageH - margin) { doc.addPage(); y = margin; }
   const x = margin + (contentW - w) / 2;
@@ -999,7 +676,7 @@ function drawPhotoBlock(doc, data, caption, y, { margin, contentW, pageH }) {
     doc.setFont('helvetica', 'italic');
     doc.setFontSize(9.5);
     doc.setTextColor(91, 96, 105);
-    doc.text(captionLines, margin, y);
+    doc.text(captionLines, x + w / 2, y, { align: 'center' });
     y += captionLines.length * 12;
   }
   y += 18;
@@ -1622,15 +1299,19 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
     const ph = doc.internal.pageSize.getHeight();
     const cw2 = pw - margin * 2;
     let iy = margin;
+    // Title is centred over the picture (and the picture itself centred on the page) rather
+    // than left-aligned to the margin.
+    const titleH = 14;
+    const maxH = ph - margin - (iy + titleH);
+    let w = cw2, h = (data.h / data.w) * w;
+    if (h > maxH) { h = maxH; w = (data.w / data.h) * h; }
+    const ix = margin + (cw2 - w) / 2;
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(10.5);
     doc.setTextColor(28, 31, 38);
-    doc.text(item.title || 'Untitled', margin, iy);
-    iy += 14;
-    const maxH = ph - margin - iy;
-    let w = cw2, h = (data.h / data.w) * w;
-    if (h > maxH) { h = maxH; w = (data.w / data.h) * h; }
-    doc.addImage(data.url, 'JPEG', margin, iy, w, h, undefined, 'FAST');
+    doc.text(doc.splitTextToSize(item.title || 'Untitled', Math.max(w, 220)), ix + w / 2, iy, { align: 'center' });
+    iy += titleH;
+    doc.addImage(data.url, 'JPEG', ix, iy, w, h, undefined, 'FAST');
   }
 
   // Sections flow onto the same page as the one before them, one after another, rather
@@ -1642,24 +1323,61 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
   // this doesn't touch.
   doc.addPage();
   let y = margin;
+  const bottomQuarterStart = margin + (pageH - margin * 2) * 0.75;
   function ensureRoomForHeading(currentY) {
-    const bottomQuarterStart = margin + (pageH - margin * 2) * 0.75;
     if (currentY > bottomQuarterStart) {
       doc.addPage();
       return margin;
     }
     return currentY;
   }
+  // Explicit page breaks: a Page break section, or a section's own "Start on a new page"
+  // toggle. Both are lazy — nothing is added until a section that actually draws something
+  // begins, so a break at the very end of the report (or before an empty/skipped section)
+  // never leaves a blank page. Never breaks if the cursor is already at the top of a page.
+  let pendingBreak = false;
+  function beginSection(currentY) {
+    const forced = pendingBreak;
+    pendingBreak = false;
+    if (forced && currentY > margin + 1) { doc.addPage(); return margin; }
+    return ensureRoomForHeading(currentY);
+  }
 
   const reportSections = await DB.listReportSections(inspectionId);
 
   for (const section of reportSections) {
+    if (section.type === 'pageBreak') { pendingBreak = true; continue; }
+    // A section's own toggle only counts if the section actually draws something — every
+    // skip path below restores the previous value so a skipped section can't leak a break.
+    const breakBefore = pendingBreak;
+    if (section.startOnNewPage) pendingBreak = true;
+
     if (section.type === 'text') {
-      if (!section.textHtml) continue;
-      y = ensureRoomForHeading(y);
+      if (!section.textHtml) { pendingBreak = breakBefore; continue; }
+      y = beginSection(y);
       tocEntries.push({ label: section.title || 'Text', page: doc.internal.getNumberOfPages() });
       y = pageHeading(doc, section.title || 'Text', y);
       y = drawRichHtmlContent(doc, section.textHtml, y, { margin, contentW, pageH });
+      y += 48;
+      continue;
+    }
+
+    if (section.type === 'recommendations') {
+      const recs = (section.recommendations || []).filter(Boolean);
+      if (!recs.length) { pendingBreak = breakBefore; continue; }
+      y = beginSection(y);
+      tocEntries.push({ label: section.title || 'Recommendations', page: doc.internal.getNumberOfPages() });
+      y = pageHeading(doc, section.title || 'Recommendations', y);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(11);
+      doc.setTextColor(28, 31, 38);
+      recs.forEach((rec, i) => {
+        const lines = doc.splitTextToSize(rec, contentW - 24);
+        if (y + lines.length * 14 > pageH - margin) { doc.addPage(); y = margin; doc.setFont('helvetica', 'normal'); doc.setFontSize(11); doc.setTextColor(28, 31, 38); }
+        doc.text(`${i + 1}.`, margin, y);
+        doc.text(lines, margin + 24, y);
+        y += lines.length * 14 + 6;
+      });
       y += 48;
       continue;
     }
@@ -1671,12 +1389,14 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
         toast(noCoords
           ? `No coordinates set — "${section.title || 'Location Map'}" skipped`
           : `Could not generate the location map — "${section.title || 'Location Map'}" skipped`);
+        pendingBreak = breakBefore;
         continue;
       }
       // The generic bottom-quarter heading check isn't enough here — the map image itself
       // is roughly half a page tall, so it needs that much room checked explicitly, or it
       // clips off the bottom of the page when it starts partway down.
       const headingAllowance = 30;
+      y = beginSection(y);
       if (y + headingAllowance + mapResult.h > pageH - margin) { doc.addPage(); y = margin; }
       tocEntries.push({ label: section.title || 'Location Map', page: doc.internal.getNumberOfPages() });
       y = pageHeading(doc, section.title || 'Location Map', y);
@@ -1686,7 +1406,7 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
     }
 
     if (section.type === 'inspectionDetails') {
-      y = ensureRoomForHeading(y);
+      y = beginSection(y);
       tocEntries.push({ label: section.title || 'Inspection Details', page: doc.internal.getNumberOfPages() });
       y = pageHeading(doc, section.title || 'Inspection Details', y);
       y = drawInspectionDetailsBlock(doc, insp, y, { margin, contentW });
@@ -1696,7 +1416,7 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
 
     if (section.type === 'elementSummary') {
       const allGroups = await buildAllElementGroups(inspectionId);
-      y = ensureRoomForHeading(y);
+      y = beginSection(y);
       tocEntries.push({ label: section.title || 'Element Summary', page: doc.internal.getNumberOfPages() });
       y = drawElementSummaryTableForGroups(doc, allGroups, y, { margin, contentW, pageH, title: section.title });
       y += 48;
@@ -1718,12 +1438,12 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
         for (const e of directElements) elementData.push(await loadElementDataForPdf(e));
         groups.push({ section: null, elementData });
       }
-      if (!groups.length) continue;
+      if (!groups.length) { pendingBreak = breakBefore; continue; }
 
       let firstGroup = true;
       for (const g of groups) {
         if (firstGroup) {
-          y = ensureRoomForHeading(y);
+          y = beginSection(y);
           tocEntries.push({ label: section.title || 'Inspection Findings', page: doc.internal.getNumberOfPages() });
           firstGroup = false;
         } else {
@@ -1740,7 +1460,8 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
 
     if (section.type === 'drawing') {
       const items = await DB.listSectionDrawings(section.id);
-      if (!items.length) continue;
+      if (!items.length) { pendingBreak = breakBefore; continue; }
+      pendingBreak = false; // every drawing page starts on a fresh page anyway
       let firstPage = true;
       for (const item of items) {
         const data = await loadNormalizedImage(item.annotatedBlob || item.originalBlob);
@@ -1762,7 +1483,8 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
         const ra = await DB.getRiskAssessment(inspectionId);
         if (ra) backMatter.push({ title: 'Risk Assessment', ra, isRA: true });
       }
-      if (!backMatter.length) continue;
+      if (!backMatter.length) { pendingBreak = breakBefore; continue; }
+      pendingBreak = false; // appendices always start on a fresh page
 
       const APPENDIX_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
       for (let i = 0; i < backMatter.length; i++) {

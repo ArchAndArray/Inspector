@@ -234,17 +234,10 @@ async function shellWorstSeverity(inspectionId) {
   return worst || null;
 }
 
-// Handles both plain selection and the Old Style → New Style conversion prompt. Declining
-// leaves the inspection exactly as it was — still listed by name in the sidebar, just not
-// opened — per an explicit decision that this should never happen silently/automatically.
+// Opens an inspection from the sidebar list.
 async function shellSelectInspection(id) {
   const insp = await DB.get('inspections', id);
   if (!insp) return;
-  if (insp.reportStyle === 'old') {
-    const proceed = confirm(`"${insp.structureName || 'This inspection'}" uses the old report format. Convert it to the new format to open it here?\n\nThis cannot be undone.`);
-    if (!proceed) return;
-    await DB.convertInspectionToNewStyle(id);
-  }
   shellState.selectedInspectionId = id;
   shellState.activeTab = 'overview';
   shellState.editingSectionId = null;
@@ -275,7 +268,7 @@ async function renderShellMainPane() {
   if (!insp) { shellState.selectedInspectionId = null; return renderShellMainPane(); }
 
   main.innerHTML = `
-    <div style="padding:22px 28px 0; flex-shrink:0;">
+    <div style="padding:calc(22px + var(--safe-top)) 28px 0; flex-shrink:0;">
       <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px;">
         <div style="min-width:0;">
           <div style="font-size:23px; font-weight:700; line-height:1.2;">${esc(insp.structureName || 'Untitled structure')}</div>
@@ -1468,6 +1461,9 @@ async function shellRenderReportSectionPreviewBlock(insp, section, isGiBridges) 
   const t = SHELL_TOKENS;
   const heading = `<h2 style="font-family:-apple-system,sans-serif; font-size:18px; font-weight:700; margin-bottom:12px;">${esc(section.title) || REPORT_SECTION_TYPES[section.type]?.label || section.type}</h2>`;
 
+  if (section.type === 'pageBreak') {
+    return `<div style="display:flex; align-items:center; gap:10px; color:${t.muted}; font-size:11.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase;"><div style="flex:1; border-top:2px dashed ${t.line};"></div>Page break<div style="flex:1; border-top:2px dashed ${t.line};"></div></div>`;
+  }
   if (section.type === 'text') {
     return `${heading}<div style="font-size:14.5px;">${section.textHtml || '<p style="color:' + t.muted + ';">Empty.</p>'}</div>`;
   }
@@ -1532,7 +1528,8 @@ async function shellRenderReportSectionEditor(main, section) {
     inspection: shellEditInspectionFindingsSection,
     drawing: shellEditDrawingSection,
     appendices: shellEditAppendicesSection,
-    recommendations: shellEditRecommendationsSection
+    recommendations: shellEditRecommendationsSection,
+    pageBreak: shellEditPageBreakSection
   };
   const fn = editors[section.type];
   const t = SHELL_TOKENS;
@@ -1548,6 +1545,52 @@ async function shellRenderReportSectionEditor(main, section) {
   const body = document.getElementById('shell-rep-editor-body');
   if (fn) await fn(body, section);
   else body.innerHTML = `<div style="color:${t.muted};">Unknown section type.</div>`;
+  if (fn && section.type !== 'pageBreak') shellAppendStartOnNewPageToggle(body, section);
+  if (fn) shellAppendDeleteSectionButton(body, section);
+}
+
+// Removing a report section from the shell (previously only possible from the retired
+// pre-shell screens). Page breaks delete without a prompt; every other type confirms first
+// since deleting an Inspection Findings section also removes the structure sections and
+// elements inside it (DB.deleteReportSectionCascade).
+function shellAppendDeleteSectionButton(body, section) {
+  const t = SHELL_TOKENS;
+  const btn = document.createElement('button');
+  btn.textContent = section.type === 'pageBreak' ? 'Remove page break' : 'Delete section';
+  btn.style.cssText = `display:block; margin-top:${section.type === 'pageBreak' ? '22px' : '14px'}; background:none; border:1px solid ${t.red}; color:${t.red}; border-radius:8px; padding:9px 16px; font-size:13.5px; font-weight:650;`;
+  body.appendChild(btn);
+  btn.addEventListener('click', async () => {
+    if (section.type !== 'pageBreak' && !confirm('Delete this section and everything inside it? This cannot be undone.')) return;
+    await DB.deleteReportSectionCascade(section.id);
+    shellReportEditingSectionId = null;
+    shellState.editingSectionId = null;
+    shellRenderReportPreviewList();
+    shellRenderReportMainArea();
+  });
+}
+
+// Per-section "Start on a new page" toggle — the report generator forces a page break before
+// this section when it's on (but never leaves a blank page if the section is empty or already
+// at the top of one). Applies to every section type except Page break itself.
+function shellAppendStartOnNewPageToggle(body, section) {
+  const t = SHELL_TOKENS;
+  const wrap = document.createElement('label');
+  wrap.style.cssText = `display:flex; align-items:center; gap:10px; margin-top:26px; padding-top:16px; border-top:1px solid ${t.line}; font-size:14px; font-weight:600; cursor:pointer;`;
+  wrap.innerHTML = `<input type="checkbox" id="shell-sec-newpage" ${section.startOnNewPage ? 'checked' : ''} style="width:18px; height:18px;"> Start this section on a new page`;
+  body.appendChild(wrap);
+  wrap.querySelector('#shell-sec-newpage').addEventListener('change', async (e) => {
+    section.startOnNewPage = e.target.checked;
+    await DB.updateReportSection(section.id, { startOnNewPage: e.target.checked });
+    shellRenderReportPreviewList();
+  });
+}
+
+async function shellEditPageBreakSection(body) {
+  const t = SHELL_TOKENS;
+  body.innerHTML = `
+    <h2 style="font-size:20px; font-weight:700; margin:0 0 8px;">Page break</h2>
+    <p style="color:${t.muted}; font-size:14px; line-height:1.5; max-width:460px;">The report starts a new page here. Drag this item in the section list to move the break; delete it to remove the break. A break at the very end of the report (or right after another break) is ignored, so it never produces a blank page.</p>
+  `;
 }
 
 function shellSectionTitleField(body, section, extraOnSave) {
