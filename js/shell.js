@@ -1514,6 +1514,9 @@ async function shellRenderReportSectionPreviewBlock(insp, section, isGiBridges) 
     const recs = (section.recommendations || []).filter(Boolean);
     return `${heading}${recs.length ? `<ol style="font-size:14.5px; padding-left:22px; margin:0;">${recs.map((r) => `<li style="margin-bottom:4px;">${esc(r)}</li>`).join('')}</ol>` : `<div style="color:${t.muted}; font-size:13.5px;">No recommendations yet.</div>`}`;
   }
+  if (section.type === 'monitoringSpec' || section.type === 'monitoringReadings' || section.type === 'monitoringHistory') {
+    return shellRenderMonitoringPreviewBlock(insp, section, heading);
+  }
   return heading;
 }
 
@@ -1529,6 +1532,9 @@ async function shellRenderReportSectionEditor(main, section) {
     drawing: shellEditDrawingSection,
     appendices: shellEditAppendicesSection,
     recommendations: shellEditRecommendationsSection,
+    monitoringSpec: shellEditMonitoringSpecSection,
+    monitoringReadings: shellEditMonitoringReadingsSection,
+    monitoringHistory: shellEditMonitoringHistorySection,
     pageBreak: shellEditPageBreakSection
   };
   const fn = editors[section.type];

@@ -2,7 +2,7 @@
 // Stores: inspections, sections, elements, findings, photos, templates
 
 const DB_NAME = 'siteInspectionDB';
-const DB_VERSION = 9;
+const DB_VERSION = 11;
 
 let dbPromise = null;
 
@@ -155,6 +155,38 @@ function openDB() {
           dcStore.createIndex('itemId', 'itemId', { unique: false });
         }
       }
+      if (oldVersion < 10) {
+        // Monitoring inspections (CS 470): a long-running monitoring PLAN per structure
+        // (class, spec, parameters + trigger levels) and READINGS taken at each visit. Each
+        // visit is still an ordinary inspection; it points at the plan via monitoringPlanId.
+        if (!db.objectStoreNames.contains('monitoringPlans')) {
+          db.createObjectStore('monitoringPlans', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('monitoringReadings')) {
+          const mrStore = db.createObjectStore('monitoringReadings', { keyPath: 'id' });
+          mrStore.createIndex('planId', 'planId', { unique: false });
+          mrStore.createIndex('inspectionId', 'inspectionId', { unique: false });
+        }
+      }
+      if (oldVersion < 11) {
+        // Monitoring POINTS (the thing being monitored: located on an image, with a master
+        // photo, instructions and parameters) and one VISIT record per point per inspection.
+        // Readings and photos gain a pointId so a point's whole history can be pulled out.
+        if (!db.objectStoreNames.contains('monitoringPoints')) {
+          const mpStore = db.createObjectStore('monitoringPoints', { keyPath: 'id' });
+          mpStore.createIndex('planId', 'planId', { unique: false });
+        }
+        if (!db.objectStoreNames.contains('monitoringVisits')) {
+          const mvStore = db.createObjectStore('monitoringVisits', { keyPath: 'id' });
+          mvStore.createIndex('planId', 'planId', { unique: false });
+          mvStore.createIndex('pointId', 'pointId', { unique: false });
+          mvStore.createIndex('inspectionId', 'inspectionId', { unique: false });
+        }
+        const mrStore2 = tx.objectStore('monitoringReadings');
+        if (!mrStore2.indexNames.contains('pointId')) mrStore2.createIndex('pointId', 'pointId', { unique: false });
+        const photosStore11 = tx.objectStore('photos');
+        if (!photosStore11.indexNames.contains('pointId')) photosStore11.createIndex('pointId', 'pointId', { unique: false });
+      }
     };
 
     req.onsuccess = () => resolve(req.result);
@@ -260,6 +292,8 @@ const DB = {
       const items = await this.listAppendixItems(a.id);
       for (const item of items) await this.delete('photos', item.id);
     }
+    for (const r of await this.getAllByIndex('monitoringReadings', 'inspectionId', id)) await this.delete('monitoringReadings', r.id);
+    for (const v of await this.getAllByIndex('monitoringVisits', 'inspectionId', id)) await this.delete('monitoringVisits', v.id);
     const reportSections = await this.getAllByIndex('reportSections', 'inspectionId', id);
     for (const rs of reportSections) {
       // Drawing/appendix items and any linked element-grouping `sections` record; the
@@ -765,6 +799,170 @@ const DB = {
       ],
       createdAt: new Date().toISOString()
     });
+    // Per-type default template for Monitoring inspections (CS 470 / CS 450 5.2, 5.13).
+    await this.put('reportTemplates', {
+      id: 'monitoring-template',
+      name: 'Monitoring Report',
+      sections: [
+        { type: 'inspectionDetails', title: 'Basic Inspection Data' },
+        { type: 'monitoringSpec', title: 'Monitoring Specification' },
+        { type: 'monitoringReadings', title: 'Monitoring Readings' },
+        { type: 'monitoringHistory', title: 'Monitoring History' },
+        { type: 'inspection', title: 'Inspection Findings' },
+        { type: 'locationMap', title: 'Location Map' },
+        { type: 'text', title: 'Trigger Exceedances and Actions Taken' },
+        { type: 'recommendations', title: 'Review and Recommendations' },
+        { type: 'appendices', title: 'Appendices' }
+      ],
+      createdAt: new Date().toISOString()
+    });
+  },
+
+  // --- Monitoring (CS 470) ---
+  // Plan = one per structure, shared by every Monitoring inspection of it. parameters[] are
+  // embedded: { id, name, location, method, unit, accuracy, basis:'value'|'change',
+  // baseline:number|null, amber:number|null, red:number|null, action }.
+  monitoringStructureKey(structureId, structureName) {
+    const id = (structureId || '').trim().toLowerCase();
+    if (id) return 'id:' + id;
+    return 'name:' + (structureName || '').trim().toLowerCase();
+  },
+  async findMonitoringPlan(structureId, structureName) {
+    const key = this.monitoringStructureKey(structureId, structureName);
+    const all = await this.getAll('monitoringPlans');
+    return all.find((p) => p.structureKey === key) || null;
+  },
+  async ensureMonitoringPlanForInspection(insp) {
+    if (insp.monitoringPlanId) {
+      const existing = await this.get('monitoringPlans', insp.monitoringPlanId);
+      if (existing) return existing;
+    }
+    let plan = await this.findMonitoringPlan(insp.structureId, insp.structureName);
+    if (!plan) {
+      const now = new Date().toISOString();
+      plan = {
+        id: uid(),
+        structureKey: this.monitoringStructureKey(insp.structureId, insp.structureName),
+        structureName: insp.structureName || '',
+        structureId: insp.structureId || '',
+        monitoringClass: 1,
+        reason: '',
+        failureMode: '',
+        startDate: (insp.date || now).slice(0, 10),
+        endDate: '',
+        reviewDate: '',
+        parameters: [],
+        createdAt: now,
+        updatedAt: now
+      };
+      await this.put('monitoringPlans', plan);
+    }
+    await this.updateInspection(insp.id, { monitoringPlanId: plan.id });
+    return plan;
+  },
+  async updateMonitoringPlan(id, patch) {
+    const existing = await this.get('monitoringPlans', id);
+    if (!existing) throw new Error('Monitoring plan not found');
+    const updated = { ...existing, ...patch, updatedAt: new Date().toISOString() };
+    await this.put('monitoringPlans', updated);
+    return updated;
+  },
+  async listMonitoringReadings(planId) {
+    return this.getAllByIndex('monitoringReadings', 'planId', planId);
+  },
+  async listInspectionReadings(inspectionId) {
+    return this.getAllByIndex('monitoringReadings', 'inspectionId', inspectionId);
+  },
+  // One reading per (inspection, parameter): setting again replaces it; an empty value removes it.
+  async setMonitoringReading(planId, pointId, parameterId, inspectionId, date, value, note) {
+    const existing = (await this.listInspectionReadings(inspectionId)).find((r) => r.parameterId === parameterId);
+    if (value === null || value === undefined || value === '' || !Number.isFinite(Number(value))) {
+      if (existing) await this.delete('monitoringReadings', existing.id);
+      return null;
+    }
+    const rec = {
+      id: existing ? existing.id : uid(),
+      planId, pointId, parameterId, inspectionId,
+      date: date || new Date().toISOString().slice(0, 10),
+      value: Number(value),
+      note: note || '',
+      createdAt: existing ? existing.createdAt : new Date().toISOString()
+    };
+    await this.put('monitoringReadings', rec);
+    return rec;
+  },
+
+  // --- Monitoring points ---
+  // point: { id, planId, name, type, status:'active'|'closed', createdInspectionId,
+  //          locationPhotoId, pin:{x,y}|null (0-1 of the image), masterPhotoId,
+  //          instrWhat, instrMeasure, instrHow,
+  //          parameters:[{id,name,unit,accuracy,basis,baseline,amber,red,action}], createdAt, updatedAt }
+  async listMonitoringPoints(planId) {
+    return (await this.getAllByIndex('monitoringPoints', 'planId', planId)).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  },
+  async addMonitoringPoint(planId, inspectionId, data) {
+    const now = new Date().toISOString();
+    const point = {
+      id: uid(), planId, name: '', type: 'Crack', status: 'active', createdInspectionId: inspectionId || null,
+      locationPhotoId: null, pin: null, masterPhotoId: null,
+      instrWhat: '', instrMeasure: '', instrHow: '', parameters: [],
+      createdAt: now, updatedAt: now, ...(data || {})
+    };
+    await this.put('monitoringPoints', point);
+    return point;
+  },
+  async updateMonitoringPoint(id, patch) {
+    const existing = await this.get('monitoringPoints', id);
+    if (!existing) throw new Error('Monitoring point not found');
+    const updated = { ...existing, ...patch, updatedAt: new Date().toISOString() };
+    await this.put('monitoringPoints', updated);
+    return updated;
+  },
+  async deleteMonitoringPoint(id) {
+    for (const r of await this.getAllByIndex('monitoringReadings', 'pointId', id)) await this.delete('monitoringReadings', r.id);
+    for (const v of await this.getAllByIndex('monitoringVisits', 'pointId', id)) await this.delete('monitoringVisits', v.id);
+    for (const p of await this.getAllByIndex('photos', 'pointId', id)) await this.delete('photos', p.id);
+    await this.delete('monitoringPoints', id);
+  },
+  async removeMonitoringParameterReadings(parameterId, pointId) {
+    for (const r of await this.getAllByIndex('monitoringReadings', 'pointId', pointId)) {
+      if (r.parameterId === parameterId) await this.delete('monitoringReadings', r.id);
+    }
+  },
+  async listPointReadings(pointId) {
+    return this.getAllByIndex('monitoringReadings', 'pointId', pointId);
+  },
+
+  // --- Per-visit record for a point (note; readings and photos hang off pointId + inspectionId) ---
+  async listMonitoringVisits(planId) {
+    return this.getAllByIndex('monitoringVisits', 'planId', planId);
+  },
+  async getPointVisit(pointId, inspectionId) {
+    return (await this.getAllByIndex('monitoringVisits', 'pointId', pointId)).find((v) => v.inspectionId === inspectionId) || null;
+  },
+  async savePointVisit(planId, pointId, inspectionId, date, patch) {
+    const existing = await this.getPointVisit(pointId, inspectionId);
+    const rec = existing
+      ? { ...existing, ...patch, date: date || existing.date }
+      : { id: uid(), planId, pointId, inspectionId, date: date || new Date().toISOString().slice(0, 10), note: '', createdAt: new Date().toISOString(), ...patch };
+    await this.put('monitoringVisits', rec);
+    return rec;
+  },
+
+  // --- Photos belonging to a point ---
+  // kind 'monitoringLocation' (the image the pin sits on), 'monitoringMaster' (master photo of the
+  // defect), 'monitoringVisit' (photos taken on a visit; inspectionId says which).
+  async addPointPhoto(pointId, inspectionId, kind, blob, caption) {
+    const photo = await this.addPhoto({ kind, inspectionId, originalBlob: blob, title: caption || '' });
+    photo.pointId = pointId;
+    photo.caption = caption || '';
+    return this.put('photos', photo);
+  },
+  async listPointPhotos(pointId, kind, inspectionId) {
+    const all = await this.getAllByIndex('photos', 'pointId', pointId);
+    return all
+      .filter((p) => p.kind === kind && (inspectionId === undefined || p.inspectionId === inspectionId))
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
   },
 
   // --- Standalone Scale/Annotate sessions (not tied to any inspection) ---

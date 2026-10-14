@@ -1382,6 +1382,30 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
       continue;
     }
 
+    if (section.type === 'monitoringSpec' || section.type === 'monitoringReadings' || section.type === 'monitoringHistory') {
+      const mPlan = insp.monitoringPlanId ? await DB.get('monitoringPlans', insp.monitoringPlanId) : null;
+      if (!mPlan) { pendingBreak = breakBefore; continue; }
+      const mTitle = section.title || REPORT_SECTION_TYPES[section.type].label;
+      const mOpts = { margin, contentW, pageH };
+      let mHistory = null;
+      if (section.type === 'monitoringHistory') {
+        mHistory = await monLoadHistoryData(mPlan, { pointIds: section.pointIds, from: section.dateFrom, to: section.dateTo });
+        if (!mHistory.points.length) { pendingBreak = breakBefore; continue; }
+      }
+      y = beginSection(y);
+      tocEntries.push({ label: mTitle, page: doc.internal.getNumberOfPages() });
+      y = pageHeading(doc, mTitle, y);
+      if (section.type === 'monitoringSpec') {
+        y = drawMonitoringSpecPdf(doc, mPlan, await DB.listMonitoringPoints(mPlan.id), y, mOpts);
+      } else if (section.type === 'monitoringReadings') {
+        y = drawMonitoringReadingsPdf(doc, await monLoadVisitData(mPlan, insp), y, mOpts);
+      } else {
+        y = drawMonitoringHistoryPdf(doc, mHistory, y, mOpts);
+      }
+      y += 48;
+      continue;
+    }
+
     if (section.type === 'locationMap') {
       const mapResult = await buildLocationMapForReport(insp, { contentW });
       if (!mapResult) {

@@ -5,7 +5,7 @@ const SEVERITY_LABELS = { 1: 'As New', 2: 'Minor', 3: 'Moderate', 4: 'Severe', 5
 const EXTENT_LABELS = { A: 'None', B: 'Slight (≤5%)', C: 'Moderate (5–20%)', D: 'Wide (20–50%)', E: 'Extensive (>50%)' };
 const PRIORITY_COLORS = { High: '#c81e1e', Medium: '#e0672e', Low: '#4f9d5c', Monitor: '#1e7dc8' };
 const CURRENCY_SYMBOLS = { USD: '$', GBP: '£', EUR: '€' };
-const INSPECTION_TYPES = ['Safety Inspection', 'Detailed', 'Special', 'Follow-up', 'GI Bridges'];
+const INSPECTION_TYPES = ['Safety Inspection', 'Detailed', 'Special', 'Follow-up', 'GI Bridges', 'Monitoring'];
 
 // Computes the letter for an appendix by its live position (A, B, C…, falling back to a
 // number past Z) — never stored, always derived fresh so it stays correct if appendices
@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '1.0.6.22';
+const APP_VERSION = '1.0.6.24';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -723,7 +723,10 @@ function openNewInspectionSheet(onCreated) {
 
   DB.seedDefaultReportTemplate().then(() => DB.listReportTemplates()).then((templates) => {
     const select = sheet.querySelector('#f-template');
-    select.innerHTML = templates.map((t) => `<option value="${t.id}" ${t.id === 'default-template' ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
+    const wantId = () => (sheet.querySelector('#f-inspectionType').value === 'Monitoring' ? 'monitoring-template' : 'default-template');
+    select.innerHTML = templates.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
+    select.value = wantId();
+    sheet.querySelector('#f-inspectionType').addEventListener('change', () => { select.value = wantId(); });
   });
 
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
@@ -746,6 +749,7 @@ function openNewInspectionSheet(onCreated) {
     });
     const templateId = sheet.querySelector('#f-template').value;
     if (templateId) await DB.applyReportTemplate(insp.id, templateId);
+    if (insp.inspectionType === 'Monitoring') await DB.ensureMonitoringPlanForInspection(insp);
     sheet.remove();
     if (onCreated) onCreated(insp);
     else navigate(`#/inspection/${insp.id}`);
@@ -762,6 +766,9 @@ const REPORT_SECTION_TYPES = {
   elementSummary: { label: 'Element Summary', icon: '📊' },
   appendices: { label: 'Appendices', icon: '📎' },
   recommendations: { label: 'Recommendations', icon: '✅' },
+  monitoringSpec: { label: 'Monitoring Specification', icon: '🎯' },
+  monitoringReadings: { label: 'Monitoring Readings', icon: '📈' },
+  monitoringHistory: { label: 'Monitoring History', icon: '🗂️' },
   pageBreak: { label: 'Page break', icon: '⏎' }
 };
 
