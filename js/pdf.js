@@ -1396,7 +1396,7 @@ async function buildAndSaveNewStyleInspectionPDF(inspectionId) {
       tocEntries.push({ label: mTitle, page: doc.internal.getNumberOfPages() });
       y = pageHeading(doc, mTitle, y);
       if (section.type === 'monitoringSpec') {
-        y = drawMonitoringSpecPdf(doc, mPlan, await DB.listMonitoringPoints(mPlan.id), y, mOpts);
+        y = drawMonitoringSpecPdf(doc, mPlan, await DB.listMonitoringPoints(mPlan.id), y, mOpts, await monLoadImagesData(mPlan));
       } else if (section.type === 'monitoringReadings') {
         y = drawMonitoringReadingsPdf(doc, await monLoadVisitData(mPlan, insp), y, mOpts);
       } else {

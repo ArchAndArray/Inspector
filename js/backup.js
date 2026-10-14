@@ -3,7 +3,7 @@
 // database (inspections, elements, findings, photos, templates, risk assessments), meant
 // for safekeeping or moving to a new device. Photos are embedded as base64 data URLs.
 
-const BACKUP_STORES = ['inspections', 'sections', 'elements', 'findings', 'photos', 'templates', 'riskAssessments', 'reportSections', 'reportTemplates', 'monitoringPlans', 'monitoringReadings', 'monitoringPoints', 'monitoringVisits'];
+const BACKUP_STORES = ['inspections', 'sections', 'elements', 'findings', 'photos', 'templates', 'riskAssessments', 'reportSections', 'reportTemplates', 'monitoringPlans', 'monitoringReadings', 'monitoringPoints', 'monitoringVisits', 'monitoringImages'];
 
 function blobToDataURLBackup(blob) {
   return new Promise((resolve, reject) => {

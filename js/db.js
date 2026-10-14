@@ -2,7 +2,7 @@
 // Stores: inspections, sections, elements, findings, photos, templates
 
 const DB_NAME = 'siteInspectionDB';
-const DB_VERSION = 11;
+const DB_VERSION = 12;
 
 let dbPromise = null;
 
@@ -186,6 +186,14 @@ function openDB() {
         if (!mrStore2.indexNames.contains('pointId')) mrStore2.createIndex('pointId', 'pointId', { unique: false });
         const photosStore11 = tx.objectStore('photos');
         if (!photosStore11.indexNames.contains('pointId')) photosStore11.createIndex('pointId', 'pointId', { unique: false });
+      }
+      if (oldVersion < 12) {
+        // Shared LOCATION IMAGES for monitoring points: one photo / drawing / sketch carries many
+        // points and areas (each point stores which image it is on and where).
+        if (!db.objectStoreNames.contains('monitoringImages')) {
+          const miStore = db.createObjectStore('monitoringImages', { keyPath: 'id' });
+          miStore.createIndex('planId', 'planId', { unique: false });
+        }
       }
     };
 
@@ -893,19 +901,55 @@ const DB = {
   },
 
   // --- Monitoring points ---
-  // point: { id, planId, name, type, status:'active'|'closed', createdInspectionId,
-  //          locationPhotoId, pin:{x,y}|null (0-1 of the image), masterPhotoId,
-  //          instrWhat, instrMeasure, instrHow,
+  // point: { id, planId, number (the N in "MP<N>", never reused), name, type, status:'active'|'closed',
+  //          createdInspectionId, imageId (a monitoringImages id), shape:'point'|'area',
+  //          pin:{x,y}|null, area:[{x,y}...]|null (coordinates 0-1 of the image), color (hex),
+  //          masterPhotoId, instrWhat, instrMeasure, instrHow,
   //          parameters:[{id,name,unit,accuracy,basis,baseline,amber,red,action}], createdAt, updatedAt }
   async listMonitoringPoints(planId) {
-    return (await this.getAllByIndex('monitoringPoints', 'planId', planId)).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    await this.normalizeMonitoringPoints(planId);
+    return (await this.getAllByIndex('monitoringPoints', 'planId', planId)).sort((a, b) => (a.number || 0) - (b.number || 0) || String(a.createdAt).localeCompare(String(b.createdAt)));
+  },
+  // Brings points saved by the first point-based release (v1.0.6.24: one location photo per point)
+  // up to the shared-image model: numbers them, moves each location photo into a shared image.
+  async normalizeMonitoringPoints(planId) {
+    const pts = await this.getAllByIndex('monitoringPoints', 'planId', planId);
+    const legacy = pts.filter((p) => p.number == null || (p.locationPhotoId && !p.imageId));
+    if (!legacy.length) return;
+    let next = Math.max(0, ...pts.map((p) => p.number || 0)) + 1;
+    for (const p of legacy.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))) {
+      const patch = {};
+      if (p.number == null) { patch.number = next++; patch.color = p.color || MON_DEFAULT_COLOURS[(patch.number - 1) % MON_DEFAULT_COLOURS.length]; }
+      if (p.locationPhotoId && !p.imageId) {
+        const photo = await this.get('photos', p.locationPhotoId);
+        if (photo) {
+          await this.put('photos', { ...photo, pointId: null, inspectionId: null, planId });
+          const rec = { id: uid(), planId, photoId: photo.id, name: p.name ? `${p.name} image` : 'Location image', createdAt: new Date().toISOString() };
+          await this.put('monitoringImages', rec);
+          patch.imageId = rec.id;
+          patch.shape = 'point';
+        }
+        patch.locationPhotoId = null;
+      }
+      if (p.masterPhotoId) {
+        const m = await this.get('photos', p.masterPhotoId);
+        if (m && m.inspectionId) await this.put('photos', { ...m, inspectionId: null });
+      }
+      await this.put('monitoringPoints', { ...p, ...patch });
+    }
+    const plan = await this.get('monitoringPlans', planId);
+    if (plan && (plan.nextPointNumber || 0) < next) await this.put('monitoringPlans', { ...plan, nextPointNumber: next });
   },
   async addMonitoringPoint(planId, inspectionId, data) {
     const now = new Date().toISOString();
+    const plan = await this.get('monitoringPlans', planId);
+    const existing = await this.getAllByIndex('monitoringPoints', 'planId', planId);
+    const number = Math.max((plan && plan.nextPointNumber) || 1, Math.max(0, ...existing.map((p) => p.number || 0)) + 1);
+    if (plan) await this.put('monitoringPlans', { ...plan, nextPointNumber: number + 1 });
     const point = {
-      id: uid(), planId, name: '', type: 'Crack', status: 'active', createdInspectionId: inspectionId || null,
-      locationPhotoId: null, pin: null, masterPhotoId: null,
-      instrWhat: '', instrMeasure: '', instrHow: '', parameters: [],
+      id: uid(), planId, number, name: '', type: 'Crack', status: 'active', createdInspectionId: inspectionId || null,
+      imageId: null, shape: 'point', pin: null, area: null, color: MON_DEFAULT_COLOURS[(number - 1) % MON_DEFAULT_COLOURS.length],
+      masterPhotoId: null, instrWhat: '', instrMeasure: '', instrHow: '', parameters: [],
       createdAt: now, updatedAt: now, ...(data || {})
     };
     await this.put('monitoringPoints', point);
@@ -953,10 +997,41 @@ const DB = {
   // kind 'monitoringLocation' (the image the pin sits on), 'monitoringMaster' (master photo of the
   // defect), 'monitoringVisit' (photos taken on a visit; inspectionId says which).
   async addPointPhoto(pointId, inspectionId, kind, blob, caption) {
-    const photo = await this.addPhoto({ kind, inspectionId, originalBlob: blob, title: caption || '' });
+    // Master photos belong to the point, not to a visit, so they are not tied to an inspection
+    // (deleting a visit must not delete them). Visit photos are tied to their inspection.
+    const owner = kind === 'monitoringVisit' ? inspectionId : null;
+    const photo = await this.addPhoto({ kind, inspectionId: owner, originalBlob: blob, title: caption || '' });
     photo.pointId = pointId;
     photo.caption = caption || '';
     return this.put('photos', photo);
+  },
+  // --- Shared location images (one photo / drawing / sketch carries many points and areas) ---
+  async listMonitoringImages(planId) {
+    return (await this.getAllByIndex('monitoringImages', 'planId', planId)).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  },
+  async addMonitoringImage(planId, blob, name) {
+    const photo = await this.addPhoto({ kind: 'monitoringLocation', inspectionId: null, originalBlob: blob, title: name || '' });
+    photo.planId = planId;
+    await this.put('photos', photo);
+    const rec = { id: uid(), planId, photoId: photo.id, name: name || 'Location image', createdAt: new Date().toISOString() };
+    await this.put('monitoringImages', rec);
+    return rec;
+  },
+  async updateMonitoringImage(id, patch) {
+    const existing = await this.get('monitoringImages', id);
+    if (!existing) throw new Error('Monitoring image not found');
+    const updated = { ...existing, ...patch };
+    await this.put('monitoringImages', updated);
+    return updated;
+  },
+  async deleteMonitoringImage(id) {
+    const rec = await this.get('monitoringImages', id);
+    if (!rec) return;
+    for (const p of await this.getAllByIndex('monitoringPoints', 'planId', rec.planId)) {
+      if (p.imageId === id) await this.put('monitoringPoints', { ...p, imageId: null, pin: null, area: null, updatedAt: new Date().toISOString() });
+    }
+    if (rec.photoId) await this.delete('photos', rec.photoId);
+    await this.delete('monitoringImages', id);
   },
   async listPointPhotos(pointId, kind, inspectionId) {
     const all = await this.getAllByIndex('photos', 'pointId', pointId);

@@ -33,6 +33,7 @@ const MON_POINT_TYPES = ['Crack', 'Movement / deflection', 'Bulge / tilt', 'Sett
 const MON_RAG_COLOURS = { green: [60, 150, 90], amber: [224, 150, 30], red: [200, 30, 30] };
 const MON_RAG_LABELS = { green: 'Green', amber: 'Amber', red: 'Red' };
 const MON_RAG_ORDER = { green: 1, amber: 2, red: 3 };
+const MON_DEFAULT_COLOURS = ['#d32f2f', '#f57c00', '#fbc02d', '#388e3c', '#0097a7', '#1976d2', '#7b1fa2', '#e91e63'];
 const MON_MAX_PLANNED_MONTHS = 24; // CS 470 6.13 - planned maximum duration of monitoring
 
 function monNum(x) {
@@ -166,18 +167,86 @@ function monPlanWarnings(plan, today) {
   return out;
 }
 
+// "MP3" - the permanent label of a point or area; "MP3 - P1 Soffit crack" with the name.
+function monLabel(point) { return point && point.number != null ? 'MP' + point.number : ''; }
+function monPointTitle(point) {
+  const name = (point && point.name) || 'Unnamed';
+  return point && point.number != null ? 'MP' + point.number + ' - ' + name : name;
+}
+
+// A point is a mark with a pin; an area is a mark with a polygon. Returns the geometry in use or null.
+function monMarkGeometry(m) {
+  if (m.shape === 'area') return m.area && m.area.length >= 3 ? { kind: 'area', pts: m.area } : null;
+  return m.pin ? { kind: 'point', pin: m.pin } : null;
+}
+function monCentroid(pts) {
+  let x = 0, y = 0;
+  for (const p of pts) { x += p.x; y += p.y; }
+  return { x: x / pts.length, y: y / pts.length };
+}
+
+// Layout of every mark on one image, in a virtual space VW wide (VH tall by the image aspect), so the
+// same result is drawn as SVG on screen and onto a canvas for the PDF. Marks may sit on top of each
+// other (a crack inside a bulge); their MP# labels are stacked so none hides another.
+// marks: [{ id, number, color, shape, pin, area }]; opts: { highlightId }.
+function monMarkPrims(marks, imgW, imgH, opts) {
+  const VW = 1000, VH = VW * ((imgH || 3) / (imgW || 4));
+  const hl = opts && opts.highlightId;
+  const FONT = 24, LH = 34, CHAR = 15, PAD = 14, R = 15;
+  const sorted = marks.filter((m) => monMarkGeometry(m)).sort((a, b) => (a.number || 0) - (b.number || 0));
+  const prims = [];
+  const placed = [];
+  for (const m of sorted) {
+    const g = monMarkGeometry(m);
+    const dim = hl && m.id !== hl;
+    const color = m.color || '#d32f2f';
+    let ax, ay, lx, ly;
+    const text = monLabel(m) || 'MP';
+    const lw = CHAR * text.length + PAD;
+    if (g.kind === 'area') {
+      const pts = g.pts.map((p) => ({ x: p.x * VW, y: p.y * VH }));
+      prims.push({ kind: 'area', pts, color, dim, hl: !!hl && m.id === hl });
+      const c = monCentroid(pts);
+      ax = c.x; ay = c.y; lx = ax - lw / 2; ly = ay - LH / 2;
+    } else {
+      ax = g.pin.x * VW; ay = g.pin.y * VH;
+      // points sitting on top of each other get nested rings, so each one stays visible
+      const stacked = prims.filter((q) => q.kind === 'point' && Math.abs(q.x - ax) < 14 && Math.abs(q.y - ay) < 14).length;
+      prims.push({ kind: 'point', x: ax, y: ay, r: R + stacked * 9, color, dim, hl: !!hl && m.id === hl });
+      lx = ax + R + 6; ly = ay - LH - 2;
+    }
+    const clamp = () => { lx = Math.max(2, Math.min(VW - lw - 2, lx)); ly = Math.max(2, Math.min(VH - LH - 2, ly)); };
+    clamp();
+    const hits = (x, y) => placed.some((r) => x < r.x + r.w + 3 && x + lw + 3 > r.x && y < r.y + r.h + 3 && y + LH + 3 > r.y);
+    const x0 = lx, y0 = ly;
+    let guard = 0;
+    while (hits(lx, ly) && guard++ < 60) {
+      ly += LH + 4;
+      if (ly + LH > VH - 2) { ly = y0; lx += lw + 4; }
+      lx = Math.max(2, Math.min(VW - lw - 2, lx));
+    }
+    placed.push({ x: lx, y: ly, w: lw });
+    placed[placed.length - 1].h = LH;
+    prims.push({ kind: 'label', x: lx, y: ly, w: lw, h: LH, text, color, font: FONT, dim, hl: !!hl && m.id === hl, ax, ay });
+  }
+  // areas first, then points, then labels, so labels are never covered
+  const order = { area: 0, point: 1, label: 2 };
+  prims.sort((a, b) => order[a.kind] - order[b.kind]);
+  return { VW, VH, prims };
+}
+
 // Human description of a filter, for report headings.
 function monFilterText(points, filter, fmt) {
   const f = fmt || ((d) => d);
   const sel = monSelectPoints(points, filter);
-  const which = sel.length === points.length ? 'All points' : sel.map((p) => p.name || 'Unnamed').join(', ');
+  const which = sel.length === points.length ? 'All points' : sel.map((p) => monPointTitle(p)).join(', ');
   const from = filter && filter.from, to = filter && filter.to;
   const when = from && to ? `${f(from)} to ${f(to)}` : from ? `from ${f(from)}` : to ? `up to ${f(to)}` : 'all dates';
   return `${which} · ${when}`;
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { monNum, monRag, monWorstRag, monSortReadings, monBuildSummary, monBuildPointHistory, monLatestRag, monSelectPoints, monPlanWarnings, monFilterText, MON_MAX_PLANNED_MONTHS };
+  module.exports = { monLabel, monPointTitle, monMarkGeometry, monMarkPrims, MON_DEFAULT_COLOURS, monNum, monRag, monWorstRag, monSortReadings, monBuildSummary, monBuildPointHistory, monLatestRag, monSelectPoints, monPlanWarnings, monFilterText, MON_MAX_PLANNED_MONTHS };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -253,48 +322,166 @@ function monOpenExistingImagePicker(inspectionId, onPick) {
   })();
 }
 
-// Full-screen pin placement. initialPin is {x,y} (0-1) or null. onDone(pinOrNull).
-function monOpenPinPicker(blob, initialPin, onDone) {
+// ---- Shared location images and their marks (points and areas) ----
+function monMarkOf(p) { return { id: p.id, number: p.number, color: p.color, shape: p.shape, pin: p.pin, area: p.area }; }
+
+// SVG drawn over an <img> (same aspect, so nothing is distorted). extraSvg is appended in the same space.
+function monMarksSvg(marks, w, h, highlightId, extra) {
+  const { VW, VH, prims } = monMarkPrims(marks, w, h, { highlightId });
+  const body = prims.map((pr) => {
+    const op = pr.dim && pr.kind !== 'label' ? ' opacity="0.5"' : '';
+    if (pr.kind === 'area') {
+      const pts = pr.pts.map((q) => q.x.toFixed(1) + ',' + q.y.toFixed(1)).join(' ');
+      return `<g${op}><polygon points="${pts}" fill="none" stroke="#fff" stroke-width="${pr.hl ? 11 : 9}" stroke-linejoin="round"/><polygon points="${pts}" fill="${pr.color}" fill-opacity="0.28" stroke="${pr.color}" stroke-width="${pr.hl ? 7 : 5}" stroke-linejoin="round"/></g>`;
+    }
+    if (pr.kind === 'point') {
+      return `<g${op}><circle cx="${pr.x}" cy="${pr.y}" r="${pr.r}" fill="none" stroke="#fff" stroke-width="${pr.hl ? 11 : 9}"/><circle cx="${pr.x}" cy="${pr.y}" r="${pr.r}" fill="${pr.color}" fill-opacity="0.3" stroke="${pr.color}" stroke-width="${pr.hl ? 7 : 5}"/></g>`;
+    }
+    return `<g${op}><rect x="${pr.x}" y="${pr.y}" width="${pr.w}" height="${pr.h}" rx="5" fill="#fff" stroke="${pr.color}" stroke-width="3"/><text x="${pr.x + pr.w / 2}" y="${pr.y + pr.h / 2 + 8.5}" text-anchor="middle" font-family="-apple-system,Helvetica,Arial,sans-serif" font-weight="700" font-size="${pr.font}" fill="#000">${esc(pr.text)}</text></g>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${VW} ${VH.toFixed(1)}" preserveAspectRatio="none" style="position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; overflow:visible;">${body}${extra ? extra(VW, VH) : ''}</svg>`;
+}
+
+// Same drawing onto a canvas (for the PDF). scale = canvas pixels per virtual unit.
+function monDrawPrims(ctx, prims, scale) {
+  for (const pr of prims) {
+    ctx.save();
+    ctx.globalAlpha = pr.dim && pr.kind !== 'label' ? 0.5 : 1;
+    if (pr.kind === 'area') {
+      ctx.beginPath();
+      pr.pts.forEach((q, k) => (k ? ctx.lineTo(q.x * scale, q.y * scale) : ctx.moveTo(q.x * scale, q.y * scale)));
+      ctx.closePath();
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = (pr.hl ? 11 : 9) * scale; ctx.strokeStyle = '#fff'; ctx.stroke();
+      ctx.globalAlpha = (pr.dim ? 0.5 : 1) * 0.28; ctx.fillStyle = pr.color; ctx.fill();
+      ctx.globalAlpha = pr.dim ? 0.5 : 1;
+      ctx.lineWidth = (pr.hl ? 7 : 5) * scale; ctx.strokeStyle = pr.color; ctx.stroke();
+    } else if (pr.kind === 'point') {
+      ctx.beginPath(); ctx.arc(pr.x * scale, pr.y * scale, pr.r * scale, 0, Math.PI * 2);
+      ctx.lineWidth = (pr.hl ? 11 : 9) * scale; ctx.strokeStyle = '#fff'; ctx.stroke();
+      ctx.globalAlpha = (pr.dim ? 0.5 : 1) * 0.3; ctx.fillStyle = pr.color; ctx.fill();
+      ctx.globalAlpha = pr.dim ? 0.5 : 1;
+      ctx.lineWidth = (pr.hl ? 7 : 5) * scale; ctx.strokeStyle = pr.color; ctx.stroke();
+    } else {
+      ctx.fillStyle = '#fff'; ctx.strokeStyle = pr.color; ctx.lineWidth = 3 * scale;
+      const x = pr.x * scale, y = pr.y * scale, w = pr.w * scale, h = pr.h * scale, r = 5 * scale;
+      ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#000'; ctx.font = `700 ${pr.font * scale}px Helvetica, Arial, sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(pr.text, x + w / 2, y + h / 2 + 1 * scale);
+    }
+    ctx.restore();
+  }
+}
+
+// One entry per shared image: { rec, photo, blob, w, h }. Measures (and remembers) the size once.
+async function monLoadImageViews(planId) {
+  const out = {};
+  for (const rec of await DB.listMonitoringImages(planId)) {
+    const photo = await DB.get('photos', rec.photoId);
+    if (!photo) continue;
+    const blob = photo.annotatedBlob || photo.originalBlob;
+    let w = rec.w, h = rec.h;
+    if (!w || !h) {
+      try { const bm = await createImageBitmap(blob); w = bm.width; h = bm.height; if (bm.close) bm.close(); await DB.updateMonitoringImage(rec.id, { w, h }); } catch (e) { w = 4; h = 3; }
+    }
+    out[rec.id] = { rec, photo, blob, w, h };
+  }
+  return out;
+}
+
+function monMarkedImageHtml(view, marks, highlightId, maxH) {
   const t = SHELL_TOKENS;
-  let pin = initialPin ? { x: initialPin.x, y: initialPin.y } : null;
+  if (!view) return `<div style="height:${Math.min(maxH, 70)}px; background:${t.line}; border-radius:8px; display:flex; align-items:center; justify-content:center; color:${t.muted}; font-size:12.5px;">No image</div>`;
+  return `<div style="position:relative; display:inline-block; line-height:0; max-width:100%;"><img src="${blobUrl(view.blob)}" style="max-width:100%; max-height:${maxH}px; border-radius:8px; display:block;">${monMarksSvg(marks, view.w, view.h, highlightId)}</div>`;
+}
+
+function monColourSwatches(current, prefix) {
+  const all = MON_DEFAULT_COLOURS.slice();
+  const custom = current && !all.includes(current) ? current : null;
+  return all.map((c) => `<button class="${prefix}-sw" data-c="${c}" style="width:30px; height:30px; border-radius:50%; background:${c}; border:${c === current ? '3px solid #000' : '2px solid #fff'}; box-shadow:0 0 0 1px #bbb; padding:0;"></button>`).join('')
+    + `<label style="display:inline-flex; align-items:center; gap:6px; font-size:12px; color:#666;"><input type="color" class="${prefix}-custom" value="${custom || current || '#d32f2f'}" style="width:34px; height:30px; padding:0; border:none; background:none;"> Custom</label>`;
+}
+
+// Full-screen placement of a point (one tap) or an area (tap each corner, then Done).
+// Other points on the image are shown dimmed. onDone(patch) where patch is {pin} or {area}.
+function monOpenMarkPicker(view, otherMarks, point, onDone) {
+  const t = SHELL_TOKENS;
+  const isArea = point.shape === 'area';
+  let pin = point.pin ? { ...point.pin } : null;
+  let verts = isArea && point.area ? point.area.map((q) => ({ ...q })) : [];
   const ov = document.createElement('div');
   ov.style.cssText = 'position:fixed; inset:0; background:#16181d; display:flex; flex-direction:column;';
   ov.innerHTML = `
     <div style="display:flex; gap:10px; align-items:center; padding:calc(var(--safe-top, 0px) + 10px) 14px 10px; background:#16181d; color:#fff;">
       <button id="mon-pin-cancel" style="${monBtnStyle(t)}">Cancel</button>
-      <div style="flex:1; font-size:13.5px; text-align:center;">Tap the image to place the pin</div>
-      <button id="mon-pin-clear" style="${monBtnStyle(t)}">Clear pin</button>
+      <div style="flex:1; font-size:13.5px; text-align:center;">${isArea ? 'Tap each corner of the area, then Done' : 'Tap the image to place the point'} (${esc(monLabel(point))})</div>
+      ${isArea ? `<button id="mon-pin-undo" style="${monBtnStyle(t)}">Undo corner</button>` : ''}
+      <button id="mon-pin-clear" style="${monBtnStyle(t)}">Clear</button>
       <button id="mon-pin-done" style="background:${t.red}; color:#fff; border:none; border-radius:8px; padding:8px 16px; font-size:13px; font-weight:700;">Done</button>
     </div>
     <div style="flex:1; overflow:auto; display:flex; align-items:flex-start; justify-content:center; padding:10px;">
       <div id="mon-pin-wrap" style="position:relative; display:inline-block; line-height:0;">
-        <img id="mon-pin-img" src="${blobUrl(blob)}" style="max-width:100%; max-height:calc(100vh - 110px); touch-action:manipulation;">
-        <div id="mon-pin-mark" style="position:absolute; width:30px; height:30px; margin:-15px 0 0 -15px; border:3px solid ${t.red}; border-radius:50%; box-shadow:0 0 0 2px #fff; display:none; pointer-events:none;"><div style="position:absolute; left:50%; top:-9px; bottom:-9px; width:2px; margin-left:-1px; background:${t.red};"></div><div style="position:absolute; top:50%; left:-9px; right:-9px; height:2px; margin-top:-1px; background:${t.red};"></div></div>
+        <img id="mon-pin-img" src="${blobUrl(view.blob)}" style="max-width:100%; max-height:calc(100vh - 110px); touch-action:manipulation; display:block;">
+        <div id="mon-pin-svg"></div>
       </div>
     </div>`;
   presentOverlay(ov);
-  const img = ov.querySelector('#mon-pin-img'), mark = ov.querySelector('#mon-pin-mark');
+  const img = ov.querySelector('#mon-pin-img'), svgHost = ov.querySelector('#mon-pin-svg');
   const draw = () => {
-    if (!pin) { mark.style.display = 'none'; return; }
-    mark.style.display = 'block';
-    mark.style.left = (pin.x * 100) + '%';
-    mark.style.top = (pin.y * 100) + '%';
+    const cur = { ...monMarkOf(point), shape: point.shape, pin: isArea ? null : pin, area: isArea && verts.length >= 3 ? verts : null };
+    const draft = (VW, VH) => {
+      if (!isArea || verts.length === 0 || verts.length >= 3) return '';
+      const pts = verts.map((q) => `${(q.x * VW).toFixed(1)},${(q.y * VH).toFixed(1)}`).join(' ');
+      return `<polyline points="${pts}" fill="none" stroke="${point.color}" stroke-width="5"/>` + verts.map((q) => `<circle cx="${q.x * VW}" cy="${q.y * VH}" r="9" fill="${point.color}" stroke="#fff" stroke-width="3"/>`).join('');
+    };
+    svgHost.innerHTML = monMarksSvg(otherMarks.concat([cur]), view.w, view.h, point.id, draft);
   };
   draw();
   img.addEventListener('click', (e) => {
     const r = img.getBoundingClientRect();
-    pin = { x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) };
+    const q = { x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) };
+    if (isArea) verts.push(q); else pin = q;
     draw();
   });
-  ov.querySelector('#mon-pin-clear').addEventListener('click', () => { pin = null; draw(); });
+  const undo = ov.querySelector('#mon-pin-undo');
+  if (undo) undo.addEventListener('click', () => { verts.pop(); draw(); });
+  ov.querySelector('#mon-pin-clear').addEventListener('click', () => { pin = null; verts = []; draw(); });
   ov.querySelector('#mon-pin-cancel').addEventListener('click', () => ov.remove());
-  ov.querySelector('#mon-pin-done').addEventListener('click', () => { ov.remove(); onDone(pin); });
+  ov.querySelector('#mon-pin-done').addEventListener('click', () => {
+    if (isArea && verts.length > 0 && verts.length < 3) { toast('An area needs at least 3 corners'); return; }
+    ov.remove();
+    onDone(isArea ? { area: verts.length >= 3 ? verts : null } : { pin });
+  });
 }
 
-function monPinnedThumbHtml(blob, pin, height) {
-  const t = SHELL_TOKENS;
-  if (!blob) return `<div style="height:${height}px; background:${t.line}; border-radius:8px; display:flex; align-items:center; justify-content:center; color:${t.muted}; font-size:12.5px;">No image</div>`;
-  return `<div style="position:relative; display:inline-block; line-height:0; max-width:100%;"><img src="${blobUrl(blob)}" style="max-width:100%; max-height:${height}px; border-radius:8px; display:block;">${pin ? `<div style="position:absolute; left:${pin.x * 100}%; top:${pin.y * 100}%; width:22px; height:22px; margin:-11px 0 0 -11px; border:3px solid ${t.red}; border-radius:50%; box-shadow:0 0 0 2px #fff;"></div>` : ''}</div>`;
+// Add a shared location image: an image already in the inspection, a new photo, or a sketch.
+function monAddImageFlow(plan, insp, onAdded) {
+  const sheet = el(`<div class="sheet-backdrop"><div class="sheet"><div class="sheet-handle"></div><h2>New location image</h2>
+    <p style="font-size:12.5px; color:#666; margin:0 0 10px;">One image can carry many points and areas, so use as few as you can (for example one per abutment).</p>
+    <button class="btn btn-primary btn-block" id="mon-l-existing">Use a photo or drawing from this inspection</button>
+    <button class="btn btn-secondary btn-block" id="mon-l-photo" style="margin-top:10px;">Take or choose a photo</button>
+    <button class="btn btn-secondary btn-block" id="mon-l-sketch" style="margin-top:10px;">Draw a sketch</button>
+    <button class="btn btn-ghost btn-block" id="mon-l-cancel" style="margin-top:10px;">Cancel</button></div></div>`);
+  presentOverlay(sheet);
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  sheet.querySelector('#mon-l-cancel').addEventListener('click', () => sheet.remove());
+  const finish = async (blob, openMarkup) => {
+    const n = (await DB.listMonitoringImages(plan.id)).length + 1;
+    const name = (prompt('Name for this image (e.g. North abutment)', `Image ${n}`) || '').trim() || `Image ${n}`;
+    const rec = await DB.addMonitoringImage(plan.id, blob, name);
+    if (openMarkup) await openAnnotator(rec.photoId, async () => { await DB.updateMonitoringImage(rec.id, { w: null, h: null }); onAdded(rec); });
+    else onAdded(rec);
+  };
+  sheet.querySelector('#mon-l-existing').addEventListener('click', () => { sheet.remove(); monOpenExistingImagePicker(insp.id, (blob) => finish(blob, false)); });
+  sheet.querySelector('#mon-l-photo').addEventListener('click', () => {
+    sheet.remove();
+    openPhotoSourceSheet({ onFiles: async (files) => finish(await normalizeImageFile(files[0]), false) });
+  });
+  sheet.querySelector('#mon-l-sketch').addEventListener('click', async () => {
+    sheet.remove();
+    finish(await createA4CanvasBlob(), true);
+  });
 }
 
 // ---- Point editor (inside a host element; onBack returns to the caller's list) ----
@@ -304,25 +491,35 @@ async function monRenderPointEditor(host, plan, insp, pointId, onBack) {
   if (!point) { onBack(); return; }
   async function savePoint(patch) { point = await DB.updateMonitoringPoint(point.id, patch); }
 
-  const locPhoto = point.locationPhotoId ? await DB.get('photos', point.locationPhotoId) : null;
+  const views = await monLoadImageViews(plan.id);
+  const allPoints = await DB.listMonitoringPoints(plan.id);
+  const view = point.imageId ? views[point.imageId] || null : null;
+  const marksOnImage = view ? allPoints.filter((q) => q.imageId === view.rec.id).map(monMarkOf) : [];
   const masterPhoto = point.masterPhotoId ? await DB.get('photos', point.masterPhotoId) : null;
+  const isArea = point.shape === 'area';
+  const placed = !!monMarkGeometry(point);
 
   host.innerHTML = `
     <button id="mon-pt-back" style="background:none; border:none; color:${t.muted}; font-size:13px; font-weight:650; margin-bottom:10px; padding:0;">‹ Back</button>
-    <h2 style="font-size:20px; font-weight:700; margin:0 0 14px;">Monitoring point</h2>
+    <h2 style="font-size:20px; font-weight:700; margin:0 0 14px;"><span style="background:#fff; color:#000; border:2px solid ${esc(point.color || '#d32f2f')}; border-radius:6px; padding:1px 8px; margin-right:8px;">${esc(monLabel(point))}</span>Monitoring ${isArea ? 'area' : 'point'}</h2>
     <div style="display:grid; grid-template-columns:2fr 1fr 1fr; gap:10px; margin-bottom:16px;">
-      <div><label style="${monLabelStyle(t)}">Name / reference</label><input type="text" id="mon-pt-name" value="${esc(point.name)}" placeholder="e.g. P1 - Span 2 soffit crack" style="${monInputStyle(t)}"></div>
+      <div><label style="${monLabelStyle(t)}">Name / description</label><input type="text" id="mon-pt-name" value="${esc(point.name)}" placeholder="e.g. Span 2 soffit crack" style="${monInputStyle(t)}"></div>
       <div><label style="${monLabelStyle(t)}">Type</label><select id="mon-pt-type" style="${monInputStyle(t)}">${MON_POINT_TYPES.map((x) => `<option ${point.type === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></div>
       <div><label style="${monLabelStyle(t)}">Status</label><select id="mon-pt-status" style="${monInputStyle(t)}"><option value="active" ${point.status !== 'closed' ? 'selected' : ''}>Active</option><option value="closed" ${point.status === 'closed' ? 'selected' : ''}>Closed</option></select></div>
     </div>
 
     <h3 style="font-size:15px; font-weight:700; margin:0 0 6px;">Where is it?</h3>
-    <p style="color:${t.muted}; font-size:12.5px; line-height:1.5; margin:0 0 8px; max-width:560px;">Pin the point on a photo, drawing or sketch of the structure so it can be found again.</p>
-    <div id="mon-pt-loc" style="margin-bottom:8px;">${monPinnedThumbHtml(locPhoto && (locPhoto.annotatedBlob || locPhoto.originalBlob), point.pin, 260)}</div>
-    <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:18px;">
-      <button id="mon-pt-setloc" style="${monBtnStyle(t)}">${locPhoto ? 'Change image' : 'Choose image'}</button>
-      ${locPhoto ? `<button id="mon-pt-annot" style="${monBtnStyle(t)}">Mark up image</button><button id="mon-pt-pin" style="${monBtnStyle(t)}">${point.pin ? 'Move pin' : 'Place pin'}</button>` : ''}
+    <p style="color:${t.muted}; font-size:12.5px; line-height:1.5; margin:0 0 8px; max-width:560px;">Mark it on a shared image of the structure. Points and areas can overlap (a crack inside a bulge); each is labelled ${esc(monLabel(point))} in black on white whatever colour you choose.</p>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px;">
+      <div><label style="${monLabelStyle(t)}">Image</label><select id="mon-pt-image" style="${monInputStyle(t)}"><option value="">— choose an image —</option>${Object.values(views).map((v) => `<option value="${v.rec.id}" ${point.imageId === v.rec.id ? 'selected' : ''}>${esc(v.rec.name)}</option>`).join('')}<option value="__new">+ New image…</option></select></div>
+      <div><label style="${monLabelStyle(t)}">Mark as</label><select id="mon-pt-shape" style="${monInputStyle(t)}"><option value="point" ${!isArea ? 'selected' : ''}>Point</option><option value="area" ${isArea ? 'selected' : ''}>Area</option></select></div>
     </div>
+    <div style="margin-bottom:10px;"><label style="${monLabelStyle(t)}">Colour</label><div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:6px;">${monColourSwatches(point.color, 'mon-pt')}</div></div>
+    <div id="mon-pt-loc" style="margin-bottom:8px;">${view ? monMarkedImageHtml(view, marksOnImage, point.id, 280) : `<div style="color:${t.muted}; font-size:13px;">No image chosen yet.</div>`}</div>
+    <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:6px;">
+      ${view ? `<button id="mon-pt-pin" style="${monBtnStyle(t)}">${placed ? 'Move ' : 'Place '}${esc(monLabel(point))} on image</button>` : ''}
+    </div>
+    ${view && !placed ? `<div style="color:${t.red}; font-size:12.5px; margin-bottom:12px;">${esc(monLabel(point))} is not placed on the image yet.</div>` : '<div style="margin-bottom:12px;"></div>'}
 
     <h3 style="font-size:15px; font-weight:700; margin:0 0 6px;">Master photo of the defect</h3>
     <p style="color:${t.muted}; font-size:12.5px; line-height:1.5; margin:0 0 8px; max-width:560px;">One clear photo that shows the inspector exactly what to look for.</p>
@@ -353,47 +550,28 @@ async function monRenderPointEditor(host, plan, insp, pointId, onBack) {
   shellWireAutosaveField(host.querySelector('#mon-pt-measure'), (v) => savePoint({ instrMeasure: v }));
   shellWireAutosaveField(host.querySelector('#mon-pt-how'), (v) => savePoint({ instrHow: v }));
 
-  // Location image: existing image / new photo / new sketch. Always stored as the point's own copy.
-  async function setLocationBlob(blob) {
-    const photo = await DB.addPointPhoto(point.id, insp.id, 'monitoringLocation', blob, 'Location');
-    if (point.locationPhotoId) await DB.delete('photos', point.locationPhotoId);
-    await savePoint({ locationPhotoId: photo.id, pin: null });
+  // Location: shared image, shape, colour, placement
+  const openPicker = () => {
+    const v = views[point.imageId];
+    if (!v) return;
+    monOpenMarkPicker(v, allPoints.filter((q) => q.id !== point.id && q.imageId === v.rec.id).map(monMarkOf), point, async (patch) => { await savePoint(patch); await rerender(); });
+  };
+  host.querySelector('#mon-pt-image').addEventListener('change', async (e) => {
+    const val = e.target.value;
+    if (val === '__new') {
+      monAddImageFlow(plan, insp, async (rec) => { await savePoint({ imageId: rec.id, pin: null, area: null }); await rerender(); openPicker(); });
+      e.target.value = point.imageId || '';
+      return;
+    }
+    await savePoint({ imageId: val || null, pin: null, area: null });
     await rerender();
-    monOpenPinPicker(blob, null, async (pin) => { await savePoint({ pin }); await rerender(); });
-  }
-  host.querySelector('#mon-pt-setloc').addEventListener('click', () => {
-    const sheet = el(`<div class="sheet-backdrop"><div class="sheet"><div class="sheet-handle"></div><h2>Location image</h2>
-      <button class="btn btn-primary btn-block" id="mon-l-existing">Use a photo or drawing from this inspection</button>
-      <button class="btn btn-secondary btn-block" id="mon-l-photo" style="margin-top:10px;">Take or choose a photo</button>
-      <button class="btn btn-secondary btn-block" id="mon-l-sketch" style="margin-top:10px;">Draw a sketch</button>
-      <button class="btn btn-ghost btn-block" id="mon-l-cancel" style="margin-top:10px;">Cancel</button></div></div>`);
-    presentOverlay(sheet);
-    sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
-    sheet.querySelector('#mon-l-cancel').addEventListener('click', () => sheet.remove());
-    sheet.querySelector('#mon-l-existing').addEventListener('click', () => { sheet.remove(); monOpenExistingImagePicker(insp.id, setLocationBlob); });
-    sheet.querySelector('#mon-l-photo').addEventListener('click', () => {
-      sheet.remove();
-      openPhotoSourceSheet({ onFiles: async (files) => { setLocationBlob(await normalizeImageFile(files[0])); } });
-    });
-    sheet.querySelector('#mon-l-sketch').addEventListener('click', async () => {
-      sheet.remove();
-      const blank = await createA4CanvasBlob();
-      const photo = await DB.addPointPhoto(point.id, insp.id, 'monitoringLocation', blank, 'Location sketch');
-      if (point.locationPhotoId) await DB.delete('photos', point.locationPhotoId);
-      await savePoint({ locationPhotoId: photo.id, pin: null });
-      await openAnnotator(photo.id, async () => {
-        const fresh = await DB.get('photos', photo.id);
-        await rerender();
-        monOpenPinPicker(fresh.annotatedBlob || fresh.originalBlob, null, async (pin) => { await savePoint({ pin }); await rerender(); });
-      });
-    });
+    if (val) openPicker();
   });
-  const annotBtn = host.querySelector('#mon-pt-annot');
-  if (annotBtn) annotBtn.addEventListener('click', () => openAnnotator(locPhoto.id, rerender));
+  host.querySelector('#mon-pt-shape').addEventListener('change', async (e) => { await savePoint({ shape: e.target.value }); await rerender(); });
+  host.querySelectorAll('.mon-pt-sw').forEach((b) => b.addEventListener('click', async () => { await savePoint({ color: b.dataset.c }); await rerender(); }));
+  host.querySelector('.mon-pt-custom').addEventListener('change', async (e) => { await savePoint({ color: e.target.value }); await rerender(); });
   const pinBtn = host.querySelector('#mon-pt-pin');
-  if (pinBtn) pinBtn.addEventListener('click', () => {
-    monOpenPinPicker(locPhoto.annotatedBlob || locPhoto.originalBlob, point.pin, async (pin) => { await savePoint({ pin }); await rerender(); });
-  });
+  if (pinBtn) pinBtn.addEventListener('click', openPicker);
 
   // Master photo
   host.querySelector('#mon-pt-setmaster').addEventListener('click', () => {
@@ -480,7 +658,7 @@ function monRenderFilterControls(container, points, filter, onChange) {
     <div style="margin-bottom:12px;">
       <label style="${monLabelStyle(t)}">Points</label>
       <label style="display:flex; align-items:center; gap:8px; font-size:14px; margin-top:6px;"><input type="checkbox" id="mon-f-all" ${all ? 'checked' : ''} style="width:18px; height:18px;"> All points (whole structure)</label>
-      <div id="mon-f-list" style="margin-top:4px; ${all ? 'opacity:.45; pointer-events:none;' : ''}">${points.map((p) => `<label style="display:flex; align-items:center; gap:8px; font-size:14px; padding:4px 0;"><input type="checkbox" class="mon-f-pt" data-id="${p.id}" ${!all && filter.pointIds.includes(p.id) ? 'checked' : ''} style="width:18px; height:18px;"> ${esc(p.name || 'Unnamed point')}${p.status === 'closed' ? ' <span style="color:' + t.muted + ';">(closed)</span>' : ''}</label>`).join('') || `<div style="color:${t.muted}; font-size:13px;">No points yet.</div>`}</div>
+      <div id="mon-f-list" style="margin-top:4px; ${all ? 'opacity:.45; pointer-events:none;' : ''}">${points.map((p) => `<label style="display:flex; align-items:center; gap:8px; font-size:14px; padding:4px 0;"><input type="checkbox" class="mon-f-pt" data-id="${p.id}" ${!all && filter.pointIds.includes(p.id) ? 'checked' : ''} style="width:18px; height:18px;"> ${esc(monPointTitle(p))}${p.status === 'closed' ? ' <span style="color:' + t.muted + ';">(closed)</span>' : ''}</label>`).join('') || `<div style="color:${t.muted}; font-size:13px;">No points yet.</div>`}</div>
     </div>
     <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
       <div><label style="${monLabelStyle(t)}">From</label><input type="date" id="mon-f-from" value="${esc(filter.from || '')}" style="${monInputStyle(t)}"></div>
@@ -521,7 +699,37 @@ async function monOpenHistoryExportSheet(plan) {
   });
 }
 
-// ---- Specification editor: plan + points list ----
+// ---- A shared location image: rename, mark up, delete; shows every point and area on it ----
+async function monRenderImageDetail(host, plan, insp, imageId, onBack) {
+  const t = SHELL_TOKENS;
+  const views = await monLoadImageViews(plan.id);
+  const view = views[imageId];
+  if (!view) { onBack(); return; }
+  const points = (await DB.listMonitoringPoints(plan.id)).filter((p) => p.imageId === imageId);
+  host.innerHTML = `
+    <button id="mon-im-back" style="background:none; border:none; color:${t.muted}; font-size:13px; font-weight:650; margin-bottom:10px; padding:0;">‹ Back</button>
+    <h2 style="font-size:20px; font-weight:700; margin:0 0 12px;">Location image</h2>
+    <div style="margin-bottom:12px;"><label style="${monLabelStyle(t)}">Name</label><input type="text" id="mon-im-name" value="${esc(view.rec.name)}" style="${monInputStyle(t)}"></div>
+    <div style="margin-bottom:12px;">${monMarkedImageHtml(view, points.map(monMarkOf), null, 420)}</div>
+    <div style="font-size:13px; color:${t.muted}; margin-bottom:12px;">${points.length ? points.map((p) => esc(monPointTitle(p))).join('<br>') : 'No points or areas on this image yet. Add one from a monitoring point.'}</div>
+    <div style="display:flex; flex-wrap:wrap; gap:8px;">
+      <button id="mon-im-markup" style="${monBtnStyle(t)}">Mark up image</button>
+      <button id="mon-im-del" style="background:none; border:1px solid ${t.red}; color:${t.red}; border-radius:8px; padding:8px 14px; font-size:13px; font-weight:650;">Delete image</button>
+    </div>`;
+  host.querySelector('#mon-im-back').addEventListener('click', onBack);
+  shellWireAutosaveField(host.querySelector('#mon-im-name'), (v) => DB.updateMonitoringImage(imageId, { name: v || 'Location image' }));
+  host.querySelector('#mon-im-markup').addEventListener('click', () => openAnnotator(view.photo.id, async () => {
+    await DB.updateMonitoringImage(imageId, { w: null, h: null });
+    monRenderImageDetail(host, plan, insp, imageId, onBack);
+  }));
+  host.querySelector('#mon-im-del').addEventListener('click', async () => {
+    if (!confirm(points.length ? `Delete this image? The ${points.length} point${points.length === 1 ? '' : 's'}/area${points.length === 1 ? '' : 's'} on it will be kept but will need placing on another image.` : 'Delete this image?')) return;
+    await DB.deleteMonitoringImage(imageId);
+    onBack();
+  });
+}
+
+// ---- Specification editor: plan + images + points list ----
 async function shellEditMonitoringSpecSection(body, section) {
   const t = SHELL_TOKENS;
   const { insp, plan: loaded } = await monLoadPlanFor(shellState.selectedInspectionId);
@@ -556,10 +764,15 @@ async function shellEditMonitoringSpecSection(body, section) {
       <div style="margin-bottom:14px;"><label style="${monLabelStyle(t)}">Reason for monitoring and assessment findings</label><textarea id="mon-reason" rows="4" placeholder="Basis of the sub-standard status: location, nature and degree of inadequacy, capacity factor C and required K, level of assessment, condition and distress." style="${monInputStyle(t)} resize:vertical;">${esc(plan.reason || '')}</textarea></div>
       <div style="margin-bottom:20px;"><label style="${monLabelStyle(t)}">Anticipated failure mode(s)</label><textarea id="mon-failure" rows="3" placeholder="Anticipated mode(s) of failure, how it progresses from local distress to collapse, likelihood and consequence." style="${monInputStyle(t)} resize:vertical;">${esc(plan.failureMode || '')}</textarea></div>
 
-      <h3 style="font-size:15px; font-weight:700; margin:0 0 6px;">Monitoring points</h3>
-      <p style="color:${t.muted}; font-size:12.5px; line-height:1.5; margin:0 0 10px; max-width:560px;">Each item, problem or area that needs monitoring. Locate it, add a master photo and instructions on the first visit; every visit then records a new reading against it.</p>
+      <h3 style="font-size:15px; font-weight:700; margin:0 0 6px;">Location images</h3>
+      <p style="color:${t.muted}; font-size:12.5px; line-height:1.5; margin:0 0 10px; max-width:560px;">Photos, drawings or sketches that show where the points and areas are. Use as few as you can: for example one photo per abutment carries all of its points.</p>
+      <div id="mon-images"></div>
+      <button id="mon-add-image" style="width:100%; border:1.5px dashed ${t.line}; background:none; border-radius:10px; padding:12px; font-size:13.5px; font-weight:650; color:${t.muted}; margin:8px 0 22px;">+ Add location image</button>
+
+      <h3 style="font-size:15px; font-weight:700; margin:0 0 6px;">Monitoring points and areas</h3>
+      <p style="color:${t.muted}; font-size:12.5px; line-height:1.5; margin:0 0 10px; max-width:560px;">Each item, problem or area that needs monitoring is numbered MP1, MP2… Mark it on a location image, add a master photo and instructions on the first visit; every visit then records a new reading against it.</p>
       <div id="mon-points"></div>
-      <button id="mon-add-point" style="width:100%; border:1.5px dashed ${t.line}; background:none; border-radius:10px; padding:12px; font-size:13.5px; font-weight:650; color:${t.muted}; margin-top:8px;">+ Add monitoring point</button>
+      <button id="mon-add-point" style="width:100%; border:1.5px dashed ${t.line}; background:none; border-radius:10px; padding:12px; font-size:13.5px; font-weight:650; color:${t.muted}; margin-top:8px;">+ Add monitoring point or area</button>
       <button id="mon-export" style="${monBtnStyle(t)} margin-top:16px;">Generate a history report…</button>
     `;
     host.querySelector('#mon-class').addEventListener('change', async (e) => { await savePlan({ monitoringClass: Number(e.target.value) }); host.querySelector('#mon-class-detail').textContent = MON_CLASS_INFO[plan.monitoringClass].detail; });
@@ -569,20 +782,30 @@ async function shellEditMonitoringSpecSection(body, section) {
     shellWireAutosaveField(host.querySelector('#mon-reason'), (v) => savePlan({ reason: v }));
     shellWireAutosaveField(host.querySelector('#mon-failure'), (v) => savePlan({ failureMode: v }));
 
+    const views = await monLoadImageViews(plan.id);
+    const imgBox = host.querySelector('#mon-images');
+    imgBox.innerHTML = Object.values(views).map((v) => {
+      const onIt = points.filter((p) => p.imageId === v.rec.id);
+      return `<div class="mon-im-card" data-id="${v.rec.id}" style="display:flex; gap:12px; align-items:center; border:1px solid ${t.line}; border-radius:10px; padding:10px; margin-bottom:8px; background:#fff; cursor:pointer;"><div style="width:96px; flex:none;">${monMarkedImageHtml(v, onIt.map(monMarkOf), null, 64)}</div><div style="flex:1; min-width:0;"><div style="font-weight:700; font-size:14px;">${esc(v.rec.name)}</div><div style="font-size:12px; color:${t.muted};">${onIt.length ? onIt.map((p) => esc(monLabel(p))).join(', ') : 'nothing marked yet'}</div></div></div>`;
+    }).join('') || `<div style="color:${t.muted}; font-size:13.5px;">No location images yet.</div>`;
+    imgBox.querySelectorAll('.mon-im-card').forEach((c) => c.addEventListener('click', () => monRenderImageDetail(host, plan, insp, c.dataset.id, renderMain)));
+    host.querySelector('#mon-add-image').addEventListener('click', () => monAddImageFlow(plan, insp, () => renderMain()));
+
     const list = host.querySelector('#mon-points');
     const cards = [];
     for (const p of points) {
-      const loc = p.locationPhotoId ? await DB.get('photos', p.locationPhotoId) : null;
+      const view = p.imageId ? views[p.imageId] : null;
       const rag = monLatestRag(p, readings.filter((r) => r.pointId === p.id), visits.filter((v) => v.pointId === p.id));
+      const located = !!monMarkGeometry(p);
       cards.push(`<div class="mon-pt-card" data-id="${p.id}" style="display:flex; gap:12px; align-items:center; border:1px solid ${t.line}; border-radius:10px; padding:10px; margin-bottom:8px; background:#fff; cursor:pointer;">
-        <div style="width:72px; flex:none;">${monPinnedThumbHtml(loc && (loc.annotatedBlob || loc.originalBlob), p.pin, 56)}</div>
-        <div style="flex:1; min-width:0;"><div style="font-weight:700; font-size:14px;">${esc(p.name) || 'Unnamed point'}</div><div style="font-size:12px; color:${t.muted};">${esc(p.type)} · ${(p.parameters || []).length} parameter${(p.parameters || []).length === 1 ? '' : 's'}${p.status === 'closed' ? ' · closed' : ''}${!p.pin ? ' · <span style="color:' + t.red + ';">not located</span>' : ''}${!p.masterPhotoId ? ' · <span style="color:' + t.red + ';">no master photo</span>' : ''}</div></div>
+        <div style="width:96px; flex:none;">${monMarkedImageHtml(view, view ? points.filter((q) => q.imageId === view.rec.id).map(monMarkOf) : [], p.id, 64)}</div>
+        <div style="flex:1; min-width:0;"><div style="font-weight:700; font-size:14px;"><span style="background:#fff; color:#000; border:2px solid ${esc(p.color || '#d32f2f')}; border-radius:5px; padding:0 6px; margin-right:6px;">${esc(monLabel(p))}</span>${esc(p.name) || 'Unnamed'}</div><div style="font-size:12px; color:${t.muted};">${p.shape === 'area' ? 'Area' : 'Point'} · ${esc(p.type)} · ${(p.parameters || []).length} parameter${(p.parameters || []).length === 1 ? '' : 's'}${p.status === 'closed' ? ' · closed' : ''}${!located ? ' · <span style="color:' + t.red + ';">not placed</span>' : ''}${!p.masterPhotoId ? ' · <span style="color:' + t.red + ';">no master photo</span>' : ''}</div></div>
         <div>${monRagBadge(rag)}</div></div>`);
     }
     list.innerHTML = cards.join('') || `<div style="color:${t.muted}; font-size:13.5px;">No monitoring points yet.</div>`;
     list.querySelectorAll('.mon-pt-card').forEach((c) => c.addEventListener('click', () => monRenderPointEditor(host, plan, insp, c.dataset.id, renderMain)));
     host.querySelector('#mon-add-point').addEventListener('click', async () => {
-      const p = await DB.addMonitoringPoint(plan.id, insp.id, { name: `Point ${points.length + 1}` });
+      const p = await DB.addMonitoringPoint(plan.id, insp.id, {});
       monRenderPointEditor(host, plan, insp, p.id, renderMain);
     });
     host.querySelector('#mon-export').addEventListener('click', () => monOpenHistoryExportSheet(plan));
@@ -605,7 +828,7 @@ async function shellEditMonitoringReadingsSection(body, section) {
       <p style="color:${t.muted}; font-size:13px; line-height:1.5; margin:0 0 14px;">Visit date: <strong>${esc(fmtDate(insp.date))}</strong>. Record a reading, note and photos for each point. Readings save as you go and are judged against the trigger levels.</p>
       <div id="mon-banner"></div>
       <div id="mon-visit-cards"></div>
-      <button id="mon-v-addpoint" style="width:100%; border:1.5px dashed ${t.line}; background:none; border-radius:10px; padding:12px; font-size:13.5px; font-weight:650; color:${t.muted}; margin-top:8px;">+ New monitoring point</button>`;
+      <button id="mon-v-addpoint" style="width:100%; border:1.5px dashed ${t.line}; background:none; border-radius:10px; padding:12px; font-size:13.5px; font-weight:650; color:${t.muted}; margin-top:8px;">+ New monitoring point or area</button>`;
     const box = host.querySelector('#mon-visit-cards');
     if (!points.length) box.innerHTML = `<div style="color:${t.muted}; font-size:13.5px; max-width:460px;">No monitoring points yet. On the first visit, add each item that needs monitoring, locate it on an image, add a master photo and the instructions.</div>`;
     for (const p of points) {
@@ -617,7 +840,7 @@ async function shellEditMonitoringReadingsSection(body, section) {
     }
     await refreshBanner();
     host.querySelector('#mon-v-addpoint').addEventListener('click', async () => {
-      const p = await DB.addMonitoringPoint(plan.id, insp.id, { name: `Point ${(await DB.listMonitoringPoints(plan.id)).length + 1}` });
+      const p = await DB.addMonitoringPoint(plan.id, insp.id, {});
       monRenderPointEditor(host, plan, insp, p.id, renderMain);
     });
   }
@@ -633,7 +856,7 @@ async function shellEditMonitoringReadingsSection(body, section) {
     }
     const red = flagged.some((f) => f.s.rag === 'red');
     host.querySelector('#mon-banner').innerHTML = flagged.length
-      ? `<div style="background:${red ? '#fdecec' : '#fff7e6'}; border:1px solid ${red ? '#e49a9a' : '#f0c36d'}; border-radius:8px; padding:10px 12px; margin-bottom:14px; font-size:13px; line-height:1.5;"><strong>Trigger level reached:</strong> ${flagged.map((f) => esc((f.p.name || 'Point') + ' – ' + (f.s.param.name || 'parameter')) + ' (' + MON_RAG_LABELS[f.s.rag] + ')').join(', ')}. Record the action taken, who was told and when in the "Trigger Exceedances and Actions Taken" section.${flagged.map((f) => f.s.param.action ? `<div style="margin-top:6px;"><em>${esc(f.p.name)} – ${esc(f.s.param.name)}:</em> ${esc(f.s.param.action)}</div>` : '').join('')}</div>`
+      ? `<div style="background:${red ? '#fdecec' : '#fff7e6'}; border:1px solid ${red ? '#e49a9a' : '#f0c36d'}; border-radius:8px; padding:10px 12px; margin-bottom:14px; font-size:13px; line-height:1.5;"><strong>Trigger level reached:</strong> ${flagged.map((f) => esc(monPointTitle(f.p) + ' – ' + (f.s.param.name || 'parameter')) + ' (' + MON_RAG_LABELS[f.s.rag] + ')').join(', ')}. Record the action taken, who was told and when in the "Trigger Exceedances and Actions Taken" section.${flagged.map((f) => f.s.param.action ? `<div style="margin-top:6px;"><em>${esc(monLabel(f.p))} – ${esc(f.s.param.name)}:</em> ${esc(f.s.param.action)}</div>` : '').join('')}</div>`
       : '';
   }
 
@@ -643,19 +866,21 @@ async function shellEditMonitoringReadingsSection(body, section) {
     const visit = await DB.getPointVisit(pointId, insp.id);
     const photos = await DB.listPointPhotos(pointId, 'monitoringVisit', insp.id);
     const master = point.masterPhotoId ? await DB.get('photos', point.masterPhotoId) : null;
-    const loc = point.locationPhotoId ? await DB.get('photos', point.locationPhotoId) : null;
+    const views = await monLoadImageViews(plan.id);
+    const view = point.imageId ? views[point.imageId] || null : null;
+    const onImage = view ? (await DB.listMonitoringPoints(plan.id)).filter((q) => q.imageId === view.rec.id).map(monMarkOf) : [];
     const summary = monBuildSummary(point, readings, insp.id);
     const overall = monWorstRag(summary.map((s) => s.rag));
     const hasInstr = point.instrWhat || point.instrMeasure || point.instrHow;
     card.innerHTML = `
       <div style="display:flex; gap:12px; align-items:center;">
         ${master ? `<img src="${blobUrl(master.annotatedBlob || master.originalBlob)}" style="width:64px; height:64px; object-fit:cover; border-radius:8px; flex:none;">` : ''}
-        <div style="flex:1; min-width:0;"><div style="font-weight:700; font-size:14.5px;">${esc(point.name) || 'Unnamed point'}</div><div style="font-size:12px; color:${t.muted};">${esc(point.type)}</div></div>
+        <div style="flex:1; min-width:0;"><div style="font-weight:700; font-size:14.5px;"><span style="background:#fff; color:#000; border:2px solid ${esc(point.color || '#d32f2f')}; border-radius:5px; padding:0 6px; margin-right:6px;">${esc(monLabel(point))}</span>${esc(point.name) || 'Unnamed'}</div><div style="font-size:12px; color:${t.muted};">${point.shape === 'area' ? 'Area' : 'Point'} · ${esc(point.type)}</div></div>
         ${monRagBadge(overall)}
         <button class="mon-edit-point" style="${monBtnStyle(t)}">Edit point</button>
       </div>
-      ${hasInstr || loc ? `<details style="margin-top:8px;"><summary style="font-size:13px; font-weight:650; color:${t.muted}; cursor:pointer;">Where it is and how to measure it</summary>
-        <div style="margin-top:8px;">${loc ? monPinnedThumbHtml(loc.annotatedBlob || loc.originalBlob, point.pin, 220) : ''}</div>
+      ${hasInstr || view ? `<details style="margin-top:8px;"><summary style="font-size:13px; font-weight:650; color:${t.muted}; cursor:pointer;">Where it is and how to measure it</summary>
+        <div style="margin-top:8px;">${view ? monMarkedImageHtml(view, onImage, point.id, 260) : ''}</div>
         ${master ? `<div style="margin-top:8px;"><img src="${blobUrl(master.annotatedBlob || master.originalBlob)}" style="max-width:100%; max-height:220px; border-radius:8px;"></div>` : ''}
         ${point.instrWhat ? `<p style="font-size:13.5px; margin:8px 0 0;"><strong>Monitoring:</strong> ${esc(point.instrWhat)}</p>` : ''}
         ${point.instrMeasure ? `<p style="font-size:13.5px; margin:6px 0 0;"><strong>Measure:</strong> ${esc(point.instrMeasure)}</p>` : ''}
@@ -760,13 +985,13 @@ async function shellRenderMonitoringPreviewBlock(insp, section, heading) {
       ${plan.reason ? `<p style="font-size:14px;"><strong>Reason and assessment findings.</strong> ${esc(plan.reason)}</p>` : ''}
       ${plan.failureMode ? `<p style="font-size:14px;"><strong>Anticipated failure mode.</strong> ${esc(plan.failureMode)}</p>` : ''}
       ${points.length ? `<table style="width:100%; font-size:12.5px; border-collapse:collapse; font-family:-apple-system,sans-serif;"><tr style="border-bottom:1px solid ${t.line};">${th('Point')}${th('Type')}${th('Parameters (Amber / Red)', true)}</tr>
-      ${points.map((p) => `<tr style="border-bottom:1px solid ${t.line}; vertical-align:top;"><td style="padding:5px 6px 5px 0;">${esc(p.name) || 'Unnamed'}</td><td style="padding:5px 6px 5px 0;">${esc(p.type)}</td><td style="padding:5px 0;">${(p.parameters || []).map((x) => esc(x.name) + (x.unit ? ' (' + esc(x.unit) + ')' : '') + ': ' + monFmtNum(monNum(x.amber)) + ' / ' + monFmtNum(monNum(x.red))).join('<br>') || '—'}</td></tr>`).join('')}</table>` : `<div style="color:${t.muted}; font-size:13.5px;">No monitoring points defined.</div>`}`;
+      ${points.map((p) => `<tr style="border-bottom:1px solid ${t.line}; vertical-align:top;"><td style="padding:5px 6px 5px 0;">${esc(monPointTitle(p))}</td><td style="padding:5px 6px 5px 0;">${esc(p.type)}</td><td style="padding:5px 0;">${(p.parameters || []).map((x) => esc(x.name) + (x.unit ? ' (' + esc(x.unit) + ')' : '') + ': ' + monFmtNum(monNum(x.amber)) + ' / ' + monFmtNum(monNum(x.red))).join('<br>') || '—'}</td></tr>`).join('')}</table>` : `<div style="color:${t.muted}; font-size:13.5px;">No monitoring points defined.</div>`}`;
   }
   if (section.type === 'monitoringReadings') {
     const lines = [];
     for (const p of points.filter((x) => x.status !== 'closed')) {
       for (const s of monBuildSummary(p, readings.filter((r) => r.pointId === p.id), insp.id)) {
-        lines.push(`<tr style="border-bottom:1px solid ${t.line};"><td style="padding:5px 6px 5px 0;">${esc(p.name) || 'Unnamed'}</td><td style="padding:5px 6px 5px 0;">${esc(s.param.name)}${s.param.unit ? ' (' + esc(s.param.unit) + ')' : ''}</td><td style="padding:5px 6px 5px 0;">${s.previous ? monFmtNum(s.previous.value) : '—'}</td><td style="padding:5px 6px 5px 0;"><strong>${s.current ? monFmtNum(s.current.value) : '—'}</strong></td><td style="padding:5px 6px 5px 0;">${monSigned(s.changePrev)}</td><td style="padding:5px 0;">${monRagBadge(s.rag)}</td></tr>`);
+        lines.push(`<tr style="border-bottom:1px solid ${t.line};"><td style="padding:5px 6px 5px 0;">${esc(monPointTitle(p))}</td><td style="padding:5px 6px 5px 0;">${esc(s.param.name)}${s.param.unit ? ' (' + esc(s.param.unit) + ')' : ''}</td><td style="padding:5px 6px 5px 0;">${s.previous ? monFmtNum(s.previous.value) : '—'}</td><td style="padding:5px 6px 5px 0;"><strong>${s.current ? monFmtNum(s.current.value) : '—'}</strong></td><td style="padding:5px 6px 5px 0;">${monSigned(s.changePrev)}</td><td style="padding:5px 0;">${monRagBadge(s.rag)}</td></tr>`);
       }
     }
     return `${heading}${lines.length ? `<table style="width:100%; font-size:12.5px; border-collapse:collapse; font-family:-apple-system,sans-serif;"><tr style="border-bottom:1px solid ${t.line};">${th('Point')}${th('Parameter')}${th('Previous')}${th('Current')}${th('Δ prev.')}${th('Status', true)}</tr>${lines.join('')}</table>` : `<div style="color:${t.muted}; font-size:13.5px;">No readings recorded yet.</div>`}`;
@@ -777,7 +1002,7 @@ async function shellRenderMonitoringPreviewBlock(insp, section, heading) {
   const lines = sel.map((p) => {
     const h = monBuildPointHistory(p, readings.filter((r) => r.pointId === p.id), visits.filter((v) => v.pointId === p.id), range);
     const last = h.rows.length ? h.rows[h.rows.length - 1] : null;
-    return `<tr style="border-bottom:1px solid ${t.line};"><td style="padding:5px 6px 5px 0;">${esc(p.name) || 'Unnamed'}</td><td style="padding:5px 6px 5px 0;">${h.rows.length} visit${h.rows.length === 1 ? '' : 's'}</td><td style="padding:5px 6px 5px 0;">${last ? esc(fmtDate(last.date)) : '—'}</td><td style="padding:5px 0;">${monRagBadge(last && last.rag)}</td></tr>`;
+    return `<tr style="border-bottom:1px solid ${t.line};"><td style="padding:5px 6px 5px 0;">${esc(monPointTitle(p))}</td><td style="padding:5px 6px 5px 0;">${h.rows.length} visit${h.rows.length === 1 ? '' : 's'}</td><td style="padding:5px 6px 5px 0;">${last ? esc(fmtDate(last.date)) : '—'}</td><td style="padding:5px 0;">${monRagBadge(last && last.rag)}</td></tr>`;
   });
   return `${heading}<div style="font-size:13px; color:${t.muted}; margin-bottom:8px;">${esc(monFilterText(points, { pointIds: section.pointIds, from: range.from, to: range.to }, fmtDate))}</div>${lines.length ? `<table style="width:100%; font-size:12.5px; border-collapse:collapse; font-family:-apple-system,sans-serif;"><tr style="border-bottom:1px solid ${t.line};">${th('Point')}${th('Records')}${th('Last visit')}${th('Latest status', true)}</tr>${lines.join('')}</table>` : `<div style="color:${t.muted}; font-size:13.5px;">No monitoring points yet.</div>`}`;
 }
@@ -785,7 +1010,7 @@ async function shellRenderMonitoringPreviewBlock(insp, section, heading) {
 // ---------------------------------------------------------------------------------------------
 // 3. Loading data for reports (images are scaled down so many photos stay within memory)
 // ---------------------------------------------------------------------------------------------
-async function monScaledImage(blob, maxDim, pin) {
+async function monScaledImage(blob, maxDim, markOpts) {
   const bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });
   const sw = bitmap.width, sh = bitmap.height;
   const k = Math.min(1, maxDim / Math.max(sw, sh));
@@ -796,21 +1021,18 @@ async function monScaledImage(blob, maxDim, pin) {
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
   ctx.drawImage(bitmap, 0, 0, w, h);
   if (bitmap.close) bitmap.close();
-  if (pin) {
-    const cx = pin.x * w, cy = pin.y * h, r = Math.max(12, Math.max(w, h) * 0.022);
-    ctx.lineWidth = Math.max(3, r * 0.28);
-    ctx.strokeStyle = '#fff'; ctx.beginPath(); ctx.arc(cx, cy, r + ctx.lineWidth, 0, Math.PI * 2); ctx.stroke();
-    ctx.strokeStyle = '#c81e1e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(cx - r * 1.5, cy); ctx.lineTo(cx + r * 1.5, cy); ctx.moveTo(cx, cy - r * 1.5); ctx.lineTo(cx, cy + r * 1.5); ctx.stroke();
+  if (markOpts && markOpts.marks && markOpts.marks.length) {
+    const { VW, prims } = monMarkPrims(markOpts.marks, w, h, { highlightId: markOpts.highlightId });
+    monDrawPrims(ctx, prims, w / VW);
   }
   return { url: canvas.toDataURL('image/jpeg', 0.82), w, h };
 }
 
-async function monPhotoImage(photoId, maxDim, pin) {
+async function monPhotoImage(photoId, maxDim) {
   if (!photoId) return null;
   const p = await DB.get('photos', photoId);
   if (!p) return null;
-  try { return await monScaledImage(p.annotatedBlob || p.originalBlob, maxDim, pin); } catch (e) { return null; }
+  try { return await monScaledImage(p.annotatedBlob || p.originalBlob, maxDim, null); } catch (e) { return null; }
 }
 
 // History data for a plan, filtered.
@@ -818,12 +1040,15 @@ async function monLoadHistoryData(plan, filter) {
   const allPoints = await DB.listMonitoringPoints(plan.id);
   const visits = await DB.listMonitoringVisits(plan.id);
   const readings = await DB.listMonitoringReadings(plan.id);
+  const views = await monLoadImageViews(plan.id);
   const selected = monSelectPoints(allPoints, filter);
   const out = [];
   for (const point of selected) {
     const h = monBuildPointHistory(point, readings.filter((r) => r.pointId === point.id), visits.filter((v) => v.pointId === point.id), { from: filter && filter.from, to: filter && filter.to });
-    const locImg = await monPhotoImage(point.locationPhotoId, 1400, point.pin);
-    const masterImg = await monPhotoImage(point.masterPhotoId, 900, null);
+    const view = point.imageId ? views[point.imageId] : null;
+    let locImg = null;
+    if (view) { try { locImg = await monScaledImage(view.blob, 1400, { marks: allPoints.filter((q) => q.imageId === view.rec.id).map(monMarkOf), highlightId: point.id }); } catch (e) { locImg = null; } }
+    const masterImg = await monPhotoImage(point.masterPhotoId, 900);
     const allPhotos = await DB.listPointPhotos(point.id, 'monitoringVisit');
     for (const row of h.rows) {
       row.photos = [];
@@ -834,6 +1059,19 @@ async function monLoadHistoryData(plan, filter) {
     out.push({ point, locImg, masterImg, rows: h.rows, baselines: h.baselines });
   }
   return { plan, allPoints, points: out, filter: filter || {} };
+}
+
+// Every location image with all of its points and areas marked (for the specification section).
+async function monLoadImagesData(plan) {
+  const points = await DB.listMonitoringPoints(plan.id);
+  const views = await monLoadImageViews(plan.id);
+  const out = [];
+  for (const v of Object.values(views)) {
+    const marks = points.filter((q) => q.imageId === v.rec.id).map(monMarkOf);
+    if (!marks.some((m) => monMarkGeometry(m))) continue;
+    try { out.push({ name: v.rec.name, img: await monScaledImage(v.blob, 1400, { marks, highlightId: null }) }); } catch (e) { /* skip */ }
+  }
+  return out;
 }
 
 // This visit: each active point with its summary, note and photos.
@@ -910,7 +1148,7 @@ function monPdfPhotoGrid(doc, items, y, opts, cols) {
   return y;
 }
 
-function drawMonitoringSpecPdf(doc, plan, points, y, opts) {
+function drawMonitoringSpecPdf(doc, plan, points, y, opts, images) {
   const { margin } = opts;
   if (doc.autoTable) {
     doc.autoTable({
@@ -935,7 +1173,7 @@ function drawMonitoringSpecPdf(doc, plan, points, y, opts) {
       startY: y - 6, margin: { left: margin, right: margin },
       head: [['Point', 'Instructions', 'Parameters and triggers']],
       body: points.map((p) => [
-        (p.name || 'Unnamed') + '\n' + p.type + (p.status === 'closed' ? ' (closed)' : ''),
+        monPointTitle(p) + '\n' + (p.shape === 'area' ? 'Area' : 'Point') + ' · ' + p.type + (p.status === 'closed' ? ' (closed)' : ''),
         [p.instrWhat && 'Monitoring: ' + p.instrWhat, p.instrMeasure && 'Measure: ' + p.instrMeasure, p.instrHow && 'How: ' + p.instrHow].filter(Boolean).join('\n') || '—',
         (p.parameters || []).map((x) => `${x.name || 'Parameter'}${x.unit ? ' (' + x.unit + ')' : ''}${x.accuracy ? ', ' + x.accuracy : ''}: ${x.basis === 'change' ? 'change from baseline' : 'value'}; Amber ${monFmtNum(monNum(x.amber))}, Red ${monFmtNum(monNum(x.red))}${x.action ? '\nAction: ' + x.action : ''}`).join('\n\n') || '—'
       ]),
@@ -944,6 +1182,10 @@ function drawMonitoringSpecPdf(doc, plan, points, y, opts) {
       columnStyles: { 0: { cellWidth: 95 } }
     });
     y = doc.lastAutoTable.finalY + 12;
+  }
+  if (images && images.length) {
+    y = monPdfSubheading(doc, 'Location of monitoring points and areas', y, opts);
+    y = monPdfPhotoGrid(doc, images.map((i) => ({ img: i.img, caption: i.name })), y, opts, 2);
   }
   return y;
 }
@@ -954,10 +1196,10 @@ function drawMonitoringReadingsPdf(doc, visitData, y, opts) {
   const body = [];
   const ragByRow = [];
   visitData.rows.forEach((r) => {
-    if (!r.summary.length) { body.push([r.point.name || dash, 'No parameters', dash, dash, dash, dash, dash, dash]); ragByRow.push(null); }
+    if (!r.summary.length) { body.push([monPointTitle(r.point), 'No parameters', dash, dash, dash, dash, dash, dash]); ragByRow.push(null); }
     r.summary.forEach((s) => {
       body.push([
-        r.point.name || dash,
+        monPointTitle(r.point),
         (s.param.name || dash) + (s.param.unit ? ' (' + s.param.unit + ')' : ''),
         monFmtNum(s.baseline),
         s.previous ? monFmtNum(s.previous.value) : dash,
@@ -990,7 +1232,7 @@ function drawMonitoringReadingsPdf(doc, visitData, y, opts) {
   }
   for (const r of visitData.rows) {
     if (!r.note && !r.photos.length) continue;
-    y = monPdfSubheading(doc, r.point.name || 'Point', y, opts);
+    y = monPdfSubheading(doc, monPointTitle(r.point), y, opts);
     y = monPdfLabelled(doc, 'Notes', r.note, y, opts);
     if (r.photos.length) y = monPdfPhotoGrid(doc, r.photos, y, opts, 3);
     y += 6;
@@ -1007,14 +1249,14 @@ function drawMonitoringHistoryPdf(doc, hData, y, opts) {
     if (idx > 0) { doc.addPage(); y = margin; }
     y = monPdfRoom(doc, y, 120, opts);
     doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(28, 31, 38);
-    doc.text(point.name || 'Unnamed point', margin, y);
+    doc.text(monPointTitle(point), margin, y);
     doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(91, 96, 105);
-    doc.text(`${point.type}${point.status === 'closed' ? ' · closed' : ''}`, margin, y + 13);
+    doc.text(`${point.shape === 'area' ? 'Area' : 'Point'} · ${point.type}${point.status === 'closed' ? ' · closed' : ''}`, margin, y + 13);
     y += 28;
 
     if (locImg || masterImg) {
       const items = [];
-      if (locImg) items.push({ img: locImg, caption: 'Location' });
+      if (locImg) items.push({ img: locImg, caption: 'Location (' + monLabel(point) + ' highlighted)' });
       if (masterImg) items.push({ img: masterImg, caption: 'Master photo' });
       y = monPdfPhotoGrid(doc, items, y, opts, 2);
     }
