@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '1.0.6.25';
+const APP_VERSION = '1.0.6.26';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -723,7 +723,7 @@ function openNewInspectionSheet(onCreated) {
 
   DB.seedDefaultReportTemplate().then(() => DB.listReportTemplates()).then((templates) => {
     const select = sheet.querySelector('#f-template');
-    const wantId = () => (sheet.querySelector('#f-inspectionType').value === 'Monitoring' ? 'monitoring-template' : 'default-template');
+    const wantId = () => (sheet.querySelector('#f-inspectionType').value === 'Monitoring' ? 'monitoring-setup-template' : 'default-template');
     select.innerHTML = templates.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
     select.value = wantId();
     sheet.querySelector('#f-inspectionType').addEventListener('change', () => { select.value = wantId(); });
@@ -735,6 +735,17 @@ function openNewInspectionSheet(onCreated) {
     const structureName = sheet.querySelector('#f-structureName').value.trim();
     if (!structureName) { toast('Enter a structure name'); return; }
     const coords = locationField.getCoords();
+    if (sheet.querySelector('#f-inspectionType').value === 'Monitoring') {
+      // One monitoring set-up per structure: its visits are added as records inside it.
+      const existingPlan = await DB.findMonitoringPlan(sheet.querySelector('#f-structureId').value.trim(), structureName);
+      const existingSetup = existingPlan && existingPlan.setupInspectionId ? await DB.get('inspections', existingPlan.setupInspectionId) : null;
+      if (existingSetup) {
+        sheet.remove();
+        toast('This structure already has monitoring set up - opening it. Use "New monitoring record" for a visit.');
+        if (onCreated) onCreated(existingSetup); else navigate(`#/inspection/${existingSetup.id}`);
+        return;
+      }
+    }
     const insp = await DB.createInspection({
       structureName,
       structureId: sheet.querySelector('#f-structureId').value.trim(),
@@ -749,7 +760,7 @@ function openNewInspectionSheet(onCreated) {
     });
     const templateId = sheet.querySelector('#f-template').value;
     if (templateId) await DB.applyReportTemplate(insp.id, templateId);
-    if (insp.inspectionType === 'Monitoring') await DB.ensureMonitoringPlanForInspection(insp);
+    if (insp.inspectionType === 'Monitoring') await DB.makeMonitoringSetup(insp);
     sheet.remove();
     if (onCreated) onCreated(insp);
     else navigate(`#/inspection/${insp.id}`);
@@ -1671,9 +1682,20 @@ async function openReportInfoSheet(inspectionId) {
   presentOverlay(sheet);
 
   sheet.querySelector('#btn-delete').addEventListener('click', async () => {
-    if (!confirm('Delete this inspection and all its sections, elements, findings, and photos? This cannot be undone.')) return;
+    const dInsp = await DB.get('inspections', inspectionId);
+    const msg = dInsp && dInsp.isMonitoringSetup
+      ? 'Delete this monitoring set-up AND all of its monitoring records? Points and location images are kept. This cannot be undone.'
+      : dInsp && dInsp.monitoringRecord
+        ? 'Delete this monitoring record, its readings and photos? Its record number will not be reused. This cannot be undone.'
+        : 'Delete this inspection and all its sections, elements, findings, and photos? This cannot be undone.';
+    if (!confirm(msg)) return;
+    const dPlan = dInsp && dInsp.monitoringRecord && dInsp.monitoringPlanId ? await DB.get('monitoringPlans', dInsp.monitoringPlanId) : null;
     await DB.deleteInspectionCascade(inspectionId);
     sheet.remove();
+    if (dPlan && dPlan.setupInspectionId && typeof shellSelectInspection === 'function' && document.getElementById('shell-sidebar')) {
+      await shellSelectInspection(dPlan.setupInspectionId);
+      return;
+    }
     navigate('#/');
   });
 

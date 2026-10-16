@@ -245,8 +245,110 @@ function monFilterText(points, filter, fmt) {
   return `${which} · ${when}`;
 }
 
+// ---- Workspace helpers: records, frequency, overview (pure) ----
+// "Monitoring Record 3 - 14/10/26"
+function monShortDate(iso) {
+  if (!iso) return '';
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? m[3] + '/' + m[2] + '/' + m[1].slice(2) : '';
+}
+function monRecordTitle(rec) {
+  return 'Monitoring Record ' + (rec && rec.recordNumber != null ? rec.recordNumber : '?') + ' - ' + monShortDate(rec && rec.date);
+}
+function monAddInterval(iso, value, unit) {
+  const n = monNum(value);
+  if (!iso || n === null || n <= 0) return null;
+  const d = new Date(String(iso).slice(0, 10) + 'T00:00:00Z');
+  if (unit === 'days') d.setUTCDate(d.getUTCDate() + Math.round(n));
+  else {
+    const day = d.getUTCDate();
+    d.setUTCDate(1);
+    d.setUTCMonth(d.getUTCMonth() + Math.round(n));
+    const last = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+    d.setUTCDate(Math.min(day, last));
+  }
+  return d.toISOString().slice(0, 10);
+}
+function monDaysBetween(fromIso, toIso) {
+  const a = new Date(String(fromIso).slice(0, 10) + 'T00:00:00Z'), b = new Date(String(toIso).slice(0, 10) + 'T00:00:00Z');
+  return Math.round((b - a) / 86400000);
+}
+// Is the reading moving toward the triggers? Compares the size of the measure (|value|, or
+// |value - baseline| for change-based parameters) at the last two readings.
+function monTrend(param, prevValue, lastValue, baseline) {
+  const f = (v) => (param.basis === 'change' ? Math.abs(v - (baseline === null ? 0 : baseline)) : Math.abs(v));
+  if (prevValue === null || lastValue === null) return null;
+  if (param.basis === 'change' && baseline === null) return null;
+  const a = f(prevValue), b = f(lastValue);
+  if (Math.abs(a - b) < 1e-9) return 'steady';
+  return b > a ? 'increasing' : 'decreasing';
+}
+
+// Everything the Monitoring Overview shows. records: monitoring-record inspections
+// {id,date,recordNumber}; readings: all plan readings; today 'YYYY-MM-DD'.
+function monBuildOverview(plan, points, readings, records, today, selectedRecordId) {
+  const recs = (records || []).slice().sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')) || (a.recordNumber || 0) - (b.recordNumber || 0));
+  const byPoint = {};
+  for (const r of readings || []) (byPoint[r.pointId] = byPoint[r.pointId] || []).push(r);
+  const ragAt = (rec) => {
+    const list = [];
+    for (const p of points) list.push(...monBuildSummary(p, byPoint[p.id] || [], rec.id).map((x) => x.rag));
+    return monWorstRag(list);
+  };
+  const first = recs.length ? { record: recs[0], rag: ragAt(recs[0]) } : null;
+  const latest = recs.length ? { record: recs[recs.length - 1], rag: ragAt(recs[recs.length - 1]) } : null;
+  const activePoints = points.filter((p) => p.status !== 'closed');
+  const out = {
+    pointCount: points.length, activeCount: activePoints.length, closedCount: points.length - activePoints.length,
+    recordCount: recs.length, first, latest,
+    lastDate: latest ? latest.record.date : null,
+    frequency: monNum(plan.frequencyValue) > 0 ? { value: monNum(plan.frequencyValue), unit: plan.frequencyUnit === 'days' ? 'days' : 'months' } : null,
+    nextDue: null, daysToNext: null, triggers: [], noReading: [], overall: [], selected: []
+  };
+  if (out.frequency) {
+    const base = out.lastDate || plan.startDate || null;
+    out.nextDue = monAddInterval(base, out.frequency.value, out.frequency.unit);
+    if (out.nextDue && today) out.daysToNext = monDaysBetween(today, out.nextDue);
+  }
+  // Points at Amber / Red at the latest record, and active points with no reading at it.
+  if (latest) {
+    for (const p of activePoints) {
+      const sums = monBuildSummary(p, byPoint[p.id] || [], latest.record.id);
+      if (!sums.some((x) => x.current)) out.noReading.push(p);
+      for (const x of sums) if (x.rag === 'amber' || x.rag === 'red') out.triggers.push({ point: p, param: x.param, value: x.current.value, rag: x.rag, action: x.param.action || '' });
+    }
+    out.triggers.sort((a, b) => MON_RAG_ORDER[b.rag] - MON_RAG_ORDER[a.rag]);
+  }
+  // Overall: per point and parameter - first reading, last reading, change, status, trend.
+  for (const p of points) {
+    const sorted = monSortReadings(byPoint[p.id] || []);
+    for (const param of p.parameters || []) {
+      const series = sorted.filter((r) => r.parameterId === param.id);
+      const entered = monNum(param.baseline);
+      const baseline = entered !== null ? entered : (series.length ? series[0].value : null);
+      const f = series[0] || null, l = series.length ? series[series.length - 1] : null, pr = series.length > 1 ? series[series.length - 2] : null;
+      out.overall.push({
+        point: p, param, first: f, last: l,
+        change: f && l && series.length > 1 ? l.value - f.value : null,
+        rag: l ? monRag(param, l.value, baseline) : null,
+        trend: l && pr ? monTrend(param, pr.value, l.value, baseline) : null
+      });
+    }
+  }
+  // Selected record: this visit against the previous one and the first.
+  if (selectedRecordId) {
+    for (const p of points) {
+      for (const x of monBuildSummary(p, byPoint[p.id] || [], selectedRecordId)) {
+        const series = monSortReadings(byPoint[p.id] || []).filter((r) => r.parameterId === x.param.id);
+        out.selected.push({ point: p, param: x.param, current: x.current, previous: x.previous, changePrev: x.changePrev, first: series[0] || null, changeFirst: x.current && series.length ? x.current.value - series[0].value : null, rag: x.rag });
+      }
+    }
+  }
+  return out;
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { monLabel, monPointTitle, monMarkGeometry, monMarkPrims, MON_DEFAULT_COLOURS, monNum, monRag, monWorstRag, monSortReadings, monBuildSummary, monBuildPointHistory, monLatestRag, monSelectPoints, monPlanWarnings, monFilterText, MON_MAX_PLANNED_MONTHS };
+  module.exports = { monLabel, monPointTitle, monMarkGeometry, monMarkPrims, MON_DEFAULT_COLOURS, monNum, monRag, monWorstRag, monSortReadings, monBuildSummary, monBuildPointHistory, monLatestRag, monSelectPoints, monPlanWarnings, monFilterText, MON_MAX_PLANNED_MONTHS, monShortDate, monRecordTitle, monAddInterval, monDaysBetween, monTrend, monBuildOverview };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -749,7 +851,7 @@ async function shellEditMonitoringSpecSection(body, section) {
     const visits = await DB.listMonitoringVisits(plan.id);
     host.innerHTML = `
       <h2 style="font-size:20px; font-weight:700; margin:0 0 4px;">Monitoring specification</h2>
-      <p style="color:${t.muted}; font-size:13px; line-height:1.5; margin:0 0 16px; max-width:560px;">Shared by every Monitoring inspection of <strong>${esc(plan.structureName || 'this structure')}</strong>. Changes here apply to the whole series (CS 470 6.12, Appendix A2).</p>
+      <p style="color:${t.muted}; font-size:13px; line-height:1.5; margin:0 0 16px; max-width:560px;">Shared by every monitoring record of <strong>${esc(plan.structureName || 'this structure')}</strong>. Changes here apply to the whole series (CS 470 6.12, Appendix A2).</p>
       <div id="mon-warnings">${warningsHtml()}</div>
       <div style="margin-bottom:14px;">
         <label style="${monLabelStyle(t)}">Monitoring class</label>
@@ -760,6 +862,14 @@ async function shellEditMonitoringSpecSection(body, section) {
         <div><label style="${monLabelStyle(t)}">Start date</label><input type="date" id="mon-start" value="${esc(plan.startDate || '')}" style="${monInputStyle(t)}"></div>
         <div><label style="${monLabelStyle(t)}">Planned end (max 2 yrs)</label><input type="date" id="mon-end" value="${esc(plan.endDate || '')}" style="${monInputStyle(t)}"></div>
         <div><label style="${monLabelStyle(t)}">Next formal review</label><input type="date" id="mon-review" value="${esc(plan.reviewDate || '')}" style="${monInputStyle(t)}"></div>
+      </div>
+      <div style="margin-bottom:14px;">
+        <label style="${monLabelStyle(t)}">Monitoring frequency (a record is due every...)</label>
+        <div style="display:flex; gap:10px; max-width:360px;">
+          <input type="number" min="1" step="1" inputmode="numeric" id="mon-freq-value" value="${plan.frequencyValue != null ? esc(plan.frequencyValue) : ''}" placeholder="e.g. 3" style="${monInputStyle(t)}">
+          <select id="mon-freq-unit" style="${monInputStyle(t)}"><option value="days" ${plan.frequencyUnit === 'days' ? 'selected' : ''}>days</option><option value="months" ${plan.frequencyUnit !== 'days' ? 'selected' : ''}>months</option></select>
+        </div>
+        <div style="font-size:12px; color:${t.muted}; margin-top:6px;">Used on the Overview to show when the next record is due.</div>
       </div>
       <div style="margin-bottom:14px;"><label style="${monLabelStyle(t)}">Reason for monitoring and assessment findings</label><textarea id="mon-reason" rows="4" placeholder="Basis of the sub-standard status: location, nature and degree of inadequacy, capacity factor C and required K, level of assessment, condition and distress." style="${monInputStyle(t)} resize:vertical;">${esc(plan.reason || '')}</textarea></div>
       <div style="margin-bottom:20px;"><label style="${monLabelStyle(t)}">Anticipated failure mode(s)</label><textarea id="mon-failure" rows="3" placeholder="Anticipated mode(s) of failure, how it progresses from local distress to collapse, likelihood and consequence." style="${monInputStyle(t)} resize:vertical;">${esc(plan.failureMode || '')}</textarea></div>
@@ -779,6 +889,8 @@ async function shellEditMonitoringSpecSection(body, section) {
     [['mon-start', 'startDate'], ['mon-end', 'endDate'], ['mon-review', 'reviewDate']].forEach(([id, key]) => {
       host.querySelector('#' + id).addEventListener('change', async (e) => { await savePlan({ [key]: e.target.value }); host.querySelector('#mon-warnings').innerHTML = warningsHtml(); });
     });
+    host.querySelector('#mon-freq-value').addEventListener('change', async (e) => { const n = monNum(e.target.value); await savePlan({ frequencyValue: n !== null && n > 0 ? Math.round(n) : null }); });
+    host.querySelector('#mon-freq-unit').addEventListener('change', async (e) => { await savePlan({ frequencyUnit: e.target.value === 'days' ? 'days' : 'months' }); });
     shellWireAutosaveField(host.querySelector('#mon-reason'), (v) => savePlan({ reason: v }));
     shellWireAutosaveField(host.querySelector('#mon-failure'), (v) => savePlan({ failureMode: v }));
 
@@ -811,6 +923,159 @@ async function shellEditMonitoringSpecSection(body, section) {
     host.querySelector('#mon-export').addEventListener('click', () => monOpenHistoryExportSheet(plan));
   }
   await renderMain();
+}
+
+
+// ---- Monitoring workspace: Overview tab and sidebar (browser only) ----
+function monCard(t, title, inner, extra) {
+  return `<div style="background:#fff; border:1px solid ${t.line}; border-radius:14px; padding:18px 20px; ${extra || ''}"><div style="font-size:15px; font-weight:650; margin-bottom:14px;">${title}</div>${inner}</div>`;
+}
+function monStat(t, label, value, color) {
+  return `<div><div style="font-size:11px; font-weight:700; letter-spacing:0.4px; text-transform:uppercase; color:${t.muted};">${esc(label)}</div><div style="font-size:19px; font-weight:700; margin-top:3px; ${color ? 'color:' + color + ';' : ''}">${value}</div></div>`;
+}
+function monReadingText(r, param) {
+  return r ? monFmtNum(r.value) + (param && param.unit ? ' ' + esc(param.unit) : '') : '—';
+}
+
+async function monRenderOverviewTab(content, insp) {
+  const t = SHELL_TOKENS;
+  const plan = await DB.ensureMonitoringPlanForInspection(insp);
+  const points = await DB.listMonitoringPoints(plan.id);
+  const readings = await DB.listMonitoringReadings(plan.id);
+  const records = await DB.listMonitoringRecords(plan.id);
+  const isRecord = !!insp.monitoringRecord;
+  const mode = isRecord ? (shellState.monOverviewMode || 'record') : 'overall';
+  const ov = monBuildOverview(plan, points, readings, records, monToday(), isRecord ? insp.id : null);
+  const warn = monPlanWarnings(plan, monToday());
+
+  const ragCell = (item, label) => item
+    ? `<div>${monRagBadge(item.rag)}<div style="font-size:12px; color:${t.muted}; margin-top:4px;">${esc(monRecordTitle(item.record))}</div></div>`
+    : `<div style="color:${t.muted}; font-size:13px;">${label}</div>`;
+  let nextDue;
+  if (!ov.frequency) nextDue = `<span style="font-size:13px; font-weight:500; color:${t.muted};">Set a frequency in the Monitoring Specification</span>`;
+  else if (ov.daysToNext === null) nextDue = '—';
+  else if (ov.daysToNext < 0) nextDue = `<span style="color:${t.red};">${-ov.daysToNext} day${ov.daysToNext === -1 ? '' : 's'} overdue</span>`;
+  else nextDue = `${ov.daysToNext} day${ov.daysToNext === 1 ? '' : 's'}`;
+
+  const detailFields = [
+    ['Structure', insp.structureName], ['Structure ID', insp.structureId],
+    [isRecord ? 'This record' : 'Type', isRecord ? monRecordTitle(insp) : 'Monitoring set-up'],
+    ['Inspector', insp.inspector], ['Class', MON_CLASS_INFO[plan.monitoringClass || 1].label],
+    ['Period', [plan.startDate && fmtDate(plan.startDate), plan.endDate && fmtDate(plan.endDate)].filter(Boolean).join(' to ') || '—']
+  ];
+  const th = `style="text-align:left; font-size:11px; text-transform:uppercase; color:${t.muted}; padding:6px 8px; border-bottom:1px solid ${t.line};"`;
+  const td = `style="padding:8px; border-bottom:1px solid ${t.line}; font-size:13px; vertical-align:top;"`;
+  const trendText = { increasing: '↑ increasing', decreasing: '↓ decreasing', steady: '→ steady' };
+
+  let tableHtml;
+  if (!points.length) tableHtml = `<div style="color:${t.muted}; font-size:13.5px;">No monitoring points yet. Add them in Set up monitoring.</div>`;
+  else if (mode === 'overall') {
+    const rows = ov.overall.map((r) => `<tr><td ${td}><strong>${esc(monLabel(r.point))}</strong> ${esc(r.point.name || '')}</td><td ${td}>${esc(r.param.name || 'Parameter')}</td><td ${td}>${monReadingText(r.first, r.param)}<div style="font-size:11px; color:${t.muted};">${r.first ? fmtDate(r.first.date) : ''}</div></td><td ${td}>${r.change === null ? '—' : monSigned(r.change) + (r.param.unit ? ' ' + esc(r.param.unit) : '')}</td><td ${td}>${monReadingText(r.last, r.param)}<div style="font-size:11px; color:${t.muted};">${r.last ? fmtDate(r.last.date) : ''}</div></td><td ${td}>${monRagBadge(r.rag)}</td><td ${td}>${r.trend ? trendText[r.trend] : '—'}</td></tr>`).join('');
+    tableHtml = `<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse;"><thead><tr><th ${th}>Point</th><th ${th}>Parameter</th><th ${th}>First reading</th><th ${th}>Change</th><th ${th}>Last reading</th><th ${th}>Status</th><th ${th}>Trend</th></tr></thead><tbody>${rows || `<tr><td ${td} colspan="7">No parameters defined.</td></tr>`}</tbody></table></div>`;
+  } else {
+    const rows = ov.selected.map((r) => `<tr><td ${td}><strong>${esc(monLabel(r.point))}</strong> ${esc(r.point.name || '')}</td><td ${td}>${esc(r.param.name || 'Parameter')}</td><td ${td}>${monReadingText(r.current, r.param)}</td><td ${td}>${monReadingText(r.previous && r.current ? r.previous : null, r.param)}</td><td ${td}>${r.changePrev === null ? '—' : monSigned(r.changePrev)}</td><td ${td}>${r.changeFirst === null ? '—' : monSigned(r.changeFirst)}</td><td ${td}>${monRagBadge(r.rag)}</td></tr>`).join('');
+    tableHtml = `<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse;"><thead><tr><th ${th}>Point</th><th ${th}>Parameter</th><th ${th}>This record</th><th ${th}>Previous</th><th ${th}>Change since previous</th><th ${th}>Change since first</th><th ${th}>Status</th></tr></thead><tbody>${rows || `<tr><td ${td} colspan="7">No parameters defined.</td></tr>`}</tbody></table></div>`;
+  }
+
+  const trig = ov.triggers.length ? ov.triggers.map((x) => `<div style="padding:9px 0; border-bottom:1px solid ${t.line}; display:flex; gap:12px; align-items:flex-start;"><div>${monRagBadge(x.rag)}</div><div style="min-width:0;"><div style="font-size:13.5px; font-weight:650;">${esc(monPointTitle(x.point))} · ${esc(x.param.name || 'Parameter')}: ${monFmtNum(x.value)}${x.param.unit ? ' ' + esc(x.param.unit) : ''}</div>${x.action ? `<div style="font-size:12.5px; color:${t.muted}; margin-top:2px;">Action: ${esc(x.action)}</div>` : ''}</div></div>`).join('') : `<div style="color:${t.muted}; font-size:13.5px;">${ov.latest ? 'No points at Amber or Red at the latest record.' : 'No records yet.'}</div>`;
+
+  content.innerHTML = `
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px; align-items:start;">
+      ${monCard(t, 'Monitoring details', `<div style="display:grid; grid-template-columns:1fr 1fr; gap:14px 20px;">${detailFields.map(([l, v]) => `<div><div style="font-size:11px; font-weight:700; letter-spacing:0.4px; text-transform:uppercase; color:${t.muted};">${esc(l)}</div><div style="font-size:14px; font-weight:550; margin-top:3px;">${esc(v) || '—'}</div></div>`).join('')}</div>${plan.reason ? `<div style="font-size:12.5px; color:${t.muted}; margin-top:14px; line-height:1.5;"><strong>Reason:</strong> ${esc(plan.reason.length > 220 ? plan.reason.slice(0, 220) + '…' : plan.reason)}</div>` : ''}`)}
+      ${monCard(t, 'Status', `
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px 20px;">
+          ${monStat(t, 'Monitoring points', `${ov.activeCount}${ov.closedCount ? `<span style="font-size:12px; font-weight:500; color:${t.muted};"> active, ${ov.closedCount} closed</span>` : ''}`)}
+          ${monStat(t, 'Records', String(ov.recordCount))}
+          <div><div style="font-size:11px; font-weight:700; letter-spacing:0.4px; text-transform:uppercase; color:${t.muted}; margin-bottom:5px;">Condition - first record</div>${ragCell(ov.first, 'No records yet')}</div>
+          <div><div style="font-size:11px; font-weight:700; letter-spacing:0.4px; text-transform:uppercase; color:${t.muted}; margin-bottom:5px;">Condition - latest record</div>${ragCell(ov.latest, 'No records yet')}</div>
+          ${monStat(t, 'Last record', ov.lastDate ? esc(fmtDate(ov.lastDate)) : '—')}
+          ${monStat(t, 'Next record due', nextDue + (ov.nextDue && ov.daysToNext !== null ? `<div style="font-size:12px; font-weight:500; color:${t.muted};">${esc(fmtDate(ov.nextDue))}</div>` : ''))}
+        </div>`)}
+      ${warn.length ? `<div style="grid-column:1 / -1; background:#fff7e6; border:1px solid #f0c36d; border-radius:12px; padding:12px 16px; font-size:12.5px; line-height:1.5;">${warn.map((x) => `<div>⚠ ${esc(x)}</div>`).join('')}</div>` : ''}
+      ${monCard(t, `Trigger points - latest record${ov.triggers.length ? ` (${ov.triggers.length})` : ''}`, trig, 'grid-column:1 / -1;')}
+      ${ov.noReading.length ? monCard(t, 'No reading at the latest record', ov.noReading.map((p) => `<span style="display:inline-block; background:${t.page}; border:1px solid ${t.line}; border-radius:20px; padding:5px 12px; margin:0 6px 6px 0; font-size:12.5px; font-weight:600;">${esc(monPointTitle(p))}</span>`).join(''), 'grid-column:1 / -1;') : ''}
+      <div style="grid-column:1 / -1;">
+        ${monCard(t, `<span style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;"><span>Readings</span>${isRecord ? `<span id="mon-ov-mode" style="display:inline-flex; border:1px solid ${t.line}; border-radius:8px; overflow:hidden; font-size:12.5px; font-weight:650;"><button data-m="record" style="border:none; padding:6px 12px; background:${mode === 'record' ? t.ink : '#fff'}; color:${mode === 'record' ? '#fff' : t.ink};">This record</button><button data-m="overall" style="border:none; padding:6px 12px; background:${mode === 'overall' ? t.ink : '#fff'}; color:${mode === 'overall' ? '#fff' : t.ink};">Overall</button></span>` : ''}</span>`, tableHtml)}
+      </div>
+    </div>`;
+  content.querySelectorAll('#mon-ov-mode button').forEach((b) => b.addEventListener('click', () => { shellState.monOverviewMode = b.dataset.m; monRenderOverviewTab(content, insp); }));
+}
+
+// Sidebar for a monitoring set-up / record: Set up + New record buttons, a scrolling list of
+// records (newest first) and the section list of whichever one is open.
+async function monRenderWorkspaceSidebar(sidebar, insp) {
+  const t = SHELL_TOKENS;
+  const plan = await DB.ensureMonitoringPlanForInspection(insp);
+  const setupId = insp.isMonitoringSetup ? insp.id : plan.setupInspectionId;
+  const records = (await DB.listMonitoringRecords(plan.id)).slice().reverse();
+  const onSetup = !!insp.isMonitoringSetup;
+  const sections = await DB.listReportSections(insp.id);
+  const btn = (id, label, active, accent) => `<button id="${id}" style="width:100%; background:${accent ? t.red : (active ? t.inkHover : 'transparent')}; color:#fff; border:1px solid ${accent ? t.red : (active ? '#fff' : t.inkBorder)}; border-radius:9px; padding:10px; font-size:13.5px; font-weight:650; margin-bottom:8px;">${label}</button>`;
+
+  sidebar.innerHTML = `
+    <div style="padding:14px 16px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid ${t.inkBorder}; flex-shrink:0;">
+      <button id="shell-sec-back" style="background:none; border:none; color:${t.mutedLight}; font-size:13px; font-weight:650;">‹ Back</button>
+      <button id="shell-sec-home" style="background:none; border:none; color:${t.mutedLight}; font-size:13px; font-weight:650;">⌂ Home</button>
+    </div>
+    <div style="padding:12px 16px 4px; flex-shrink:0;">
+      ${btn('mon-sb-setup', 'Set up monitoring', onSetup, false)}
+      ${btn('mon-sb-new', '+ New monitoring record', false, true)}
+    </div>
+    <div style="padding:4px 16px 6px; font-size:11px; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; color:${t.mutedLight}; flex-shrink:0;">Records (${records.length})</div>
+    <div id="mon-sb-records" style="max-height:34%; min-height:48px; overflow-y:auto; padding:0 12px 6px; flex-shrink:0; -webkit-overflow-scrolling:touch;"></div>
+    <div style="padding:10px 16px 6px; border-top:1px solid ${t.inkBorder}; display:flex; align-items:center; justify-content:space-between; flex-shrink:0;">
+      <div style="font-size:11px; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; color:${t.mutedLight}; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${onSetup ? 'Set-up sections' : esc('Record ' + (insp.recordNumber != null ? insp.recordNumber : '') + ' sections')}</div>
+      <button id="shell-sec-addsection" style="background:${t.inkHover}; color:#fff; border:1px solid ${t.inkBorder}; border-radius:8px; padding:5px 10px; font-size:12px; font-weight:650; flex-shrink:0;">+ Add</button>
+    </div>
+    <div id="shell-sec-list" style="flex:1; min-height:0; overflow-y:auto; padding:0 12px calc(14px + var(--safe-bottom));"></div>
+  `;
+
+  document.getElementById('shell-sec-back').addEventListener('click', () => {
+    shellState.selectedInspectionId = null; shellState.editingSectionId = null;
+    renderShellSidebar(); renderShellMainPane();
+  });
+  document.getElementById('shell-sec-home').addEventListener('click', () => navigate('#/'));
+  document.getElementById('shell-sec-addsection').addEventListener('click', shellOpenAddSectionMenu);
+  const open = async (id) => { shellState.monOverviewMode = null; await shellSelectInspection(id); };
+  document.getElementById('mon-sb-setup').addEventListener('click', () => { if (setupId) open(setupId); });
+  document.getElementById('mon-sb-new').addEventListener('click', async () => {
+    const rec = await DB.createMonitoringRecord(plan.id);
+    toast('Created ' + monRecordTitle(rec));
+    open(rec.id);
+  });
+
+  const recBox = document.getElementById('mon-sb-records');
+  const ragMap = {};
+  const points = await DB.listMonitoringPoints(plan.id);
+  const readings = await DB.listMonitoringReadings(plan.id);
+  for (const r of records) {
+    const list = [];
+    for (const p of points) list.push(...monBuildSummary(p, readings.filter((x) => x.pointId === p.id), r.id).map((x) => x.rag));
+    ragMap[r.id] = monWorstRag(list);
+  }
+  recBox.innerHTML = records.length ? records.map((r) => {
+    const active = r.id === insp.id;
+    return `<div class="mon-sb-rec" data-id="${r.id}" style="display:flex; align-items:center; gap:9px; background:${active ? t.inkHover : 'transparent'}; border:1px solid ${active ? t.inkBorder : 'transparent'}; border-radius:9px; padding:9px 10px; margin-bottom:4px; cursor:pointer;"><span style="width:9px; height:9px; border-radius:50%; flex-shrink:0; background:${ragMap[r.id] ? monRagCss(ragMap[r.id]) : 'transparent'}; border:1px solid ${ragMap[r.id] ? monRagCss(ragMap[r.id]) : t.inkBorder};"></span><span style="font-size:13px; font-weight:650; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(monRecordTitle(r))}</span></div>`;
+  }).join('') : `<div style="padding:8px 4px; color:${t.mutedLight}; font-size:12.5px;">No records yet. Tap "New monitoring record" to log a visit.</div>`;
+  recBox.querySelectorAll('.mon-sb-rec').forEach((el2) => el2.addEventListener('click', () => open(el2.dataset.id)));
+
+  const listBox = document.getElementById('shell-sec-list');
+  listBox.innerHTML = sections.map((s) => {
+    const info = REPORT_SECTION_TYPES[s.type] || { label: s.type };
+    const hasCustomTitle = ['text', 'inspection'].includes(s.type);
+    const title = (hasCustomTitle && s.title) ? s.title : info.label;
+    const subtitle = hasCustomTitle ? info.label : null;
+    const active = s.id === shellState.editingSectionId;
+    return `
+      <div class="shell-rep-card" draggable="true" data-id="${s.id}" style="background:${active ? t.inkHover : 'transparent'}; border:1px solid ${active ? t.inkBorder : 'transparent'}; border-radius:9px; padding:9px 10px; margin-bottom:5px; cursor:pointer;">
+        <div style="font-size:13px; font-weight:650; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(title)}</div>
+        ${subtitle ? `<div style="font-size:10.5px; color:${t.mutedLight}; margin-top:1px;">${esc(subtitle)}</div>` : ''}
+      </div>`;
+  }).join('');
+  listBox.querySelectorAll('.shell-rep-card').forEach((card) => {
+    card.addEventListener('click', () => shellSelectSection(card.dataset.id));
+    shellWireReportCardDrag(card, sections);
+  });
 }
 
 // ---- Visit editor: record this visit's readings, notes and photos for each point ----
@@ -1148,6 +1413,22 @@ function monPdfPhotoGrid(doc, items, y, opts, cols) {
   return y;
 }
 
+// A single image printed margin to margin (full printable width); height follows the aspect
+// ratio and is capped so a tall image still fits on one page (then it is centred, narrower).
+function monPdfFullWidth(doc, item, y, opts) {
+  const { margin, contentW, pageH } = opts;
+  const maxH = Math.min(560, pageH - margin * 2 - 24);
+  let w = contentW, h = (item.img.h / item.img.w) * w;
+  if (h > maxH) { h = maxH; w = (item.img.w / item.img.h) * h; }
+  y = monPdfRoom(doc, y, h + 16, opts);
+  doc.addImage(item.img.url, 'JPEG', margin + (contentW - w) / 2, y, w, h, undefined, 'FAST');
+  if (item.caption) {
+    doc.setFont('helvetica', 'italic'); doc.setFontSize(8.5); doc.setTextColor(91, 96, 105);
+    doc.text(doc.splitTextToSize(item.caption, contentW)[0], margin + contentW / 2, y + h + 10, { align: 'center' });
+  }
+  return y + h + 22;
+}
+
 function drawMonitoringSpecPdf(doc, plan, points, y, opts, images) {
   const { margin } = opts;
   if (doc.autoTable) {
@@ -1185,7 +1466,7 @@ function drawMonitoringSpecPdf(doc, plan, points, y, opts, images) {
   }
   if (images && images.length) {
     y = monPdfSubheading(doc, 'Location of monitoring points and areas', y, opts);
-    y = monPdfPhotoGrid(doc, images.map((i) => ({ img: i.img, caption: i.name })), y, opts, 2);
+    images.forEach((i) => { y = monPdfFullWidth(doc, { img: i.img, caption: i.name }, y, opts); });
   }
   return y;
 }
@@ -1254,12 +1535,8 @@ function drawMonitoringHistoryPdf(doc, hData, y, opts) {
     doc.text(`${point.shape === 'area' ? 'Area' : 'Point'} · ${point.type}${point.status === 'closed' ? ' · closed' : ''}`, margin, y + 13);
     y += 28;
 
-    if (locImg || masterImg) {
-      const items = [];
-      if (locImg) items.push({ img: locImg, caption: 'Location (' + monLabel(point) + ' highlighted)' });
-      if (masterImg) items.push({ img: masterImg, caption: 'Master photo' });
-      y = monPdfPhotoGrid(doc, items, y, opts, 2);
-    }
+    if (locImg) y = monPdfFullWidth(doc, { img: locImg, caption: 'Location (' + monLabel(point) + ' highlighted)' }, y, opts);
+    if (masterImg) y = monPdfPhotoGrid(doc, [{ img: masterImg, caption: 'Master photo' }], y, opts, 2);
     y = monPdfLabelled(doc, 'What is being monitored', point.instrWhat, y, opts);
     y = monPdfLabelled(doc, 'What to measure', point.instrMeasure, y, opts);
     y = monPdfLabelled(doc, 'How to measure it', point.instrHow, y, opts);

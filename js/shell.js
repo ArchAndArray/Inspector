@@ -161,6 +161,7 @@ async function renderShellSectionSidebar() {
   const sidebar = document.getElementById('shell-sidebar');
   const insp = await DB.get('inspections', shellState.selectedInspectionId);
   if (!insp) { shellState.selectedInspectionId = null; return renderShellSidebar(); }
+  if (insp.monitoringPlanId && (insp.isMonitoringSetup || insp.monitoringRecord)) return monRenderWorkspaceSidebar(sidebar, insp);
   const sections = await DB.listReportSections(insp.id);
 
   sidebar.innerHTML = `
@@ -272,7 +273,7 @@ async function renderShellMainPane() {
       <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px;">
         <div style="min-width:0;">
           <div style="font-size:23px; font-weight:700; line-height:1.2;">${esc(insp.structureName || 'Untitled structure')}</div>
-          <div style="font-size:13px; color:${t.muted}; margin-top:4px;">${esc(insp.inspectionType || 'Inspection')} · ${fmtDate(insp.date)}${insp.inspector ? ' · ' + esc(insp.inspector) : ''}</div>
+          <div style="font-size:13px; color:${t.muted}; margin-top:4px;">${insp.monitoringRecord ? esc(monRecordTitle(insp)) : (insp.isMonitoringSetup ? 'Monitoring set-up' : esc(insp.inspectionType || 'Inspection') + ' · ' + fmtDate(insp.date))}${insp.inspector ? ' · ' + esc(insp.inspector) : ''}</div>
         </div>
         <div style="display:flex; gap:8px; flex-shrink:0;">
           <button id="shell-edit" style="background:#fff; border:1px solid ${t.line}; border-radius:8px; padding:9px 16px; font-size:13.5px; font-weight:650;">Edit</button>
@@ -385,6 +386,7 @@ function shellParseCost(value) {
 async function shellRenderOverviewTab(content) {
   const t = SHELL_TOKENS;
   const insp = await DB.get('inspections', shellState.selectedInspectionId);
+  if (insp.monitoringPlanId && (insp.isMonitoringSetup || insp.monitoringRecord)) return monRenderOverviewTab(content, insp);
   const isGiBridges = insp.inspectionType === 'GI Bridges';
   const stats = await shellComputeInspectionStats(insp.id);
   const reportSections = await DB.listReportSections(insp.id);

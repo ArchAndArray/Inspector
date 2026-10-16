@@ -287,6 +287,16 @@ const DB = {
     return this.put('inspections', updated);
   },
   async deleteInspectionCascade(id) {
+    {
+      const head = await this.get('inspections', id);
+      if (head && head.isMonitoringSetup && head.monitoringPlanId) {
+        // Deleting the set-up takes its records with it; the plan, points and location images stay
+        // (so a structure that is set up again picks them up).
+        for (const r of await this.listMonitoringRecords(head.monitoringPlanId)) await this.deleteInspectionCascade(r.id);
+        const pl = await this.get('monitoringPlans', head.monitoringPlanId);
+        if (pl && pl.setupInspectionId === id) await this.put('monitoringPlans', { ...pl, setupInspectionId: null });
+      }
+    }
     const sections = await this.getAllByIndex('sections', 'inspectionId', id);
     for (const s of sections) await this.deleteSectionCascade(s.id);
     const elements = await this.getAllByIndex('elements', 'inspectionId', id);
@@ -323,8 +333,14 @@ const DB = {
     await this.delete('inspections', id);
   },
 
-  async listInspections() {
-    const all = await this.getAll('inspections');
+  async listInspections(includeMonitoringRecords) {
+    if (!this._monitoringMigrated) {
+      this._monitoringMigrated = true;
+      try { await this.migrateLegacyMonitoring(); } catch (err) { console.error('Monitoring migration failed', err); }
+    }
+    let all = await this.getAll('inspections');
+    // Monitoring records live inside their structure's monitoring workspace, not the main list.
+    if (!includeMonitoringRecords) all = all.filter((i) => !i.monitoringRecord);
     return all.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
   },
 
@@ -807,6 +823,34 @@ const DB = {
       ],
       createdAt: new Date().toISOString()
     });
+    // Monitoring workspace (v1.0.6.26): the SET-UP inspection and each RECORD (visit) start from
+    // their own template. Sections can be added or removed on either side.
+    await this.put('reportTemplates', {
+      id: 'monitoring-setup-template',
+      name: 'Monitoring Set-up',
+      sections: [
+        { type: 'inspectionDetails', title: 'Basic Inspection Data' },
+        { type: 'monitoringSpec', title: 'Monitoring Specification' },
+        { type: 'locationMap', title: 'Location Map' },
+        { type: 'monitoringHistory', title: 'Monitoring History' },
+        { type: 'recommendations', title: 'Review and Recommendations' },
+        { type: 'appendices', title: 'Appendices' }
+      ],
+      createdAt: new Date().toISOString()
+    });
+    await this.put('reportTemplates', {
+      id: 'monitoring-record-template',
+      name: 'Monitoring Record',
+      sections: [
+        { type: 'inspectionDetails', title: 'Basic Inspection Data' },
+        { type: 'monitoringReadings', title: 'Monitoring Readings' },
+        { type: 'inspection', title: 'Inspection Findings' },
+        { type: 'text', title: 'Trigger Exceedances and Actions Taken' },
+        { type: 'recommendations', title: 'Recommendations' },
+        { type: 'appendices', title: 'Appendices' }
+      ],
+      createdAt: new Date().toISOString()
+    });
     // Per-type default template for Monitoring inspections (CS 470 / CS 450 5.2, 5.13).
     await this.put('reportTemplates', {
       id: 'monitoring-template',
@@ -859,6 +903,10 @@ const DB = {
         startDate: (insp.date || now).slice(0, 10),
         endDate: '',
         reviewDate: '',
+        frequencyValue: null,
+        frequencyUnit: 'months',
+        nextRecordNumber: 1,
+        setupInspectionId: null,
         parameters: [],
         createdAt: now,
         updatedAt: now
@@ -867,6 +915,86 @@ const DB = {
     }
     await this.updateInspection(insp.id, { monitoringPlanId: plan.id });
     return plan;
+  },
+  // --- Monitoring workspace: one SET-UP inspection per plan plus numbered RECORDS (visits) ---
+  // Set-up: inspection with isMonitoringSetup (listed in the main inspection list).
+  // Record: inspection with monitoringRecord + recordNumber (permanent, never reused); records are
+  // not listed in the main inspection list, only in the structure's monitoring workspace.
+  async makeMonitoringSetup(insp) {
+    const plan = await this.ensureMonitoringPlanForInspection(insp);
+    await this.updateInspection(insp.id, { isMonitoringSetup: true, monitoringRecord: false });
+    await this.put('monitoringPlans', { ...(await this.get('monitoringPlans', plan.id)), setupInspectionId: insp.id });
+    return this.get('inspections', insp.id);
+  },
+  async listMonitoringRecords(planId) {
+    const all = await this.getAll('inspections');
+    return all.filter((i) => i.monitoringPlanId === planId && i.monitoringRecord)
+      .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')) || (a.recordNumber || 0) - (b.recordNumber || 0));
+  },
+  async createMonitoringRecord(planId, date) {
+    const plan = await this.get('monitoringPlans', planId);
+    if (!plan) throw new Error('Monitoring plan not found');
+    const setup = plan.setupInspectionId ? await this.get('inspections', plan.setupInspectionId) : null;
+    const existing = await this.listMonitoringRecords(planId);
+    const maxUsed = existing.reduce((m, r) => Math.max(m, r.recordNumber || 0), 0);
+    const number = Math.max(plan.nextRecordNumber || 1, maxUsed + 1);
+    await this.put('monitoringPlans', { ...plan, nextRecordNumber: number + 1 });
+    const insp = await this.createInspection({
+      structureName: (setup && setup.structureName) || plan.structureName,
+      structureId: (setup && setup.structureId) || plan.structureId,
+      inspectionType: 'Monitoring',
+      date: date || new Date().toISOString().slice(0, 10),
+      inspector: (setup && setup.inspector) || '',
+      location: (setup && setup.location) || undefined,
+      client: (setup && setup.client) || '',
+      reference: (setup && setup.reference) || '',
+      companyName: (setup && setup.companyName) || '',
+      companyAddress: (setup && setup.companyAddress) || '',
+      currency: (setup && setup.currency) || undefined,
+      title: (setup && setup.title) || 'Structural Inspection Report',
+      reportStyle: 'new'
+    });
+    await this.updateInspection(insp.id, { monitoringPlanId: planId, monitoringRecord: true, isMonitoringSetup: false, recordNumber: number });
+    await this.seedDefaultReportTemplate();
+    await this.applyReportTemplate(insp.id, 'monitoring-record-template');
+    return this.get('inspections', insp.id);
+  },
+  // Inspections made before v1.0.6.26 were all ordinary Monitoring inspections sharing a plan.
+  // Give each such plan a set-up inspection and turn the old ones into numbered records.
+  async migrateLegacyMonitoring() {
+    const all = await this.getAll('inspections');
+    const legacy = all.filter((i) => i.inspectionType === 'Monitoring' && !i.isMonitoringSetup && !i.monitoringRecord);
+    if (!legacy.length) return false;
+    const byPlan = {};
+    for (const i of legacy) {
+      const plan = await this.ensureMonitoringPlanForInspection(i);
+      (byPlan[plan.id] = byPlan[plan.id] || []).push(await this.get('inspections', i.id));
+    }
+    await this.seedDefaultReportTemplate();
+    for (const planId of Object.keys(byPlan)) {
+      const list = byPlan[planId].sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+      let plan = await this.get('monitoringPlans', planId);
+      let setup = plan.setupInspectionId ? await this.get('inspections', plan.setupInspectionId) : null;
+      if (!setup) {
+        const first = list[0];
+        setup = await this.createInspection({
+          structureName: first.structureName, structureId: first.structureId, inspectionType: 'Monitoring',
+          date: first.date, inspector: first.inspector, location: first.location, client: first.client,
+          reference: first.reference, companyName: first.companyName, companyAddress: first.companyAddress,
+          currency: first.currency, title: first.title, reportStyle: 'new'
+        });
+        await this.updateInspection(setup.id, { monitoringPlanId: planId, isMonitoringSetup: true, monitoringRecord: false });
+        await this.applyReportTemplate(setup.id, 'monitoring-setup-template');
+        plan = { ...(await this.get('monitoringPlans', planId)), setupInspectionId: setup.id };
+        await this.put('monitoringPlans', plan);
+      }
+      let n = Math.max(plan.nextRecordNumber || 1, 1);
+      for (const rec of list) {
+        await this.updateInspection(rec.id, { monitoringRecord: true, isMonitoringSetup: false, recordNumber: n++ });
+      }
+      await this.put('monitoringPlans', { ...(await this.get('monitoringPlans', planId)), nextRecordNumber: n });
+    }
+    return true;
   },
   async updateMonitoringPlan(id, patch) {
     const existing = await this.get('monitoringPlans', id);
