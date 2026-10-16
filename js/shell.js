@@ -236,9 +236,10 @@ async function shellWorstSeverity(inspectionId) {
 }
 
 // Opens an inspection from the sidebar list.
-async function shellSelectInspection(id) {
+async function shellSelectInspection(id, opts) {
   const insp = await DB.get('inspections', id);
   if (!insp) return;
+  if (!(opts && opts.keepSetup)) shellState.monSetupOpen = false; // monitoring: back to the structure's home view
   shellState.selectedInspectionId = id;
   shellState.activeTab = 'overview';
   shellState.editingSectionId = null;

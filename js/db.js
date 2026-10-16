@@ -336,7 +336,7 @@ const DB = {
   async listInspections(includeMonitoringRecords) {
     if (!this._monitoringMigrated) {
       this._monitoringMigrated = true;
-      try { await this.migrateLegacyMonitoring(); } catch (err) { console.error('Monitoring migration failed', err); }
+      try { await this.migrateLegacyMonitoring(); await this.trimMonitoringRecordSections(); } catch (err) { console.error('Monitoring migration failed', err); }
     }
     let all = await this.getAll('inspections');
     // Monitoring records live inside their structure's monitoring workspace, not the main list.
@@ -842,12 +842,8 @@ const DB = {
       id: 'monitoring-record-template',
       name: 'Monitoring Record',
       sections: [
-        { type: 'inspectionDetails', title: 'Basic Inspection Data' },
         { type: 'monitoringReadings', title: 'Monitoring Readings' },
-        { type: 'inspection', title: 'Inspection Findings' },
-        { type: 'text', title: 'Trigger Exceedances and Actions Taken' },
-        { type: 'recommendations', title: 'Recommendations' },
-        { type: 'appendices', title: 'Appendices' }
+        { type: 'monitoringHistory', title: 'Monitoring History' }
       ],
       createdAt: new Date().toISOString()
     });
@@ -954,10 +950,28 @@ const DB = {
       title: (setup && setup.title) || 'Structural Inspection Report',
       reportStyle: 'new'
     });
-    await this.updateInspection(insp.id, { monitoringPlanId: planId, monitoringRecord: true, isMonitoringSetup: false, recordNumber: number });
+    await this.updateInspection(insp.id, { monitoringPlanId: planId, monitoringRecord: true, isMonitoringSetup: false, recordNumber: number, monSectionsTrimmed: true });
     await this.seedDefaultReportTemplate();
     await this.applyReportTemplate(insp.id, 'monitoring-record-template');
     return this.get('inspections', insp.id);
+  },
+  // A record holds only what belongs to one visit. Set-up items (basic information, specification,
+  // location map, recommendations, appendices, findings, text) belong to the set-up, so empty ones
+  // are removed from records made before they were trimmed (non-empty ones are kept, never deleted).
+  async trimMonitoringRecordSections() {
+    const recs = (await this.getAll('inspections')).filter((i) => i.monitoringRecord && !i.monSectionsTrimmed);
+    for (const rec of recs) {
+      for (const sec of await this.listReportSections(rec.id)) {
+        let drop = false;
+        if (['inspectionDetails', 'monitoringSpec', 'locationMap'].includes(sec.type)) drop = true;
+        else if (sec.type === 'recommendations') drop = !(sec.recommendations || []).length;
+        else if (sec.type === 'appendices') drop = !(sec.appendices || []).length;
+        else if (sec.type === 'text') drop = !String(sec.textHtml || '').replace(/<[^>]*>/g, '').trim();
+        else if (sec.type === 'inspection') drop = !(await this.listStructureSections(rec.id, sec.id)).length && !(await this.listDirectElements(rec.id, sec.id)).length;
+        if (drop) await this.deleteReportSectionCascade(sec.id);
+      }
+      await this.updateInspection(rec.id, { monSectionsTrimmed: true });
+    }
   },
   // Inspections made before v1.0.6.26 were all ordinary Monitoring inspections sharing a plan.
   // Give each such plan a set-up inspection and turn the old ones into numbered records.

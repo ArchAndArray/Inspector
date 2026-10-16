@@ -1001,81 +1001,99 @@ async function monRenderOverviewTab(content, insp) {
   content.querySelectorAll('#mon-ov-mode button').forEach((b) => b.addEventListener('click', () => { shellState.monOverviewMode = b.dataset.m; monRenderOverviewTab(content, insp); }));
 }
 
-// Sidebar for a monitoring set-up / record: Set up + New record buttons, a scrolling list of
-// records (newest first) and the section list of whichever one is open.
+// Sidebar for the monitoring workspace. Three views:
+//  - home (the structure picked from the list): Set up monitoring, + New monitoring record and the
+//    scrolling records list only - no sections;
+//  - set-up (after Set up monitoring): "< Monitoring" and the set-up sections;
+//  - record: the buttons and records list, then that record's own sections (readings, history...).
 async function monRenderWorkspaceSidebar(sidebar, insp) {
   const t = SHELL_TOKENS;
   const plan = await DB.ensureMonitoringPlanForInspection(insp);
   const setupId = insp.isMonitoringSetup ? insp.id : plan.setupInspectionId;
+  const isRecord = !!insp.monitoringRecord;
+  const view = isRecord ? 'record' : (shellState.monSetupOpen ? 'setup' : 'home');
   const records = (await DB.listMonitoringRecords(plan.id)).slice().reverse();
-  const onSetup = !!insp.isMonitoringSetup;
-  const sections = await DB.listReportSections(insp.id);
+  const sections = view === 'home' ? [] : await DB.listReportSections(insp.id);
   const btn = (id, label, active, accent) => `<button id="${id}" style="width:100%; background:${accent ? t.red : (active ? t.inkHover : 'transparent')}; color:#fff; border:1px solid ${accent ? t.red : (active ? '#fff' : t.inkBorder)}; border-radius:9px; padding:10px; font-size:13.5px; font-weight:650; margin-bottom:8px;">${label}</button>`;
-
-  sidebar.innerHTML = `
+  const header = (backId, backLabel) => `
     <div style="padding:14px 16px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid ${t.inkBorder}; flex-shrink:0;">
-      <button id="shell-sec-back" style="background:none; border:none; color:${t.mutedLight}; font-size:13px; font-weight:650;">‹ Back</button>
+      <button id="${backId}" style="background:none; border:none; color:${t.mutedLight}; font-size:13px; font-weight:650;">${backLabel}</button>
       <button id="shell-sec-home" style="background:none; border:none; color:${t.mutedLight}; font-size:13px; font-weight:650;">⌂ Home</button>
+    </div>`;
+  const sectionsBlock = (label) => `
+    <div style="padding:10px 16px 6px; border-top:1px solid ${t.inkBorder}; display:flex; align-items:center; justify-content:space-between; flex-shrink:0;">
+      <div style="font-size:11px; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; color:${t.mutedLight}; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(label)}</div>
+      <button id="shell-sec-addsection" style="background:${t.inkHover}; color:#fff; border:1px solid ${t.inkBorder}; border-radius:8px; padding:5px 10px; font-size:12px; font-weight:650; flex-shrink:0;">+ Add</button>
     </div>
+    <div id="shell-sec-list" style="flex:1; min-height:0; overflow-y:auto; padding:0 12px calc(14px + var(--safe-bottom));"></div>`;
+  const recordsBlock = `
     <div style="padding:12px 16px 4px; flex-shrink:0;">
-      ${btn('mon-sb-setup', 'Set up monitoring', onSetup, false)}
+      ${btn('mon-sb-setup', 'Set up monitoring', false, false)}
       ${btn('mon-sb-new', '+ New monitoring record', false, true)}
     </div>
     <div style="padding:4px 16px 6px; font-size:11px; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; color:${t.mutedLight}; flex-shrink:0;">Records (${records.length})</div>
-    <div id="mon-sb-records" style="max-height:34%; min-height:48px; overflow-y:auto; padding:0 12px 6px; flex-shrink:0; -webkit-overflow-scrolling:touch;"></div>
-    <div style="padding:10px 16px 6px; border-top:1px solid ${t.inkBorder}; display:flex; align-items:center; justify-content:space-between; flex-shrink:0;">
-      <div style="font-size:11px; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; color:${t.mutedLight}; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${onSetup ? 'Set-up sections' : esc('Record ' + (insp.recordNumber != null ? insp.recordNumber : '') + ' sections')}</div>
-      <button id="shell-sec-addsection" style="background:${t.inkHover}; color:#fff; border:1px solid ${t.inkBorder}; border-radius:8px; padding:5px 10px; font-size:12px; font-weight:650; flex-shrink:0;">+ Add</button>
-    </div>
-    <div id="shell-sec-list" style="flex:1; min-height:0; overflow-y:auto; padding:0 12px calc(14px + var(--safe-bottom));"></div>
-  `;
+    <div id="mon-sb-records" style="${view === 'home' ? 'flex:1; min-height:0;' : 'max-height:34%; min-height:48px; flex-shrink:0;'} overflow-y:auto; padding:0 12px 6px; -webkit-overflow-scrolling:touch;"></div>`;
 
-  document.getElementById('shell-sec-back').addEventListener('click', () => {
-    shellState.selectedInspectionId = null; shellState.editingSectionId = null;
-    renderShellSidebar(); renderShellMainPane();
-  });
-  document.getElementById('shell-sec-home').addEventListener('click', () => navigate('#/'));
-  document.getElementById('shell-sec-addsection').addEventListener('click', shellOpenAddSectionMenu);
-  const open = async (id) => { shellState.monOverviewMode = null; await shellSelectInspection(id); };
-  document.getElementById('mon-sb-setup').addEventListener('click', () => { if (setupId) open(setupId); });
-  document.getElementById('mon-sb-new').addEventListener('click', async () => {
-    const rec = await DB.createMonitoringRecord(plan.id);
-    toast('Created ' + monRecordTitle(rec));
-    open(rec.id);
-  });
-
-  const recBox = document.getElementById('mon-sb-records');
-  const ragMap = {};
-  const points = await DB.listMonitoringPoints(plan.id);
-  const readings = await DB.listMonitoringReadings(plan.id);
-  for (const r of records) {
-    const list = [];
-    for (const p of points) list.push(...monBuildSummary(p, readings.filter((x) => x.pointId === p.id), r.id).map((x) => x.rag));
-    ragMap[r.id] = monWorstRag(list);
+  if (view === 'setup') {
+    sidebar.innerHTML = header('mon-sb-tohome', '‹ Monitoring') + sectionsBlock('Set-up sections');
+  } else if (view === 'record') {
+    sidebar.innerHTML = header('shell-sec-back', '‹ Back') + recordsBlock + sectionsBlock('Record ' + (insp.recordNumber != null ? insp.recordNumber : '') + ' sections');
+  } else {
+    sidebar.innerHTML = header('shell-sec-back', '‹ Back') + recordsBlock;
   }
-  recBox.innerHTML = records.length ? records.map((r) => {
-    const active = r.id === insp.id;
-    return `<div class="mon-sb-rec" data-id="${r.id}" style="display:flex; align-items:center; gap:9px; background:${active ? t.inkHover : 'transparent'}; border:1px solid ${active ? t.inkBorder : 'transparent'}; border-radius:9px; padding:9px 10px; margin-bottom:4px; cursor:pointer;"><span style="width:9px; height:9px; border-radius:50%; flex-shrink:0; background:${ragMap[r.id] ? monRagCss(ragMap[r.id]) : 'transparent'}; border:1px solid ${ragMap[r.id] ? monRagCss(ragMap[r.id]) : t.inkBorder};"></span><span style="font-size:13px; font-weight:650; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(monRecordTitle(r))}</span></div>`;
-  }).join('') : `<div style="padding:8px 4px; color:${t.mutedLight}; font-size:12.5px;">No records yet. Tap "New monitoring record" to log a visit.</div>`;
-  recBox.querySelectorAll('.mon-sb-rec').forEach((el2) => el2.addEventListener('click', () => open(el2.dataset.id)));
+
+  const goList = () => { shellState.selectedInspectionId = null; shellState.editingSectionId = null; shellState.monSetupOpen = false; renderShellSidebar(); renderShellMainPane(); };
+  const backBtn = document.getElementById('shell-sec-back');
+  if (backBtn) backBtn.addEventListener('click', goList);
+  document.getElementById('shell-sec-home').addEventListener('click', () => navigate('#/'));
+  const toHome = document.getElementById('mon-sb-tohome');
+  if (toHome) toHome.addEventListener('click', () => shellSelectInspection(setupId || insp.id));
+  const addBtn = document.getElementById('shell-sec-addsection');
+  if (addBtn) addBtn.addEventListener('click', shellOpenAddSectionMenu);
+
+  if (view !== 'setup') {
+    const open = async (id) => { shellState.monOverviewMode = null; await shellSelectInspection(id); };
+    document.getElementById('mon-sb-setup').addEventListener('click', () => { if (setupId) { shellState.monSetupOpen = true; shellSelectInspection(setupId, { keepSetup: true }); } });
+    document.getElementById('mon-sb-new').addEventListener('click', async () => {
+      const rec = await DB.createMonitoringRecord(plan.id);
+      toast('Created ' + monRecordTitle(rec));
+      open(rec.id);
+    });
+    const recBox = document.getElementById('mon-sb-records');
+    const ragMap = {};
+    const points = await DB.listMonitoringPoints(plan.id);
+    const readings = await DB.listMonitoringReadings(plan.id);
+    for (const r of records) {
+      const list = [];
+      for (const p of points) list.push(...monBuildSummary(p, readings.filter((x) => x.pointId === p.id), r.id).map((x) => x.rag));
+      ragMap[r.id] = monWorstRag(list);
+    }
+    recBox.innerHTML = records.length ? records.map((r) => {
+      const active = r.id === insp.id;
+      return `<div class="mon-sb-rec" data-id="${r.id}" style="display:flex; align-items:center; gap:9px; background:${active ? t.inkHover : 'transparent'}; border:1px solid ${active ? t.inkBorder : 'transparent'}; border-radius:9px; padding:9px 10px; margin-bottom:4px; cursor:pointer;"><span style="width:9px; height:9px; border-radius:50%; flex-shrink:0; background:${ragMap[r.id] ? monRagCss(ragMap[r.id]) : 'transparent'}; border:1px solid ${ragMap[r.id] ? monRagCss(ragMap[r.id]) : t.inkBorder};"></span><span style="font-size:13px; font-weight:650; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(monRecordTitle(r))}</span></div>`;
+    }).join('') : `<div style="padding:8px 4px; color:${t.mutedLight}; font-size:12.5px;">No records yet. Tap "New monitoring record" to log a visit.</div>`;
+    recBox.querySelectorAll('.mon-sb-rec').forEach((el2) => el2.addEventListener('click', () => open(el2.dataset.id)));
+  }
 
   const listBox = document.getElementById('shell-sec-list');
-  listBox.innerHTML = sections.map((s) => {
-    const info = REPORT_SECTION_TYPES[s.type] || { label: s.type };
-    const hasCustomTitle = ['text', 'inspection'].includes(s.type);
-    const title = (hasCustomTitle && s.title) ? s.title : info.label;
-    const subtitle = hasCustomTitle ? info.label : null;
-    const active = s.id === shellState.editingSectionId;
-    return `
-      <div class="shell-rep-card" draggable="true" data-id="${s.id}" style="background:${active ? t.inkHover : 'transparent'}; border:1px solid ${active ? t.inkBorder : 'transparent'}; border-radius:9px; padding:9px 10px; margin-bottom:5px; cursor:pointer;">
-        <div style="font-size:13px; font-weight:650; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(title)}</div>
-        ${subtitle ? `<div style="font-size:10.5px; color:${t.mutedLight}; margin-top:1px;">${esc(subtitle)}</div>` : ''}
-      </div>`;
-  }).join('');
-  listBox.querySelectorAll('.shell-rep-card').forEach((card) => {
-    card.addEventListener('click', () => shellSelectSection(card.dataset.id));
-    shellWireReportCardDrag(card, sections);
-  });
+  if (listBox) {
+    listBox.innerHTML = sections.map((s) => {
+      const info = REPORT_SECTION_TYPES[s.type] || { label: s.type };
+      const hasCustomTitle = ['text', 'inspection'].includes(s.type);
+      const title = (hasCustomTitle && s.title) ? s.title : info.label;
+      const subtitle = hasCustomTitle ? info.label : null;
+      const active = s.id === shellState.editingSectionId;
+      return `
+        <div class="shell-rep-card" draggable="true" data-id="${s.id}" style="background:${active ? t.inkHover : 'transparent'}; border:1px solid ${active ? t.inkBorder : 'transparent'}; border-radius:9px; padding:9px 10px; margin-bottom:5px; cursor:pointer;">
+          <div style="font-size:13px; font-weight:650; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(title)}</div>
+          ${subtitle ? `<div style="font-size:10.5px; color:${t.mutedLight}; margin-top:1px;">${esc(subtitle)}</div>` : ''}
+        </div>`;
+    }).join('');
+    listBox.querySelectorAll('.shell-rep-card').forEach((card) => {
+      card.addEventListener('click', () => shellSelectSection(card.dataset.id));
+      shellWireReportCardDrag(card, sections);
+    });
+  }
 }
 
 // ---- Visit editor: record this visit's readings, notes and photos for each point ----
