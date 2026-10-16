@@ -36,6 +36,13 @@ const MON_RAG_ORDER = { green: 1, amber: 2, red: 3 };
 const MON_DEFAULT_COLOURS = ['#d32f2f', '#f57c00', '#fbc02d', '#388e3c', '#0097a7', '#1976d2', '#7b1fa2', '#e91e63'];
 const MON_MAX_PLANNED_MONTHS = 24; // CS 470 6.13 - planned maximum duration of monitoring
 
+// Parameters are quantitative (a measured number against Amber / Red trigger levels, the default for
+// everything recorded before v1.0.6.28) or qualitative (the inspector picks Green / Amber / Red;
+// stored as 1 / 2 / 3 so the series, RAG and trend logic stay the same).
+function monIsQual(param) { return !!param && param.mode === 'qualitative'; }
+function monQualLabel(v) { return v === 1 ? 'Green' : v === 2 ? 'Amber' : v === 3 ? 'Red' : '—'; }
+function monUnit(param) { return param && !monIsQual(param) ? (param.unit || '') : ''; }
+
 function monNum(x) {
   if (x === null || x === undefined || x === '') return null;
   const n = Number(x);
@@ -48,6 +55,7 @@ function monNum(x) {
 function monRag(param, value, baseline) {
   const v = monNum(value);
   if (v === null) return null;
+  if (monIsQual(param)) return v === 1 ? 'green' : v === 2 ? 'amber' : v === 3 ? 'red' : null;
   const amber = monNum(param.amber), red = monNum(param.red);
   if (amber === null && red === null) return null;
   let measure = v;
@@ -87,14 +95,14 @@ function monBuildSummary(holder, allReadings, inspectionId) {
     const upTo = currentIdx >= 0 ? series.slice(0, currentIdx + 1) : series;
     const previous = currentIdx >= 0 ? (currentIdx > 0 ? series[currentIdx - 1] : null) : (series.length ? series[series.length - 1] : null);
     const entered = monNum(param.baseline);
-    const baseline = entered !== null ? entered : (series.length ? series[0].value : null);
+    const baseline = monIsQual(param) ? null : (entered !== null ? entered : (series.length ? series[0].value : null));
     const cur = current ? current.value : null;
     return {
       param,
       current,
       previous,
       baseline,
-      changePrev: current && previous ? current.value - previous.value : null,
+      changePrev: !monIsQual(param) && current && previous ? current.value - previous.value : null,
       changeBase: current && baseline !== null ? current.value - baseline : null,
       rag: current ? monRag(param, cur, baseline) : null,
       history: upTo.slice(-6).map((r) => ({ date: r.date, value: r.value, rag: monRag(param, r.value, baseline) }))
@@ -112,7 +120,7 @@ function monBuildPointHistory(point, readings, visits, range) {
   for (const param of point.parameters || []) {
     const entered = monNum(param.baseline);
     const first = sorted.find((r) => r.parameterId === param.id);
-    baselines[param.id] = entered !== null ? entered : (first ? first.value : null);
+    baselines[param.id] = monIsQual(param) ? null : (entered !== null ? entered : (first ? first.value : null));
   }
   const byInsp = {};
   const touch = (inspectionId, date) => {
@@ -276,6 +284,10 @@ function monDaysBetween(fromIso, toIso) {
 // Is the reading moving toward the triggers? Compares the size of the measure (|value|, or
 // |value - baseline| for change-based parameters) at the last two readings.
 function monTrend(param, prevValue, lastValue, baseline) {
+  if (monIsQual(param)) {
+    if (prevValue === null || lastValue === null) return null;
+    return lastValue === prevValue ? 'steady' : (lastValue > prevValue ? 'increasing' : 'decreasing');
+  }
   const f = (v) => (param.basis === 'change' ? Math.abs(v - (baseline === null ? 0 : baseline)) : Math.abs(v));
   if (prevValue === null || lastValue === null) return null;
   if (param.basis === 'change' && baseline === null) return null;
@@ -325,11 +337,11 @@ function monBuildOverview(plan, points, readings, records, today, selectedRecord
     for (const param of p.parameters || []) {
       const series = sorted.filter((r) => r.parameterId === param.id);
       const entered = monNum(param.baseline);
-      const baseline = entered !== null ? entered : (series.length ? series[0].value : null);
+      const baseline = monIsQual(param) ? null : (entered !== null ? entered : (series.length ? series[0].value : null));
       const f = series[0] || null, l = series.length ? series[series.length - 1] : null, pr = series.length > 1 ? series[series.length - 2] : null;
       out.overall.push({
         point: p, param, first: f, last: l,
-        change: f && l && series.length > 1 ? l.value - f.value : null,
+        change: !monIsQual(param) && f && l && series.length > 1 ? l.value - f.value : null,
         rag: l ? monRag(param, l.value, baseline) : null,
         trend: l && pr ? monTrend(param, pr.value, l.value, baseline) : null
       });
@@ -340,7 +352,7 @@ function monBuildOverview(plan, points, readings, records, today, selectedRecord
     for (const p of points) {
       for (const x of monBuildSummary(p, byPoint[p.id] || [], selectedRecordId)) {
         const series = monSortReadings(byPoint[p.id] || []).filter((r) => r.parameterId === x.param.id);
-        out.selected.push({ point: p, param: x.param, current: x.current, previous: x.previous, changePrev: x.changePrev, first: series[0] || null, changeFirst: x.current && series.length ? x.current.value - series[0].value : null, rag: x.rag });
+        out.selected.push({ point: p, param: x.param, current: x.current, previous: x.previous, changePrev: x.changePrev, first: series[0] || null, changeFirst: !monIsQual(x.param) && x.current && series.length ? x.current.value - series[0].value : null, rag: x.rag });
       }
     }
   }
@@ -348,7 +360,7 @@ function monBuildOverview(plan, points, readings, records, today, selectedRecord
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { monLabel, monPointTitle, monMarkGeometry, monMarkPrims, MON_DEFAULT_COLOURS, monNum, monRag, monWorstRag, monSortReadings, monBuildSummary, monBuildPointHistory, monLatestRag, monSelectPoints, monPlanWarnings, monFilterText, MON_MAX_PLANNED_MONTHS, monShortDate, monRecordTitle, monAddInterval, monDaysBetween, monTrend, monBuildOverview };
+  module.exports = { monLabel, monPointTitle, monMarkGeometry, monMarkPrims, MON_DEFAULT_COLOURS, monNum, monRag, monWorstRag, monSortReadings, monBuildSummary, monBuildPointHistory, monLatestRag, monSelectPoints, monPlanWarnings, monFilterText, MON_MAX_PLANNED_MONTHS, monIsQual, monQualLabel, monUnit, monShortDate, monRecordTitle, monAddInterval, monDaysBetween, monTrend, monBuildOverview };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -359,6 +371,7 @@ function monFmtNum(n) {
   const r = Math.round(n * 10000) / 10000;
   return String(r);
 }
+function monValText(param, v) { return monIsQual(param) ? monQualLabel(v) : monFmtNum(v); }
 function monSigned(n) {
   if (n === null || n === undefined) return '—';
   const r = Math.round(n * 10000) / 10000;
@@ -698,6 +711,14 @@ async function monRenderPointEditor(host, plan, insp, pointId, onBack) {
           <div style="font-weight:700; font-size:13.5px;">Parameter ${i + 1}</div>
           <button class="mon-param-remove" data-i="${i}" style="background:none; border:none; color:${t.red}; font-size:13px; font-weight:650;">Remove</button>
         </div>
+        <div style="margin-bottom:10px;"><label style="${monLabelStyle(t)}">Type of parameter</label>
+          <select data-k="mode" style="${monInputStyle(t)}"><option value="quantitative" ${!monIsQual(p) ? 'selected' : ''}>Quantitative (a measured value with trigger levels)</option><option value="qualitative" ${monIsQual(p) ? 'selected' : ''}>Qualitative (the inspector rates Green / Amber / Red)</option></select></div>
+        ${monIsQual(p) ? `
+        <div style="display:grid; grid-template-columns:1fr; gap:10px;">
+          <div><label style="${monLabelStyle(t)}">Parameter</label><input type="text" data-k="name" value="${esc(p.name || '')}" placeholder="e.g. Visual condition of the crack" style="${monInputStyle(t)}"></div>
+          <div><label style="${monLabelStyle(t)}">Amber is when... (guidance for the inspector)</label><input type="text" data-k="amberText" value="${esc(p.amberText || '')}" placeholder="e.g. Crack visibly longer or wider than the last visit" style="${monInputStyle(t)}"></div>
+          <div><label style="${monLabelStyle(t)}">Red is when...</label><input type="text" data-k="redText" value="${esc(p.redText || '')}" placeholder="e.g. New cracking, spalling or movement" style="${monInputStyle(t)}"></div>
+        </div>` : `
         <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:10px;">
           ${paramFields.map(([k, label, ph]) => `<div><label style="${monLabelStyle(t)}">${label}</label><input type="text" data-k="${k}" value="${esc(p[k] || '')}" placeholder="${esc(ph)}" style="${monInputStyle(t)}"></div>`).join('')}
           <div><label style="${monLabelStyle(t)}">Trigger basis</label>
@@ -705,7 +726,7 @@ async function monRenderPointEditor(host, plan, insp, pointId, onBack) {
           <div><label style="${monLabelStyle(t)}">Baseline (optional)</label><input type="number" step="any" data-k="baseline" value="${p.baseline ?? ''}" placeholder="First reading if blank" style="${monInputStyle(t)}"></div>
           <div><label style="${monLabelStyle(t)}">Amber trigger</label><input type="number" step="any" data-k="amber" value="${p.amber ?? ''}" style="${monInputStyle(t)}"></div>
           <div><label style="${monLabelStyle(t)}">Red trigger</label><input type="number" step="any" data-k="red" value="${p.red ?? ''}" style="${monInputStyle(t)}"></div>
-        </div>
+        </div>`}
         <div style="margin-top:10px;"><label style="${monLabelStyle(t)}">Action if a trigger is reached (who to contact, what happens)</label>
           <textarea data-k="action" rows="2" placeholder="e.g. Amber: inform Supervising Engineer within 24 h and double frequency. Red: notify TAA and Overseeing Organisation immediately." style="${monInputStyle(t)} resize:vertical;">${esc(p.action || '')}</textarea></div>
       </div>
@@ -714,6 +735,20 @@ async function monRenderPointEditor(host, plan, insp, pointId, onBack) {
       const i = Number(card.dataset.i);
       card.querySelectorAll('[data-k]').forEach((input) => {
         const k = input.dataset.k;
+        if (k === 'mode') {
+          input.addEventListener('change', async () => {
+            const cur = (point.parameters || [])[i];
+            if (!cur || (monIsQual(cur) ? 'qualitative' : 'quantitative') === input.value) return;
+            const used = (await DB.listPointReadings(point.id)).filter((r) => r.parameterId === cur.id).length;
+            if (used && !confirm(`Changing the type deletes this parameter's ${used} recorded reading${used === 1 ? '' : 's'}, because a measured value and a Green / Amber / Red rating cannot be converted. Change anyway?`)) { input.value = monIsQual(cur) ? 'qualitative' : 'quantitative'; return; }
+            await DB.removeMonitoringParameterReadings(cur.id, point.id);
+            const params = (point.parameters || []).slice();
+            params[i] = { ...cur, mode: input.value };
+            await savePoint({ parameters: params });
+            renderParams();
+          });
+          return;
+        }
         const commit = async (raw) => {
           const params = (point.parameters || []).slice();
           const numeric = ['baseline', 'amber', 'red'].includes(k);
@@ -739,7 +774,7 @@ async function monRenderPointEditor(host, plan, insp, pointId, onBack) {
   renderParams();
   host.querySelector('#mon-pt-addparam').addEventListener('click', async () => {
     const params = (point.parameters || []).slice();
-    params.push({ id: uid(), name: '', unit: '', accuracy: '', basis: 'value', baseline: null, amber: null, red: null, action: '' });
+    params.push({ id: uid(), mode: 'quantitative', name: '', unit: '', accuracy: '', basis: 'value', baseline: null, amber: null, red: null, amberText: '', redText: '', action: '' });
     await savePoint({ parameters: params });
     renderParams();
     const names = host.querySelectorAll('.mon-param [data-k="name"]');
@@ -934,7 +969,7 @@ function monStat(t, label, value, color) {
   return `<div><div style="font-size:11px; font-weight:700; letter-spacing:0.4px; text-transform:uppercase; color:${t.muted};">${esc(label)}</div><div style="font-size:19px; font-weight:700; margin-top:3px; ${color ? 'color:' + color + ';' : ''}">${value}</div></div>`;
 }
 function monReadingText(r, param) {
-  return r ? monFmtNum(r.value) + (param && param.unit ? ' ' + esc(param.unit) : '') : '—';
+  return r ? monValText(param, r.value) + (monUnit(param) ? ' ' + esc(monUnit(param)) : '') : '—';
 }
 
 async function monRenderOverviewTab(content, insp) {
@@ -970,14 +1005,14 @@ async function monRenderOverviewTab(content, insp) {
   let tableHtml;
   if (!points.length) tableHtml = `<div style="color:${t.muted}; font-size:13.5px;">No monitoring points yet. Add them in Set up monitoring.</div>`;
   else if (mode === 'overall') {
-    const rows = ov.overall.map((r) => `<tr><td ${td}><strong>${esc(monLabel(r.point))}</strong> ${esc(r.point.name || '')}</td><td ${td}>${esc(r.param.name || 'Parameter')}</td><td ${td}>${monReadingText(r.first, r.param)}<div style="font-size:11px; color:${t.muted};">${r.first ? fmtDate(r.first.date) : ''}</div></td><td ${td}>${r.change === null ? '—' : monSigned(r.change) + (r.param.unit ? ' ' + esc(r.param.unit) : '')}</td><td ${td}>${monReadingText(r.last, r.param)}<div style="font-size:11px; color:${t.muted};">${r.last ? fmtDate(r.last.date) : ''}</div></td><td ${td}>${monRagBadge(r.rag)}</td><td ${td}>${r.trend ? trendText[r.trend] : '—'}</td></tr>`).join('');
+    const rows = ov.overall.map((r) => `<tr><td ${td}><strong>${esc(monLabel(r.point))}</strong> ${esc(r.point.name || '')}</td><td ${td}>${esc(r.param.name || 'Parameter')}</td><td ${td}>${monReadingText(r.first, r.param)}<div style="font-size:11px; color:${t.muted};">${r.first ? fmtDate(r.first.date) : ''}</div></td><td ${td}>${r.change === null ? '—' : monSigned(r.change) + (monUnit(r.param) ? ' ' + esc(monUnit(r.param)) : '')}</td><td ${td}>${monReadingText(r.last, r.param)}<div style="font-size:11px; color:${t.muted};">${r.last ? fmtDate(r.last.date) : ''}</div></td><td ${td}>${monRagBadge(r.rag)}</td><td ${td}>${r.trend ? trendText[r.trend] : '—'}</td></tr>`).join('');
     tableHtml = `<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse;"><thead><tr><th ${th}>Point</th><th ${th}>Parameter</th><th ${th}>First reading</th><th ${th}>Change</th><th ${th}>Last reading</th><th ${th}>Status</th><th ${th}>Trend</th></tr></thead><tbody>${rows || `<tr><td ${td} colspan="7">No parameters defined.</td></tr>`}</tbody></table></div>`;
   } else {
     const rows = ov.selected.map((r) => `<tr><td ${td}><strong>${esc(monLabel(r.point))}</strong> ${esc(r.point.name || '')}</td><td ${td}>${esc(r.param.name || 'Parameter')}</td><td ${td}>${monReadingText(r.current, r.param)}</td><td ${td}>${monReadingText(r.previous && r.current ? r.previous : null, r.param)}</td><td ${td}>${r.changePrev === null ? '—' : monSigned(r.changePrev)}</td><td ${td}>${r.changeFirst === null ? '—' : monSigned(r.changeFirst)}</td><td ${td}>${monRagBadge(r.rag)}</td></tr>`).join('');
     tableHtml = `<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse;"><thead><tr><th ${th}>Point</th><th ${th}>Parameter</th><th ${th}>This record</th><th ${th}>Previous</th><th ${th}>Change since previous</th><th ${th}>Change since first</th><th ${th}>Status</th></tr></thead><tbody>${rows || `<tr><td ${td} colspan="7">No parameters defined.</td></tr>`}</tbody></table></div>`;
   }
 
-  const trig = ov.triggers.length ? ov.triggers.map((x) => `<div style="padding:9px 0; border-bottom:1px solid ${t.line}; display:flex; gap:12px; align-items:flex-start;"><div>${monRagBadge(x.rag)}</div><div style="min-width:0;"><div style="font-size:13.5px; font-weight:650;">${esc(monPointTitle(x.point))} · ${esc(x.param.name || 'Parameter')}: ${monFmtNum(x.value)}${x.param.unit ? ' ' + esc(x.param.unit) : ''}</div>${x.action ? `<div style="font-size:12.5px; color:${t.muted}; margin-top:2px;">Action: ${esc(x.action)}</div>` : ''}</div></div>`).join('') : `<div style="color:${t.muted}; font-size:13.5px;">${ov.latest ? 'No points at Amber or Red at the latest record.' : 'No records yet.'}</div>`;
+  const trig = ov.triggers.length ? ov.triggers.map((x) => `<div style="padding:9px 0; border-bottom:1px solid ${t.line}; display:flex; gap:12px; align-items:flex-start;"><div>${monRagBadge(x.rag)}</div><div style="min-width:0;"><div style="font-size:13.5px; font-weight:650;">${esc(monPointTitle(x.point))} · ${esc(x.param.name || 'Parameter')}: ${monReadingText({ value: x.value }, x.param)}</div>${x.action ? `<div style="font-size:12.5px; color:${t.muted}; margin-top:2px;">Action: ${esc(x.action)}</div>` : ''}</div></div>`).join('') : `<div style="color:${t.muted}; font-size:13.5px;">${ov.latest ? 'No points at Amber or Red at the latest record.' : 'No records yet.'}</div>`;
 
   content.innerHTML = `
     <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px; align-items:start;">
@@ -1170,17 +1205,21 @@ async function shellEditMonitoringReadingsSection(body, section) {
         ${point.instrHow ? `<p style="font-size:13.5px; margin:6px 0 0;"><strong>How:</strong> ${esc(point.instrHow)}</p>` : ''}</details>` : ''}
       ${summary.map((s, i) => `
         <div style="margin-top:10px; padding-top:10px; border-top:1px solid ${t.line};">
-          <div style="display:flex; justify-content:space-between; align-items:center;"><div style="font-weight:650; font-size:13.5px;">${esc(s.param.name) || 'Unnamed parameter'}${s.param.accuracy ? ' <span style="font-weight:400; color:' + t.muted + ';">(' + esc(s.param.accuracy) + ')</span>' : ''}</div>${monRagBadge(s.rag)}</div>
+          <div style="display:flex; justify-content:space-between; align-items:center;"><div style="font-weight:650; font-size:13.5px;">${esc(s.param.name) || 'Unnamed parameter'}${s.param.accuracy && !monIsQual(s.param) ? ' <span style="font-weight:400; color:' + t.muted + ';">(' + esc(s.param.accuracy) + ')</span>' : ''}</div>${monRagBadge(s.rag)}</div>
           <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:6px;">
-            <div><label style="${monLabelStyle(t)}">Reading${s.param.unit ? ' (' + esc(s.param.unit) + ')' : ''}</label><input type="number" step="any" class="mon-val" data-i="${i}" value="${s.current ? s.current.value : ''}" style="${monInputStyle(t)}"></div>
+            ${monIsQual(s.param)
+              ? `<div><label style="${monLabelStyle(t)}">Rating</label><select class="mon-val" data-i="${i}" style="${monInputStyle(t)}"><option value="">Not recorded</option>${[1, 2, 3].map((q) => `<option value="${q}" ${s.current && s.current.value === q ? 'selected' : ''}>${monQualLabel(q)}</option>`).join('')}</select></div>`
+              : `<div><label style="${monLabelStyle(t)}">Reading${monUnit(s.param) ? ' (' + esc(monUnit(s.param)) + ')' : ''}</label><input type="number" step="any" class="mon-val" data-i="${i}" value="${s.current ? s.current.value : ''}" style="${monInputStyle(t)}"></div>`}
             <div><label style="${monLabelStyle(t)}">Reading note</label><input type="text" class="mon-rnote" data-i="${i}" value="${esc(s.current ? s.current.note : '')}" placeholder="Optional" style="${monInputStyle(t)}"></div>
           </div>
-          <div style="font-size:12.5px; color:${t.muted}; margin-top:6px; display:flex; flex-wrap:wrap; gap:4px 18px;">
+          ${monIsQual(s.param)
+            ? `<div style="font-size:12.5px; color:${t.muted}; margin-top:6px; line-height:1.5;">${s.param.amberText ? `<div><strong style="color:${monRagCss('amber')};">Amber:</strong> ${esc(s.param.amberText)}</div>` : ''}${s.param.redText ? `<div><strong style="color:${monRagCss('red')};">Red:</strong> ${esc(s.param.redText)}</div>` : ''}<div>Previous: <strong>${s.previous ? monQualLabel(s.previous.value) + ' (' + esc(fmtDate(s.previous.date)) + ')' : '—'}</strong></div></div>`
+            : `<div style="font-size:12.5px; color:${t.muted}; margin-top:6px; display:flex; flex-wrap:wrap; gap:4px 18px;">
             <span>Baseline: <strong>${monFmtNum(s.baseline)}</strong></span>
             <span>Previous: <strong>${s.previous ? monFmtNum(s.previous.value) + ' (' + esc(fmtDate(s.previous.date)) + ')' : '—'}</strong></span>
             <span>Δ previous: <strong>${monSigned(s.changePrev)}</strong></span>
             <span>Δ baseline: <strong>${monSigned(s.changeBase)}</strong></span>
-          </div>
+          </div>`}
         </div>`).join('') || `<div style="margin-top:10px; color:${t.muted}; font-size:13px;">No parameters defined for this point. Use "Edit point" to add them.</div>`}
       <div style="margin-top:12px;"><label style="${monLabelStyle(t)}">Notes for this visit</label><textarea class="mon-vnote" rows="2" placeholder="Condition observed, changes since last visit…" style="${monInputStyle(t)} resize:vertical;">${esc(visit ? visit.note : '')}</textarea></div>
       <div style="margin-top:10px;">
@@ -1268,13 +1307,13 @@ async function shellRenderMonitoringPreviewBlock(insp, section, heading) {
       ${plan.reason ? `<p style="font-size:14px;"><strong>Reason and assessment findings.</strong> ${esc(plan.reason)}</p>` : ''}
       ${plan.failureMode ? `<p style="font-size:14px;"><strong>Anticipated failure mode.</strong> ${esc(plan.failureMode)}</p>` : ''}
       ${points.length ? `<table style="width:100%; font-size:12.5px; border-collapse:collapse; font-family:-apple-system,sans-serif;"><tr style="border-bottom:1px solid ${t.line};">${th('Point')}${th('Type')}${th('Parameters (Amber / Red)', true)}</tr>
-      ${points.map((p) => `<tr style="border-bottom:1px solid ${t.line}; vertical-align:top;"><td style="padding:5px 6px 5px 0;">${esc(monPointTitle(p))}</td><td style="padding:5px 6px 5px 0;">${esc(p.type)}</td><td style="padding:5px 0;">${(p.parameters || []).map((x) => esc(x.name) + (x.unit ? ' (' + esc(x.unit) + ')' : '') + ': ' + monFmtNum(monNum(x.amber)) + ' / ' + monFmtNum(monNum(x.red))).join('<br>') || '—'}</td></tr>`).join('')}</table>` : `<div style="color:${t.muted}; font-size:13.5px;">No monitoring points defined.</div>`}`;
+      ${points.map((p) => `<tr style="border-bottom:1px solid ${t.line}; vertical-align:top;"><td style="padding:5px 6px 5px 0;">${esc(monPointTitle(p))}</td><td style="padding:5px 6px 5px 0;">${esc(p.type)}</td><td style="padding:5px 0;">${(p.parameters || []).map((x) => esc(x.name) + (monUnit(x) ? ' (' + esc(monUnit(x)) + ')' : '') + ': ' + (monIsQual(x) ? ': qualitative' : ': ' + monFmtNum(monNum(x.amber)) + ' / ' + monFmtNum(monNum(x.red)))).join('<br>') || '—'}</td></tr>`).join('')}</table>` : `<div style="color:${t.muted}; font-size:13.5px;">No monitoring points defined.</div>`}`;
   }
   if (section.type === 'monitoringReadings') {
     const lines = [];
     for (const p of points.filter((x) => x.status !== 'closed')) {
       for (const s of monBuildSummary(p, readings.filter((r) => r.pointId === p.id), insp.id)) {
-        lines.push(`<tr style="border-bottom:1px solid ${t.line};"><td style="padding:5px 6px 5px 0;">${esc(monPointTitle(p))}</td><td style="padding:5px 6px 5px 0;">${esc(s.param.name)}${s.param.unit ? ' (' + esc(s.param.unit) + ')' : ''}</td><td style="padding:5px 6px 5px 0;">${s.previous ? monFmtNum(s.previous.value) : '—'}</td><td style="padding:5px 6px 5px 0;"><strong>${s.current ? monFmtNum(s.current.value) : '—'}</strong></td><td style="padding:5px 6px 5px 0;">${monSigned(s.changePrev)}</td><td style="padding:5px 0;">${monRagBadge(s.rag)}</td></tr>`);
+        lines.push(`<tr style="border-bottom:1px solid ${t.line};"><td style="padding:5px 6px 5px 0;">${esc(monPointTitle(p))}</td><td style="padding:5px 6px 5px 0;">${esc(s.param.name)}${monUnit(s.param) ? ' (' + esc(monUnit(s.param)) + ')' : ''}</td><td style="padding:5px 6px 5px 0;">${s.previous ? monValText(s.param, s.previous.value) : '—'}</td><td style="padding:5px 6px 5px 0;"><strong>${s.current ? monValText(s.param, s.current.value) : '—'}</strong></td><td style="padding:5px 6px 5px 0;">${monSigned(s.changePrev)}</td><td style="padding:5px 0;">${monRagBadge(s.rag)}</td></tr>`);
       }
     }
     return `${heading}${lines.length ? `<table style="width:100%; font-size:12.5px; border-collapse:collapse; font-family:-apple-system,sans-serif;"><tr style="border-bottom:1px solid ${t.line};">${th('Point')}${th('Parameter')}${th('Previous')}${th('Current')}${th('Δ prev.')}${th('Status', true)}</tr>${lines.join('')}</table>` : `<div style="color:${t.muted}; font-size:13.5px;">No readings recorded yet.</div>`}`;
@@ -1474,7 +1513,9 @@ function drawMonitoringSpecPdf(doc, plan, points, y, opts, images) {
       body: points.map((p) => [
         monPointTitle(p) + '\n' + (p.shape === 'area' ? 'Area' : 'Point') + ' · ' + p.type + (p.status === 'closed' ? ' (closed)' : ''),
         [p.instrWhat && 'Monitoring: ' + p.instrWhat, p.instrMeasure && 'Measure: ' + p.instrMeasure, p.instrHow && 'How: ' + p.instrHow].filter(Boolean).join('\n') || '—',
-        (p.parameters || []).map((x) => `${x.name || 'Parameter'}${x.unit ? ' (' + x.unit + ')' : ''}${x.accuracy ? ', ' + x.accuracy : ''}: ${x.basis === 'change' ? 'change from baseline' : 'value'}; Amber ${monFmtNum(monNum(x.amber))}, Red ${monFmtNum(monNum(x.red))}${x.action ? '\nAction: ' + x.action : ''}`).join('\n\n') || '—'
+        (p.parameters || []).map((x) => (monIsQual(x)
+          ? `${x.name || 'Parameter'}: qualitative rating (Green / Amber / Red)${x.amberText ? '\nAmber: ' + x.amberText : ''}${x.redText ? '\nRed: ' + x.redText : ''}${x.action ? '\nAction: ' + x.action : ''}`
+          : `${x.name || 'Parameter'}${monUnit(x) ? ' (' + monUnit(x) + ')' : ''}${x.accuracy ? ', ' + x.accuracy : ''}: ${x.basis === 'change' ? 'change from baseline' : 'value'}; Amber ${monFmtNum(monNum(x.amber))}, Red ${monFmtNum(monNum(x.red))}${x.action ? '\nAction: ' + x.action : ''}`)).join('\n\n') || '—'
       ]),
       styles: { font: 'helvetica', fontSize: 8.5, cellPadding: 4, overflow: 'linebreak', valign: 'top' },
       headStyles: { fillColor: [28, 31, 38], textColor: 255 },
@@ -1499,10 +1540,10 @@ function drawMonitoringReadingsPdf(doc, visitData, y, opts) {
     r.summary.forEach((s) => {
       body.push([
         monPointTitle(r.point),
-        (s.param.name || dash) + (s.param.unit ? ' (' + s.param.unit + ')' : ''),
+        (s.param.name || dash) + (monUnit(s.param) ? ' (' + monUnit(s.param) + ')' : ''),
         monFmtNum(s.baseline),
-        s.previous ? monFmtNum(s.previous.value) : dash,
-        s.current ? monFmtNum(s.current.value) : 'not read',
+        s.previous ? monValText(s.param, s.previous.value) : dash,
+        s.current ? monValText(s.param, s.current.value) : 'not read',
         monSigned(s.changePrev),
         monSigned(s.changeBase),
         s.rag ? MON_RAG_LABELS[s.rag] : dash
@@ -1565,7 +1606,9 @@ function drawMonitoringHistoryPdf(doc, hData, y, opts) {
       doc.autoTable({
         startY: y - 6, margin: { left: margin, right: margin },
         head: [['Parameter', 'Basis', 'Baseline', 'Amber', 'Red', 'Action if triggered']],
-        body: params.map((x) => [(x.name || dash) + (x.unit ? ' (' + x.unit + ')' : ''), x.basis === 'change' ? 'Change' : 'Value', monFmtNum(entry.baselines[x.id]), monFmtNum(monNum(x.amber)), monFmtNum(monNum(x.red)), x.action || dash]),
+        body: params.map((x) => (monIsQual(x)
+          ? [x.name || dash, 'Qualitative', dash, x.amberText || dash, x.redText || dash, x.action || dash]
+          : [(x.name || dash) + (monUnit(x) ? ' (' + monUnit(x) + ')' : ''), x.basis === 'change' ? 'Change' : 'Value', monFmtNum(entry.baselines[x.id]), monFmtNum(monNum(x.amber)), monFmtNum(monNum(x.red)), x.action || dash])),
         styles: { font: 'helvetica', fontSize: 8.5, cellPadding: 3, overflow: 'linebreak' },
         headStyles: { fillColor: [70, 76, 90], textColor: 255 },
         columnStyles: { 5: { cellWidth: 170 } }
@@ -1580,8 +1623,8 @@ function drawMonitoringHistoryPdf(doc, hData, y, opts) {
       const rowRags = rows.map((r) => params.map((x) => (r.values[x.id] ? r.values[x.id].rag : null)));
       doc.autoTable({
         startY: y - 6, margin: { left: margin, right: margin },
-        head: [['Date', ...params.map((x) => (x.name || 'Parameter') + (x.unit ? ' (' + x.unit + ')' : '')), 'Status', 'Notes']],
-        body: rows.map((r) => [fmtDate(r.date), ...params.map((x) => (r.values[x.id] ? monFmtNum(r.values[x.id].value) : dash)), r.rag ? MON_RAG_LABELS[r.rag] : dash, r.note || '']),
+        head: [['Date', ...params.map((x) => (x.name || 'Parameter') + (monUnit(x) ? ' (' + monUnit(x) + ')' : '')), 'Status', 'Notes']],
+        body: rows.map((r) => [fmtDate(r.date), ...params.map((x) => (r.values[x.id] ? monValText(x, r.values[x.id].value) : dash)), r.rag ? MON_RAG_LABELS[r.rag] : dash, r.note || '']),
         styles: { font: 'helvetica', fontSize: 8.5, cellPadding: 3, overflow: 'linebreak', valign: 'top' },
         headStyles: { fillColor: [28, 31, 38], textColor: 255 },
         didParseCell: (data) => {
