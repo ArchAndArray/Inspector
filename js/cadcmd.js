@@ -13,6 +13,7 @@
 const CadCmd = (() => {
   'use strict';
   const G = (typeof CadGeo !== 'undefined') ? CadGeo : require('./cadgeo.js');
+  const X = (typeof CadEdit !== 'undefined') ? CadEdit : require('./cadedit.js');
 
   // ---------- document ----------
   class CadDoc {
@@ -154,7 +155,9 @@ const CadCmd = (() => {
   }
 
   // ---------- commands ----------
-  const ALIASES = { L: 'LINE', PL: 'PLINE', REC: 'RECTANG', C: 'CIRCLE', A: 'ARC', PO: 'POINT', E: 'ERASE', U: 'UNDO', Z: 'ZOOM', P: 'PAN', RE: 'REGEN', R: 'REDRAW', POLYLINE: 'PLINE', RECTANGLE: 'RECTANG' };
+  const ALIASES = { L: 'LINE', PL: 'PLINE', REC: 'RECTANG', C: 'CIRCLE', A: 'ARC', PO: 'POINT', E: 'ERASE', U: 'UNDO', Z: 'ZOOM', P: 'PAN', RE: 'REGEN', R: 'REDRAW', POLYLINE: 'PLINE', RECTANGLE: 'RECTANG',
+    M: 'MOVE', CO: 'COPY', CP: 'COPY', RO: 'ROTATE', SC: 'SCALE', MI: 'MIRROR', O: 'OFFSET', TR: 'TRIM', EX: 'EXTEND',
+    F: 'FILLET', CHA: 'CHAMFER', S: 'STRETCH', X: 'EXPLODE', DEL: 'ERASE', DELETE: 'ERASE' };
   const opt = (name, short) => ({ name, short: short || name[0] });
   const bulge3 = (p1, p2, p3) => {
     const a = G.arcThrough3(p1, p2, p3); if (!a) return null;
@@ -163,6 +166,8 @@ const CadCmd = (() => {
     return Math.tan(th / 4);
   };
   const same = (a, b) => G.dist(a, b) < 1e-9;
+  const rectPoly = (a, b) => ({ t: 'LWPOLYLINE', closed: true, v: [[a[0], a[1], 0], [b[0], a[1], 0], [b[0], b[1], 0], [a[0], b[1], 0]] });
+  const withoutId = (e) => { const n = { ...e }; delete n.id; return n; };
 
   const COMMANDS = {
     *LINE(c) {
@@ -345,6 +350,286 @@ const CadCmd = (() => {
       c.log(r.ids.length + ' erased.');
     },
 
+    // ----- modify commands (slice 1b). Each starts with a select prompt that is skipped when objects are already selected. -----
+    *MOVE(c) {
+      const sel = yield c.select('Select objects:'); if (sel.kind !== 'select' || !sel.ids.length) return;
+      const ents = sel.ids.map((id) => c.doc.byId.get(id)).filter(Boolean);
+      const b = yield c.point('Specify base point:'); if (b.kind !== 'point') return;
+      const s = yield c.point('Specify second point or <use first point as displacement>:', { base: b.pt, preview: (pt) => ents.map((e) => X.transformEntity(e, X.moveXf(G.sub(pt, b.pt)))) });
+      let d; if (s.kind === 'point') d = G.sub(s.pt, b.pt); else if (s.kind === 'enter') d = b.pt; else return;
+      for (const e of ents) c.replace(e.id, X.transformEntity(e, X.moveXf(d)));
+      c.log(ents.length + ' moved.');
+    },
+
+    *COPY(c) {
+      const sel = yield c.select('Select objects:'); if (sel.kind !== 'select' || !sel.ids.length) return;
+      const ents = sel.ids.map((id) => c.doc.byId.get(id)).filter(Boolean);
+      const b = yield c.point('Specify base point:'); if (b.kind !== 'point') return;
+      let n = 0;
+      for (;;) {
+        const s = yield c.point(n ? 'Specify second point or' : 'Specify second point or <displacement>', { base: b.pt, options: [opt('Exit', 'E')], preview: (pt) => ents.map((e) => X.transformEntity(e, X.moveXf(G.sub(pt, b.pt)))) });
+        let d;
+        if (s.kind === 'point') d = G.sub(s.pt, b.pt);
+        else if (s.kind === 'enter' && !n) d = b.pt;
+        else break;
+        for (const e of ents) c.add(withoutId(X.transformEntity(e, X.moveXf(d))));
+        n++;
+        if (s.kind === 'enter') break;
+      }
+      if (n) c.log(n + ' cop' + (n === 1 ? 'y' : 'ies') + ' made.');
+    },
+
+    *ROTATE(c) {
+      const sel = yield c.select('Select objects:'); if (sel.kind !== 'select' || !sel.ids.length) return;
+      const ents = sel.ids.map((id) => c.doc.byId.get(id)).filter(Boolean);
+      const b = yield c.point('Specify base point:'); if (b.kind !== 'point') return;
+      const angOf = (pt) => G.angleBetween(b.pt, pt);
+      let copy = false;
+      for (;;) {
+        const r = yield c.point('Specify rotation angle or', { base: b.pt, allowNumber: true, options: [opt('Copy', 'C'), opt('Reference', 'R')], preview: (pt) => ents.map((e) => X.transformEntity(e, X.rotXf(b.pt, angOf(pt)))) });
+        if (r.kind === 'option' && r.name === 'Copy') { copy = true; c.log('Rotating a copy of the selected objects.'); continue; }
+        let ang;
+        if (r.kind === 'option' && r.name === 'Reference') {
+          const ra = yield c.point('Specify the reference angle <0>', { base: b.pt, allowNumber: true });
+          let ref = 0;
+          if (ra.kind === 'number') ref = G.rad(ra.value); else if (ra.kind === 'point') ref = angOf(ra.pt); else if (ra.kind !== 'enter') return;
+          const na = yield c.point('Specify the new angle', { base: b.pt, allowNumber: true, preview: (pt) => ents.map((e) => X.transformEntity(e, X.rotXf(b.pt, angOf(pt) - ref))) });
+          if (na.kind === 'number') ang = G.rad(na.value) - ref; else if (na.kind === 'point') ang = angOf(na.pt) - ref; else return;
+        } else if (r.kind === 'number') ang = G.rad(r.value);
+        else if (r.kind === 'point') ang = angOf(r.pt);
+        else return;
+        const xf = X.rotXf(b.pt, ang);
+        for (const e of ents) { const n = X.transformEntity(e, xf); if (copy) c.add(withoutId(n)); else c.replace(e.id, n); }
+        c.log(ents.length + (copy ? ' copied and rotated ' : ' rotated ') + G.fmtNum(G.deg(ang), 4) + ' degrees.');
+        return;
+      }
+    },
+
+    *SCALE(c) {
+      const sel = yield c.select('Select objects:'); if (sel.kind !== 'select' || !sel.ids.length) return;
+      const ents = sel.ids.map((id) => c.doc.byId.get(id)).filter(Boolean);
+      const b = yield c.point('Specify base point:'); if (b.kind !== 'point') return;
+      const fOf = (pt) => Math.max(G.dist(b.pt, pt), 1e-9);
+      let copy = false;
+      for (;;) {
+        const r = yield c.point('Specify scale factor or', { base: b.pt, allowNumber: true, options: [opt('Copy', 'C'), opt('Reference', 'R')], preview: (pt) => ents.map((e) => X.transformEntity(e, X.scaleXf(b.pt, fOf(pt)))) });
+        if (r.kind === 'option' && r.name === 'Copy') { copy = true; c.log('Scaling a copy of the selected objects.'); continue; }
+        let f;
+        if (r.kind === 'option' && r.name === 'Reference') {
+          const ra = yield c.point('Specify reference length <1>', { base: b.pt, allowNumber: true });
+          let ref = 1;
+          if (ra.kind === 'number') ref = ra.value; else if (ra.kind === 'point') ref = G.dist(b.pt, ra.pt); else if (ra.kind !== 'enter') return;
+          if (!(ref > 0)) { c.log('Reference length must be greater than zero.'); return; }
+          const na = yield c.point('Specify new length', { base: b.pt, allowNumber: true, preview: (pt) => ents.map((e) => X.transformEntity(e, X.scaleXf(b.pt, fOf(pt) / ref))) });
+          if (na.kind === 'number') f = na.value / ref; else if (na.kind === 'point') f = G.dist(b.pt, na.pt) / ref; else return;
+        } else if (r.kind === 'number') f = r.value;
+        else if (r.kind === 'point') f = G.dist(b.pt, r.pt);
+        else return;
+        if (!(f > 0)) { c.log('The scale factor must be greater than zero.'); return; }
+        const xf = X.scaleXf(b.pt, f);
+        for (const e of ents) { const n = X.transformEntity(e, xf); if (copy) c.add(withoutId(n)); else c.replace(e.id, n); }
+        c.log(ents.length + ' scaled by ' + G.fmtNum(f, 6) + '.');
+        return;
+      }
+    },
+
+    *MIRROR(c) {
+      const sel = yield c.select('Select objects:'); if (sel.kind !== 'select' || !sel.ids.length) return;
+      const ents = sel.ids.map((id) => c.doc.byId.get(id)).filter(Boolean);
+      const p1 = yield c.point('Specify first point of mirror line:'); if (p1.kind !== 'point') return;
+      const p2 = yield c.point('Specify second point of mirror line:', { base: p1.pt, preview: (pt) => (same(p1.pt, pt) ? [] : [{ t: 'LINE', p1: p1.pt, p2: pt }].concat(ents.map((e) => X.transformEntity(e, X.mirrorXf(p1.pt, pt))))) });
+      if (p2.kind !== 'point') return;
+      if (same(p1.pt, p2.pt)) { c.log('The two points are identical.'); return; }
+      const er = yield c.key('Erase source objects?', [opt('Yes', 'Y'), opt('No', 'N')]);
+      if (er.kind === 'point' || er.kind === 'select') return;
+      const xf = X.mirrorXf(p1.pt, p2.pt), erase = er.kind === 'option' && er.name === 'Yes';
+      for (const e of ents) { c.add(withoutId(X.transformEntity(e, xf))); if (erase) c.remove(e.id); }
+      c.log(ents.length + ' mirrored.');
+    },
+
+    *OFFSET(c) {
+      const eng = c.engine;
+      const r = yield c.number('Specify offset distance or', { options: [opt('Through', 'T')], default: eng.lastOffset || undefined });
+      let through = false, dst = null;
+      if (r.kind === 'option') through = true;
+      else if (r.kind === 'number') { if (!(r.value > 0)) { c.log('The offset distance must be greater than zero.'); return; } dst = r.value; eng.lastOffset = dst; }
+      else return;
+      const make = (e, pt) => X.offsetEntity(e, X.offsetSide(e, pt) * (through ? X.offsetDistanceThrough(e, pt) : dst));
+      for (;;) {
+        const s = yield c.select('Select object to offset or', { single: true, options: [opt('Exit', 'E')] });
+        if (s.kind !== 'select' || !s.ids.length) return;
+        const e = c.doc.byId.get(s.ids[0]); if (!e) continue;
+        if (!['LINE', 'CIRCLE', 'ARC', 'LWPOLYLINE'].includes(e.t)) { c.log('This object cannot be offset.'); continue; }
+        const q = yield c.point(through ? 'Specify through point or' : 'Specify point on side to offset or', { options: [opt('Exit', 'E')], preview: (pt) => { const o = make(e, pt); return o ? [o] : []; } });
+        if (q.kind !== 'point') return;
+        const o = make(e, q.pt);
+        if (!o) { c.log('Cannot offset: the result would collapse.'); continue; }
+        c.add(withoutId(o));
+      }
+    },
+
+    *TRIM(c) {
+      c.log('Pick the part to trim. All other objects are cutting edges.');
+      const counts = [];
+      for (;;) {
+        const s = yield c.select('Select object to trim or', { single: true, options: [opt('Undo', 'U')] });
+        if (s.kind === 'option' && s.name === 'Undo') {
+          const k = counts.pop();
+          if (k == null) c.log('Nothing to undo.'); else for (let i = 0; i < k; i++) c.undoOp();
+          continue;
+        }
+        if (s.kind !== 'select' || !s.ids.length) return;
+        const e = c.doc.byId.get(s.ids[0]); if (!e) continue;
+        const bb = G.bbox(e), others = c.doc.query(bb.minX, bb.minY, bb.maxX, bb.maxY).filter((o) => o.id !== e.id);
+        const res = X.trimEntity(e, s.pt || G.mid([bb.minX, bb.minY], [bb.maxX, bb.maxY]), others);
+        if (res.error) { c.log(res.error); continue; }
+        const before = c.opCount();
+        c.remove(e.id);
+        for (const p of res.pieces) c.add(withoutId(p));
+        counts.push(c.opCount() - before);
+      }
+    },
+
+    *EXTEND(c) {
+      c.log('Pick the end to extend. All other objects are boundary edges.');
+      const counts = [];
+      for (;;) {
+        const s = yield c.select('Select object to extend or', { single: true, options: [opt('Undo', 'U')] });
+        if (s.kind === 'option' && s.name === 'Undo') {
+          const k = counts.pop();
+          if (k == null) c.log('Nothing to undo.'); else for (let i = 0; i < k; i++) c.undoOp();
+          continue;
+        }
+        if (s.kind !== 'select' || !s.ids.length) return;
+        const e = c.doc.byId.get(s.ids[0]); if (!e) continue;
+        const others = c.doc.entities.filter((o) => o.id !== e.id);
+        const res = X.extendEntity(e, s.pt || [0, 0], others);
+        if (res.error) { c.log(res.error); continue; }
+        const before = c.opCount();
+        c.replace(e.id, res.entity);
+        counts.push(c.opCount() - before);
+      }
+    },
+
+    *FILLET(c) {
+      const eng = c.engine;
+      if (eng.filletR == null) eng.filletR = 0;
+      if (eng.filletTrim == null) eng.filletTrim = true;
+      c.log('Current settings: Mode = ' + (eng.filletTrim ? 'TRIM' : 'NOTRIM') + ', Radius = ' + G.fmtNum(eng.filletR, 4));
+      for (;;) {
+        const a = yield c.select('Select first line or', { single: true, options: [opt('Polyline', 'P'), opt('Radius', 'R'), opt('Trim', 'T')] });
+        if (a.kind === 'option') {
+          if (a.name === 'Radius') { const r = yield c.number('Specify fillet radius', { default: eng.filletR }); if (r.kind === 'number' && r.value >= 0) eng.filletR = r.value; continue; }
+          if (a.name === 'Trim') { const t = yield c.key('Trim mode?', [opt('Trim', 'T'), opt('No trim', 'N')]); if (t.kind === 'option') eng.filletTrim = t.name === 'Trim'; continue; }
+          if (a.name === 'Polyline') {
+            const p = yield c.select('Select 2D polyline', { single: true });
+            if (p.kind !== 'select' || !p.ids.length) return;
+            const e = c.doc.byId.get(p.ids[0]);
+            if (!e || e.t !== 'LWPOLYLINE') { c.log('That is not a polyline.'); return; }
+            const n = X.polyCorners(e, 'fillet', eng.filletR);
+            if (!n) { c.log('Nothing to fillet. Check the radius against the segment lengths.'); return; }
+            c.replace(e.id, n); c.log('Polyline corners filleted.'); return;
+          }
+          return;
+        }
+        if (a.kind !== 'select' || !a.ids.length) return;
+        const e1 = c.doc.byId.get(a.ids[0]); if (!e1) continue;
+        if (e1.t !== 'LINE') { c.log('Fillet works on two lines here. Use the Polyline option for polylines.'); continue; }
+        const b = yield c.select('Select second line', { single: true });
+        if (b.kind !== 'select' || !b.ids.length) return;
+        const e2 = c.doc.byId.get(b.ids[0]);
+        if (!e2 || e2.t !== 'LINE' || e2.id === e1.id) { c.log('Pick a second, different line.'); return; }
+        const res = X.filletLines(e1, a.pt || e1.p1, e2, b.pt || e2.p1, eng.filletR, eng.filletTrim);
+        if (res.error) { c.log(res.error); return; }
+        if (res.l1) c.replace(e1.id, res.l1);
+        if (res.l2) c.replace(e2.id, res.l2);
+        if (res.arc) c.add(res.arc);
+        return;
+      }
+    },
+
+    *CHAMFER(c) {
+      const eng = c.engine;
+      if (eng.chamD1 == null) { eng.chamD1 = 0; eng.chamD2 = 0; }
+      if (eng.chamTrim == null) eng.chamTrim = true;
+      c.log('Current settings: Mode = ' + (eng.chamTrim ? 'TRIM' : 'NOTRIM') + ', Distances = ' + G.fmtNum(eng.chamD1, 4) + ', ' + G.fmtNum(eng.chamD2, 4));
+      for (;;) {
+        const a = yield c.select('Select first line or', { single: true, options: [opt('Polyline', 'P'), opt('Distance', 'D'), opt('Trim', 'T')] });
+        if (a.kind === 'option') {
+          if (a.name === 'Distance') {
+            const d1 = yield c.number('Specify first chamfer distance', { default: eng.chamD1 });
+            if (d1.kind !== 'number' || d1.value < 0) continue;
+            const d2 = yield c.number('Specify second chamfer distance', { default: d1.value });
+            if (d2.kind !== 'number' || d2.value < 0) continue;
+            eng.chamD1 = d1.value; eng.chamD2 = d2.value; continue;
+          }
+          if (a.name === 'Trim') { const t = yield c.key('Trim mode?', [opt('Trim', 'T'), opt('No trim', 'N')]); if (t.kind === 'option') eng.chamTrim = t.name === 'Trim'; continue; }
+          if (a.name === 'Polyline') {
+            const p = yield c.select('Select 2D polyline', { single: true });
+            if (p.kind !== 'select' || !p.ids.length) return;
+            const e = c.doc.byId.get(p.ids[0]);
+            if (!e || e.t !== 'LWPOLYLINE') { c.log('That is not a polyline.'); return; }
+            const n = X.polyCorners(e, 'chamfer', eng.chamD1, eng.chamD2);
+            if (!n) { c.log('Nothing to chamfer. Check the distances against the segment lengths.'); return; }
+            c.replace(e.id, n); c.log('Polyline corners chamfered.'); return;
+          }
+          return;
+        }
+        if (a.kind !== 'select' || !a.ids.length) return;
+        const e1 = c.doc.byId.get(a.ids[0]); if (!e1) continue;
+        if (e1.t !== 'LINE') { c.log('Chamfer works on two lines here. Use the Polyline option for polylines.'); continue; }
+        const b = yield c.select('Select second line', { single: true });
+        if (b.kind !== 'select' || !b.ids.length) return;
+        const e2 = c.doc.byId.get(b.ids[0]);
+        if (!e2 || e2.t !== 'LINE' || e2.id === e1.id) { c.log('Pick a second, different line.'); return; }
+        const res = X.chamferLines(e1, a.pt || e1.p1, e2, b.pt || e2.p1, eng.chamD1, eng.chamD2, eng.chamTrim);
+        if (res.error) { c.log(res.error); return; }
+        if (res.l1) c.replace(e1.id, res.l1);
+        if (res.l2) c.replace(e2.id, res.l2);
+        if (res.line) c.add(res.line);
+        return;
+      }
+    },
+
+    *STRETCH(c) {
+      const a = yield c.point('Specify first corner of the crossing window:'); if (a.kind !== 'point') return;
+      const q = yield c.point('Specify opposite corner:', { base: a.pt, preview: (pt) => [rectPoly(a.pt, pt)] }); if (q.kind !== 'point') return;
+      const R = G.rectOf(a.pt, q.pt);
+      const ents = c.doc.query(R.minX, R.minY, R.maxX, R.maxY).filter((e) => G.entCrossesRect(e, R) || G.entInWindow(e, R));
+      if (!ents.length) { c.log('No objects found.'); return; }
+      c.log(ents.length + ' found');
+      const b = yield c.point('Specify base point:'); if (b.kind !== 'point') return;
+      const s = yield c.point('Specify second point or <use first point as displacement>:', { base: b.pt, preview: (pt) => ents.map((e) => X.stretchEntity(e, R, G.sub(pt, b.pt))).filter(Boolean) });
+      let d; if (s.kind === 'point') d = G.sub(s.pt, b.pt); else if (s.kind === 'enter') d = b.pt; else return;
+      let n = 0;
+      for (const e of ents) { const ne = X.stretchEntity(e, R, d); if (ne) { c.replace(e.id, ne); n++; } }
+      c.log(n + ' stretched.');
+    },
+
+    *EXPLODE(c) {
+      const sel = yield c.select('Select objects:'); if (sel.kind !== 'select' || !sel.ids.length) return;
+      let n = 0, skipped = 0;
+      for (const id of sel.ids) {
+        const e = c.doc.byId.get(id); if (!e) continue;
+        const parts = X.explode(e);
+        if (!parts) { skipped++; continue; }
+        c.remove(e.id); for (const p of parts) c.add(p); n++;
+      }
+      c.log(n + ' exploded.' + (skipped ? ' ' + skipped + ' cannot be exploded.' : ''));
+    },
+
+    // Internal: drag a grip of a selected object (started by the canvas, not typed).
+    *GRIP(c) {
+      const { id, grip } = c.engine.params || {};
+      const e = c.doc.byId.get(id); if (!e) return;
+      c.engine.keepSel = [id];
+      const r = yield c.point('Specify stretch point:', { base: grip.pt, preview: (pt) => { const n = X.gripApply(e, grip, pt); return n ? [n] : []; } });
+      if (r.kind !== 'point') return;
+      const n = X.gripApply(e, grip, r.pt);
+      if (!n) { c.log('That would make the object invalid.'); return; }
+      c.replace(id, n);
+    },
+
     *ZOOM(c) {
       const h = c.engine.host;
       const r = yield c.point('Specify corner of window, enter a scale factor (nX), or', { options: [opt('All', 'A'), opt('Extents', 'E'), opt('Previous', 'P'), opt('Scale', 'S'), opt('Window', 'W')], allowNumber: true });
@@ -383,7 +668,7 @@ const CadCmd = (() => {
     REGEN(e) { if (e.host.redraw) e.host.redraw(); e.log('Regenerating model.'); },
     REDRAW(e) { if (e.host.redraw) e.host.redraw(); }
   };
-  const ALL_COMMANDS = Object.keys(COMMANDS).concat(Object.keys(INSTANT));
+  const ALL_COMMANDS = Object.keys(COMMANDS).filter((n) => n !== 'GRIP').concat(Object.keys(INSTANT));
 
   // ---------- engine ----------
   class Engine {
@@ -393,6 +678,8 @@ const CadCmd = (() => {
       this.lastPoint = null; this.lastEnd = null; this.cursor = null;
       this.lastCommand = null; this.selection = new Set(); this.onChange = null;
       this.lastRadius = null; this.lastRect = null;
+      this.preselect = null; this.params = null; this.keepSel = null;
+      this.lastOffset = null; this.filletR = null; this.filletTrim = null; this.chamD1 = null; this.chamD2 = null; this.chamTrim = null;
     }
     log(msg) { this.history.push(msg); if (this.history.length > 200) this.history.shift(); }
     _emit() { if (this.onChange) this.onChange(); }
@@ -410,19 +697,27 @@ const CadCmd = (() => {
       for (const n of ALL_COMMANDS) if (n.startsWith(p) && n !== p) out.add(n);
       return Array.from(out).sort((a, b) => a.length - b.length || a.localeCompare(b)).slice(0, 8);
     }
-    start(text) {
+    start(text, params) {
       if (this.active) return false;
       const name = this.resolve(text);
       if (!name) { this.log('Unknown command "' + String(text).trim() + '". Press F1 for help.'); this._emit(); return false; }
       this.log('Command: ' + name);
       this.lastCommand = name;
       if (INSTANT[name]) { INSTANT[name](this); this._emit(); return true; }
-      this.active = name; this.selection = new Set();
+      this._begin(name, params);
+      return true;
+    }
+    // Start a grip drag on a selected object (called by the canvas).
+    startGrip(id, grip) { if (this.active) return false; this._begin('GRIP', { id, grip }); this.selection = new Set([id]); this._emit(); return true; }
+    _begin(name, params) {
+      this.params = params || null;
+      // Objects selected before the command (noun-verb) answer its first "Select objects" prompt.
+      this.preselect = this.selection.size ? new Set(Array.from(this.selection).filter((id) => this.doc.byId.has(id))) : null;
+      this.active = name; this.selection = new Set(); this.keepSel = null;
       this.doc.beginGroup();
       const c = this._ctx();
       this.gen = COMMANDS[name](c);
       this._step(undefined);
-      return true;
     }
     _ctx() {
       const e = this, d = this.doc;
@@ -433,7 +728,7 @@ const CadCmd = (() => {
         key: (msg, options, o) => ({ kind: 'key', msg, options, ...(o || {}) }),
         select: (msg, o) => ({ kind: 'select', msg, ...(o || {}) }),
         add: (ent) => d.add(ent), remove: (id) => d.remove(id), replace: (id, ent) => d.replace(id, ent),
-        undoOp: () => d.popOp(), log: (m) => e.log(m)
+        undoOp: () => d.popOp(), opCount: () => (d.group ? d.group.length : 0), log: (m) => e.log(m)
       };
     }
     _step(val) {
@@ -441,16 +736,25 @@ const CadCmd = (() => {
       try { r = this.gen.next(val); } catch (err) { this.log('Error: ' + err.message); this._finish(); return; }
       if (r.done) { this._finish(); return; }
       this.prompt = r.value;
+      if (this.prompt.kind === 'select' && !this.prompt.single && this.preselect && this.preselect.size) {
+        const ids = Array.from(this.preselect); this.preselect = null;
+        for (const id of ids) this.selection.add(id);
+        this.log(ids.length + ' found');
+        this._step({ kind: 'select', ids });
+        return;
+      }
       this.log(this.promptText());
       this._emit();
     }
     _finish() {
       this.doc.endGroup();
-      this.active = null; this.gen = null; this.prompt = null; this.selection = new Set();
+      this.active = null; this.gen = null; this.prompt = null;
+      this.selection = new Set(this.keepSel ? this.keepSel.filter((id) => this.doc.byId.has(id)) : []);
+      this.keepSel = null; this.preselect = null; this.params = null;
       this._emit();
     }
     cancel() {
-      if (!this.active) return;
+      if (!this.active) { if (this.selection.size) { this.selection = new Set(); this._emit(); } return; }
       this.log('*Cancel*');
       try { this.gen.return(); } catch (e) { /* ignore */ }
       this._finish();
@@ -477,8 +781,17 @@ const CadCmd = (() => {
       if (p.kind === 'number' && p.base) { const v = G.dist(p.base, pt); this.lastPoint = pt; this.log(G.fmtNum(v, 4)); this._step({ kind: 'number', value: v }); return true; }
       return false;
     }
-    selectAdd(ids) {
+    clearSelection() { if (this.selection.size) { this.selection = new Set(); this._emit(); } }
+    // pt: where the user picked (Trim, Extend and Fillet need it to know which part or end).
+    selectAdd(ids, pt) {
+      if (!this.active) { for (const id of ids) this.selection.add(id); this._emit(); return; }   // idle: pick-first selection
       if (!this.wantsSelect()) return;
+      if (this.prompt.single) {
+        if (!ids.length) return;
+        this.log('1 found');
+        this._step({ kind: 'select', ids: [ids[0]], pt: pt || null });
+        return;
+      }
       let n = 0;
       for (const id of ids) if (!this.selection.has(id)) { this.selection.add(id); n++; }
       this.log(n + ' found' + (this.selection.size !== n ? ', ' + this.selection.size + ' total' : ''));
@@ -515,7 +828,7 @@ const CadCmd = (() => {
       const o = (/^[A-Za-z]/.test(t) || /^[23][Pp]$/.test(t)) ? this._matchOption(t) : null;
       if (o) { this._step({ kind: 'option', name: o.name }); return true; }
       if (p.kind === 'select') {
-        if (t.toUpperCase() === 'ALL') { this.selectAdd(this.doc.entities.map((e) => e.id)); return true; }
+        if (t.toUpperCase() === 'ALL' && !p.single) { this.selectAdd(this.doc.entities.map((e) => e.id)); return true; }
         this.log('Invalid selection. Pick objects or press Enter.'); this._emit(); return false;
       }
       if (p.kind === 'key') { this.log('Invalid option keyword.'); this._emit(); return false; }

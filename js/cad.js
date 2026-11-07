@@ -18,8 +18,14 @@ const CAD_DEFAULT_PREFS = {
   polarInc: 45, finger: 'pan'
 };
 const CAD_TOOLS = [
+  { group: 'Draw' },
   { cmd: 'LINE', label: 'Line' }, { cmd: 'PLINE', label: 'Polyline' }, { cmd: 'RECTANG', label: 'Rectangle' },
-  { cmd: 'CIRCLE', label: 'Circle' }, { cmd: 'ARC', label: 'Arc' }, { cmd: 'POINT', label: 'Point' }, { cmd: 'ERASE', label: 'Erase' }
+  { cmd: 'CIRCLE', label: 'Circle' }, { cmd: 'ARC', label: 'Arc' }, { cmd: 'POINT', label: 'Point' },
+  { group: 'Modify' },
+  { cmd: 'MOVE', label: 'Move' }, { cmd: 'COPY', label: 'Copy' }, { cmd: 'ROTATE', label: 'Rotate' }, { cmd: 'SCALE', label: 'Scale' },
+  { cmd: 'MIRROR', label: 'Mirror' }, { cmd: 'OFFSET', label: 'Offset' }, { cmd: 'TRIM', label: 'Trim' }, { cmd: 'EXTEND', label: 'Extend' },
+  { cmd: 'FILLET', label: 'Fillet' }, { cmd: 'CHAMFER', label: 'Chamfer' }, { cmd: 'STRETCH', label: 'Stretch' }, { cmd: 'EXPLODE', label: 'Explode' },
+  { cmd: 'ERASE', label: 'Erase' }
 ];
 const CAD_UNITS = { mm: { prec: 2, label: 'mm' }, m: { prec: 4, label: 'm' }, in: { prec: 3, label: 'in' } };
 
@@ -33,6 +39,18 @@ function cadIcon(cmd) {
     ARC: '<path d="M4 20 A10 10 0 0 1 22 20"/>',
     POINT: '<circle cx="13" cy="13" r="2.2" fill="currentColor"/><path d="M13 5 V8 M13 18 V21 M5 13 H8 M18 13 H21"/>',
     ERASE: '<path d="M6 17 L14 6 L21 11 L14 20 H9 Z"/><path d="M10 14 L17 19"/>',
+    MOVE: '<path d="M13 3 V23 M3 13 H23 M13 3 L10 6 M13 3 L16 6 M13 23 L10 20 M13 23 L16 20 M3 13 L6 10 M3 13 L6 16 M23 13 L20 10 M23 13 L20 16"/>',
+    COPY: '<rect x="4" y="10" width="11" height="11" rx="1"/><path d="M10 6 H21 V17"/>',
+    ROTATE: '<path d="M21 13 A8 8 0 1 1 13 5 M13 5 L17 2 M13 5 L17 8"/>',
+    SCALE: '<rect x="4" y="13" width="8" height="8"/><path d="M12 14 L22 4 M16 4 H22 V10"/>',
+    MIRROR: '<path d="M13 3 V23" stroke-dasharray="3 2.5"/><path d="M10 7 L4 19 H10 Z M16 7 L22 19 H16 Z"/>',
+    OFFSET: '<path d="M4 20 C4 10 10 5 21 5"/><path d="M8 23 C8 15 13 10 23 10"/>',
+    TRIM: '<path d="M3 13 H9 M17 13 H23"/><path d="M13 4 V22"/><path d="M10 10 L16 16 M16 10 L10 16"/>',
+    EXTEND: '<path d="M3 13 H16"/><path d="M22 4 V22"/><path d="M13 9 L17 13 L13 17"/>',
+    FILLET: '<path d="M5 4 V15 A6 6 0 0 0 11 21 H22"/>',
+    CHAMFER: '<path d="M5 4 V13 L13 21 H22"/>',
+    STRETCH: '<rect x="4" y="8" width="10" height="10" stroke-dasharray="3 2.5"/><path d="M14 13 H23 M20 10 L23 13 L20 16"/>',
+    EXPLODE: '<path d="M13 3 V8 M13 18 V23 M3 13 H8 M18 13 H23 M6 6 L9.5 9.5 M16.5 16.5 L20 20 M20 6 L16.5 9.5 M9.5 16.5 L6 20"/>',
     FIT: '<path d="M5 10 V5 H10 M16 5 H21 V10 M21 16 V21 H16 M10 21 H5 V16"/>',
     UNDO: '<path d="M8 10 H16 A4.5 4.5 0 0 1 16 19 H10"/><path d="M11 6 L7.5 10 L11 14"/>',
     REDO: '<path d="M18 10 H10 A4.5 4.5 0 0 0 10 19 H16"/><path d="M15 6 L18.5 10 L15 14"/>',
@@ -163,7 +181,7 @@ function cadMountEditor(data) {
       </div>
       <div class="cad-main">
         <div class="cad-palette" id="cad-palette">
-          ${CAD_TOOLS.map((t) => `<button class="cad-tool" data-cmd="${t.cmd}" title="${t.label}">${cadIcon(t.cmd)}<span>${t.label}</span></button>`).join('')}
+          ${CAD_TOOLS.map((t) => (t.group ? `<div class="cad-group">${t.group}</div>` : `<button class="cad-tool" data-cmd="${t.cmd}" title="${t.label}">${cadIcon(t.cmd)}<span>${t.label}</span></button>`)).join('')}
         </div>
         <div class="cad-wrap" id="cad-wrap">
           <canvas id="cad-canvas"></canvas>
@@ -404,6 +422,19 @@ function cadMountEditor(data) {
       for (const id of engine.selection) { const e = doc.byId.get(id); if (e) drawEntity(c, e); }
       c.setLineDash([]); c.lineWidth = 1.6;
     }
+    // grips on the idle selection
+    if (!engine.active && engine.selection.size && engine.selection.size <= 50) {
+      c.lineWidth = 1.2;
+      for (const id of engine.selection) {
+        const e = doc.byId.get(id); if (!e) continue;
+        for (const g of CadEdit.grips(e)) {
+          const sp = w2s(g.pt), sz = g.kind === 'mid' ? 6 : 9;
+          c.fillStyle = g.kind === 'mid' ? '#7aa7e0' : '#1565c0'; c.strokeStyle = '#ffffff';
+          c.fillRect(sp[0] - sz / 2, sp[1] - sz / 2, sz, sz); c.strokeRect(sp[0] - sz / 2, sp[1] - sz / 2, sz, sz);
+        }
+      }
+      c.lineWidth = 1.6;
+    }
     // tracking line
     if (cur.active && cur.track) {
       const a = w2s(cur.track.from), far = G.polar(cur.track.from, cur.track.ang, 1e6 / view.scale), b = w2s(far);
@@ -455,7 +486,16 @@ function cadMountEditor(data) {
     if (engine.active && engine.prompt && engine.prompt.options && engine.prompt.options.length) {
       for (const o of engine.prompt.options) chips.appendChild(chipEl(o.name, () => { engine.option(o.name); }));
     } else if (!engine.active) {
-      for (const s of engine.suggest(cmdInput.value)) chips.appendChild(chipEl(s, () => { cmdInput.value = ''; engine.start(s); refreshUI(); }));
+      if (cmdInput.value.trim()) {
+        for (const s of engine.suggest(cmdInput.value)) chips.appendChild(chipEl(s, () => { cmdInput.value = ''; engine.start(s); refreshUI(); }));
+      } else if (engine.selection.size) {
+        const n = engine.selection.size, count = document.createElement('span');
+        count.className = 'cad-selcount'; count.textContent = n + ' selected'; chips.appendChild(count);
+        const acts = [['Delete', 'ERASE'], ['Move', 'MOVE'], ['Copy', 'COPY'], ['Rotate', 'ROTATE'], ['Scale', 'SCALE'], ['Mirror', 'MIRROR']];
+        if (Array.from(engine.selection).some((id) => { const e = doc.byId.get(id); return e && e.t === 'LWPOLYLINE'; })) acts.push(['Explode', 'EXPLODE']);
+        for (const [label, cmd] of acts) chips.appendChild(chipEl(label, () => { engine.start(cmd); }));
+        chips.appendChild(chipEl('Clear', () => engine.clearSelection()));
+      }
     }
     if (engine.active && engine.wantsSelect()) chips.appendChild(chipEl('Done', () => engine.enter(), true));
     root.classList.toggle('cad-active', !!engine.active);
@@ -476,8 +516,16 @@ function cadMountEditor(data) {
 
   // ---- commands from UI ----
   function runCommand(name) { if (engine.active) engine.cancel(); engine.start(name); }
-  function doUndo() { if (engine.active) engine.cancel(); doc.undo(); refreshUI(); requestDraw(); }
-  function doRedo() { if (engine.active) return; doc.redo(); refreshUI(); requestDraw(); }
+  function doUndo() {
+    // Mid-command, Undo steps back one point (LINE / PLINE Undo option) instead of dropping the whole shape.
+    if (engine.active) {
+      const o = engine.prompt && engine.prompt.options && engine.prompt.options.find((x) => x.name === 'Undo');
+      if (o) { engine.option('Undo'); refreshUI(); requestDraw(); return; }
+      engine.cancel(); refreshUI(); requestDraw(); return;
+    }
+    engine.clearSelection(); doc.undo(); refreshUI(); requestDraw();
+  }
+  function doRedo() { if (engine.active) return; engine.clearSelection(); doc.redo(); refreshUI(); requestDraw(); }
   function toggle(k) {
     prefs.toggles[k] = !prefs.toggles[k];
     if (k === 'ortho' && prefs.toggles.ortho) prefs.toggles.polar = false;
@@ -539,6 +587,7 @@ function cadMountEditor(data) {
       return;
     }
     if (e.key === 'Escape') { closeMenu(); engine.cancel(); return; }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && !engine.active && engine.selection.size && (e.target !== cmdInput || !cmdInput.value)) { e.preventDefault(); engine.start('ERASE'); return; }
     if (e.target !== cmdInput && e.key.length === 1 && !e.altKey) { cmdInput.focus(); }
     else if (e.target !== cmdInput && e.key === 'Enter') { e.preventDefault(); submitCmd(); }
   };
@@ -586,9 +635,10 @@ function cadMountEditor(data) {
     if (document.activeElement === cmdInput && e.pointerType !== 'touch') cmdInput.blur();
     canvas.setPointerCapture(e.pointerId);
     const p = local(e);
-    pointers.set(e.pointerId, { p, type: e.pointerType, start: p, button: e.button });
+    pointers.set(e.pointerId, { p, type: e.pointerType, start: p, button: e.button, t0: Date.now(), noTap: false });
     if (pointers.size === 2) {
       clearLong(); gesture = 'pinch'; windowRect = null;
+      pointers.forEach((q) => { q.noTap = true; });
       const [a, b] = Array.from(pointers.values()).map((q) => q.p);
       pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]) || 1, mid: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], view: { ...view } };
       pinch.world = (() => { const v = view; return [v.cx + (pinch.mid[0] - W / 2) / v.scale, v.cy - (pinch.mid[1] - H / 2) / v.scale]; })();
@@ -599,8 +649,41 @@ function cadMountEditor(data) {
     if (e.pointerType === 'mouse' && e.button === 1) { gesture = 'pan'; e.preventDefault(); return; }
     if (e.pointerType === 'mouse' && e.button === 2) { gesture = 'menu'; openMenu(p[0], p[1]); return; }
     if (e.pointerType === 'touch' && prefs.finger === 'pan') { gesture = 'pan'; return; }
-    gesture = 'point'; resolveCursor(...cursorScreen(e, p), e.pointerType); startLong(e, p);
+    gesture = 'point'; gripStarted = false;
+    const rawS = cursorScreen(e, p);
+    if (!engine.active && engine.selection.size && e.button <= 0) {
+      const gh = gripAt(s2w(rawS[0], rawS[1]), e.pointerType);
+      if (gh && engine.startGrip(gh.id, gh.grip)) gripStarted = true;
+    }
+    resolveCursor(...rawS, e.pointerType); startLong(e, p);
   });
+  let gripStarted = false;
+  // Nearest grip of the selected objects within the pick aperture.
+  function gripAt(raw, ptype) {
+    if (engine.selection.size > 50) return null;
+    const ap = apertureFor(ptype) / view.scale;
+    let best = null, bd = Infinity;
+    for (const id of engine.selection) {
+      const e = doc.byId.get(id); if (!e) continue;
+      for (const g of CadEdit.grips(e)) {
+        const d = G.dist(g.pt, raw) + (g.kind === 'mid' ? ap * 0.25 : 0);
+        if (d <= ap && d < bd) { bd = d; best = { id, grip: g }; }
+      }
+    }
+    return best;
+  }
+  // Pick-first selection when no command is running.
+  function idlePick(hit, additive) {
+    if (hit) {
+      if (additive) { if (engine.selection.has(hit.id)) engine.selectRemove([hit.id]); else engine.selectAdd([hit.id]); }
+      else { engine.clearSelection(); engine.selectAdd([hit.id]); }
+    } else if (!additive) engine.clearSelection();
+  }
+  function tapAt(p, ptype) {
+    const raw = s2w(p[0], p[1]), tol = apertureFor(ptype) / view.scale, hit = doc.pick(raw, tol);
+    if (engine.wantsSelect()) { if (hit) engine.selectAdd([hit.id], raw); }
+    else if (!engine.active) idlePick(hit, false);
+  }
   canvas.addEventListener('pointermove', (e) => {
     const rec = pointers.get(e.pointerId);
     const p = local(e);
@@ -618,7 +701,8 @@ function cadMountEditor(data) {
     if (gesture === 'point' || gesture === 'window') {
       const moved = Math.hypot(p[0] - rec.start[0], p[1] - rec.start[1]);
       if (moved > 7) clearLong();
-      if (engine.wantsSelect() && (gesture === 'window' || moved > 9)) {
+      const windowOk = (engine.wantsSelect() && !engine.prompt.single) || !engine.active;
+      if (windowOk && (gesture === 'window' || moved > 9)) {
         gesture = 'window'; windowRect = [rec.start, p]; requestDraw(); return;
       }
       resolveCursor(...cursorScreen(e, p), e.pointerType);
@@ -637,16 +721,27 @@ function cadMountEditor(data) {
       const w1 = s2w(a[0], a[1]), w2 = s2w(b[0], b[1]), r = G.rectOf(w1, w2);
       const crossing = b[0] < a[0];
       const hits = doc.query(r.minX, r.minY, r.maxX, r.maxY).filter((x) => (crossing ? G.entCrossesRect(x, r) : G.entInWindow(x, r)));
-      if (e.shiftKey) engine.selectRemove(hits.map((x) => x.id)); else engine.selectAdd(hits.map((x) => x.id));
+      if (!engine.active) { if (!e.shiftKey) engine.clearSelection(); engine.selectAdd(hits.map((x) => x.id)); }
+      else if (e.shiftKey) engine.selectRemove(hits.map((x) => x.id)); else engine.selectAdd(hits.map((x) => x.id));
       requestDraw(); return;
+    }
+    if (g === 'pan' && e.pointerType === 'touch' && !rec.noTap && Date.now() - rec.t0 < 450 && Math.hypot(rec.p[0] - rec.start[0], rec.p[1] - rec.start[1]) < 8) {
+      tapAt(rec.p, 'touch'); requestDraw(); return;
     }
     if (g === 'point') {
       const p = rec.p;
       resolveCursor(...cursorScreen(e, p), e.pointerType);
+      if (gripStarted) {
+        gripStarted = false;
+        // press-lift without dragging leaves the grip hot: the next click places it
+        if (Math.hypot(p[0] - rec.start[0], p[1] - rec.start[1]) < 6) { requestDraw(); return; }
+      }
       if (engine.wantsSelect()) {
         const tol = apertureFor(e.pointerType) / view.scale;
         const hit = doc.pick(cur.raw, tol);
-        if (hit) { if (e.shiftKey) engine.selectRemove([hit.id]); else engine.selectAdd([hit.id]); }
+        if (hit) { if (e.shiftKey) engine.selectRemove([hit.id]); else engine.selectAdd([hit.id], cur.raw); }
+      } else if (!engine.active) {
+        idlePick(doc.pick(cur.raw, apertureFor(e.pointerType) / view.scale), e.shiftKey);
       } else if (engine.wantsPoint()) {
         engine.pick(cur.pt);
         resolveCursor(...cursorScreen(e, p), e.pointerType);
@@ -728,8 +823,10 @@ function injectCadCss() {
 .cad-title{background:none;border:0;color:#fff;font-size:16px;font-weight:650;max-width:34vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:6px 6px;text-align:left}
 .cad-saved{font-size:12px;color:#b8bcc4;white-space:nowrap}
 .cad-main{flex:1;min-height:0;display:flex}
-.cad-palette{width:64px;flex-shrink:0;background:#f3f4f6;border-right:1px solid #dfe1e5;display:flex;flex-direction:column;overflow-y:auto;padding:4px 0}
-.cad-tool{background:none;border:0;color:#2a2d34;display:flex;flex-direction:column;align-items:center;gap:1px;padding:7px 2px;font-size:10px;font-weight:600;margin:1px 4px;border-radius:9px}
+.cad-palette{width:128px;flex-shrink:0;background:#f3f4f6;border-right:1px solid #dfe1e5;display:grid;grid-template-columns:1fr 1fr;align-content:start;overflow-y:auto;padding:2px 0}
+.cad-group{grid-column:1/-1;font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:#7a808b;padding:7px 10px 2px}
+.cad-selcount{font-size:13px;font-weight:700;color:#1565c0;white-space:nowrap;padding:0 4px}
+.cad-tool{background:none;border:0;color:#2a2d34;display:flex;flex-direction:column;align-items:center;gap:1px;padding:5px 2px;font-size:10px;font-weight:600;margin:1px 3px;border-radius:9px}
 .cad-tool.on{background:#22252b;color:#fff}
 .cad-wrap{flex:1;min-width:0;position:relative;overflow:hidden;background:#fff}
 #cad-canvas{display:block;touch-action:none}
@@ -759,7 +856,7 @@ function injectCadCss() {
 .cad-modes{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px}
 .cad-mode{display:flex;align-items:center;gap:8px;font-size:14.5px}
 .cad-mode input{width:20px;height:20px}
-@media (max-width:560px){.cad-palette{width:54px}.cad-tool span{display:none}.cad-title{max-width:22vw}}
+@media (max-width:560px){.cad-palette{width:54px;grid-template-columns:1fr}.cad-group{padding:6px 2px 1px;text-align:center;font-size:8px}.cad-tool span{display:none}.cad-title{max-width:22vw}}
 `;
   document.head.appendChild(s);
 }
