@@ -96,6 +96,13 @@ async function renderLauncher() {
             <div style="font-size:13.5px; font-weight:650; text-align:center;">Scale &amp; Annotate</div>
           </div>
 
+          <div class="launcher-tile" data-target="cad" style="width:132px; display:flex; flex-direction:column; align-items:center; gap:10px; cursor:pointer; padding:16px 8px;">
+            <div style="width:64px; height:64px; border-radius:16px; background:${t.toolIconBg}; display:flex; align-items:center; justify-content:center;">
+              <svg width="30" height="30" viewBox="0 0 30 30" fill="none" stroke="${t.toolIconFg}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 24 L4 6 L18 6"/><circle cx="19" cy="19" r="7"/><path d="M4 24 L12 24"/></svg>
+            </div>
+            <div style="font-size:13.5px; font-weight:650; text-align:center;">CAD</div>
+          </div>
+
           <div class="launcher-tile" data-target="sketch" style="width:132px; display:flex; flex-direction:column; align-items:center; gap:10px; cursor:pointer; padding:16px 8px;">
             <div style="width:64px; height:64px; border-radius:16px; background:${t.toolIconBg}; display:flex; align-items:center; justify-content:center;">
               <div style="position:relative; width:26px; height:26px; background:#fff; border-radius:3px; border:1.5px solid oklch(0.75 0.006 90);">
@@ -152,6 +159,7 @@ async function renderLauncher() {
 async function onLauncherTileClick(target) {
   if (target === 'inspector') { navigate('#/inspector'); return; }
   if (target === 'pm') { navigate('#/pm'); return; }
+  if (target === 'cad') { navigate('#/cad'); return; }
   if (target === 'design') { navigate('#/design'); return; }
   if (target === 'scale-annotate') { navigate('#/scale-annotate'); return; }
   if (target === 'pdf-editor') { navigate('#/pdf-editor'); return; }
@@ -208,5 +216,6 @@ async function renderInspectorBridge() {
   document.getElementById('btn-launcher-back').addEventListener('click', () => navigate('#/'));
   document.getElementById('btn-element-templates').addEventListener('click', () => navigate('#/templates'));
   appEl.querySelectorAll('.list-item').forEach((row) => row.addEventListener('click', () => navigate(`#/inspection/${row.dataset.id}`)));
+  SwipeDelete.attachAll(appEl, '.list-item', (row) => ({ title: 'Delete inspection?', message: `${(row.querySelector('h3') ? row.querySelector('h3').textContent : 'this item')}: this inspection and all its sections, elements, findings and photos (for a monitoring set-up, its records too) will be deleted. This can\'t be undone.`, onDelete: async () => { await DB.deleteInspectionCascade(row.dataset.id); renderInspectorBridge(); } }));
   document.getElementById('btn-new-inspection').addEventListener('click', openNewInspectionSheet);
 }

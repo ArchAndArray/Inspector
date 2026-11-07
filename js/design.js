@@ -85,6 +85,7 @@ async function renderDesign() {
   appEl.querySelectorAll('.list-item').forEach((row) => {
     row.addEventListener('click', () => renderDesignProject(row.dataset.id));
   });
+  SwipeDelete.attachAll(appEl, '.list-item', (row) => ({ title: 'Delete project?', message: `${(row.querySelector('h3') ? row.querySelector('h3').textContent : 'this item')}: this project and everything in it will be deleted. This can\'t be undone.`, onDelete: async () => { await DB.deleteDesignProjectCascade(row.dataset.id); renderDesign(); } }));
 }
 
 function openNewDesignProjectSheet(onDone) {
@@ -166,6 +167,7 @@ async function renderDesignProject(projectId) {
   appEl.querySelectorAll('.list-item').forEach((row) => {
     row.addEventListener('click', () => renderDesignItem(row.dataset.id));
   });
+  SwipeDelete.attachAll(appEl, '.list-item', (row) => ({ title: 'Delete item?', message: `${(row.querySelector('h3') ? row.querySelector('h3').textContent : 'this item')}: this item and all its design cases will be deleted. This can\'t be undone.`, onDelete: async () => { await DB.deleteDesignItemCascade(row.dataset.id); renderDesignProject(projectId); } }));
 }
 
 function openEditDesignProjectSheet(project, onDone) {
@@ -303,6 +305,7 @@ async function renderDesignItem(itemId) {
   appEl.querySelectorAll('.list-item').forEach((row) => {
     row.addEventListener('click', () => renderDesignCase(row.dataset.id));
   });
+  SwipeDelete.attachAll(appEl, '.list-item', (row) => ({ title: 'Delete case?', message: `${(row.querySelector('h3') ? row.querySelector('h3').textContent : 'this item')}: this design case will be deleted. This can\'t be undone.`, onDelete: async () => { await DB.deleteDesignCase(row.dataset.id); renderDesignItem(itemId); } }));
 }
 
 function openEditDesignItemSheet(item, onDone) {

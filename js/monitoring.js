@@ -936,6 +936,10 @@ async function shellEditMonitoringSpecSection(body, section) {
       return `<div class="mon-im-card" data-id="${v.rec.id}" style="display:flex; gap:12px; align-items:center; border:1px solid ${t.line}; border-radius:10px; padding:10px; margin-bottom:8px; background:#fff; cursor:pointer;"><div style="width:96px; flex:none;">${monMarkedImageHtml(v, onIt.map(monMarkOf), null, 64)}</div><div style="flex:1; min-width:0;"><div style="font-weight:700; font-size:14px;">${esc(v.rec.name)}</div><div style="font-size:12px; color:${t.muted};">${onIt.length ? onIt.map((p) => esc(monLabel(p))).join(', ') : 'nothing marked yet'}</div></div></div>`;
     }).join('') || `<div style="color:${t.muted}; font-size:13.5px;">No location images yet.</div>`;
     imgBox.querySelectorAll('.mon-im-card').forEach((c) => c.addEventListener('click', () => monRenderImageDetail(host, plan, insp, c.dataset.id, renderMain)));
+    SwipeDelete.attachAll(imgBox, '.mon-im-card', (c) => {
+      const n = points.filter((p) => p.imageId === c.dataset.id).length;
+      return { title: 'Delete this image?', message: n ? `The ${n} point${n === 1 ? '' : 's'}/area${n === 1 ? '' : 's'} on it will be kept but will need placing on another image.` : 'This location image will be deleted.', onDelete: async () => { await DB.deleteMonitoringImage(c.dataset.id); renderMain(); } };
+    });
     host.querySelector('#mon-add-image').addEventListener('click', () => monAddImageFlow(plan, insp, () => renderMain()));
 
     const list = host.querySelector('#mon-points');
@@ -951,6 +955,7 @@ async function shellEditMonitoringSpecSection(body, section) {
     }
     list.innerHTML = cards.join('') || `<div style="color:${t.muted}; font-size:13.5px;">No monitoring points yet.</div>`;
     list.querySelectorAll('.mon-pt-card').forEach((c) => c.addEventListener('click', () => monRenderPointEditor(host, plan, insp, c.dataset.id, renderMain)));
+    SwipeDelete.attachAll(list, '.mon-pt-card', (c) => ({ title: 'Delete monitoring point?', message: 'This point will be deleted together with all its readings and photos. This can\'t be undone.', onDelete: async () => { await DB.deleteMonitoringPoint(c.dataset.id); renderMain(); } }));
     host.querySelector('#mon-add-point').addEventListener('click', async () => {
       const p = await DB.addMonitoringPoint(plan.id, insp.id, {});
       monRenderPointEditor(host, plan, insp, p.id, renderMain);
@@ -1108,6 +1113,15 @@ async function monRenderWorkspaceSidebar(sidebar, insp) {
       return `<div class="mon-sb-rec" data-id="${r.id}" style="display:flex; align-items:center; gap:9px; background:${active ? t.inkHover : 'transparent'}; border:1px solid ${active ? t.inkBorder : 'transparent'}; border-radius:9px; padding:9px 10px; margin-bottom:4px; cursor:pointer;"><span style="width:9px; height:9px; border-radius:50%; flex-shrink:0; background:${ragMap[r.id] ? monRagCss(ragMap[r.id]) : 'transparent'}; border:1px solid ${ragMap[r.id] ? monRagCss(ragMap[r.id]) : t.inkBorder};"></span><span style="font-size:13px; font-weight:650; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(monRecordTitle(r))}</span></div>`;
     }).join('') : `<div style="padding:8px 4px; color:${t.mutedLight}; font-size:12.5px;">No records yet. Tap "New monitoring record" to log a visit.</div>`;
     recBox.querySelectorAll('.mon-sb-rec').forEach((el2) => el2.addEventListener('click', () => open(el2.dataset.id)));
+    SwipeDelete.attachAll(recBox, '.mon-sb-rec', (el2) => {
+      const r = records.find((x) => x.id === el2.dataset.id);
+      if (!r) return null;
+      return { title: 'Delete ' + monRecordTitle(r) + '?', message: 'This monitoring record and its readings will be deleted. This can\'t be undone.', onDelete: async () => {
+        await DB.deleteInspectionCascade(r.id);
+        if (r.id === insp.id && setupId) await shellSelectInspection(setupId);
+        else renderShellSidebar();
+      } };
+    });
   }
 
   const listBox = document.getElementById('shell-sec-list');

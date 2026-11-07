@@ -149,6 +149,14 @@ async function renderShellInspectionListSidebar() {
   sidebar.querySelectorAll('.shell-insp-row').forEach((row) => {
     row.addEventListener('click', () => shellSelectInspection(row.dataset.id));
   });
+  SwipeDelete.attachAll(sidebar, '.shell-insp-row', (row) => {
+    const name = (row.children[1] && row.children[1].children[0]) ? row.children[1].children[0].textContent : 'this inspection';
+    return { title: 'Delete inspection?', message: `"${name}" and all its sections, elements, findings and photos will be deleted (for a monitoring set-up, all its monitoring records too). This can't be undone.`, onDelete: async () => {
+      await DB.deleteInspectionCascade(row.dataset.id);
+      if (shellState.selectedInspectionId === row.dataset.id) { shellState.selectedInspectionId = null; shellState.editingSectionId = null; }
+      renderShellSidebar(); renderShellMainPane();
+    } };
+  });
 }
 
 // The section-navigation sidebar for a selected inspection — Back (to inspection list),
@@ -648,6 +656,7 @@ async function shellOpenElementDrawer(elementId) {
     box.querySelectorAll('.shell-finding-card').forEach((card) => {
       card.addEventListener('click', () => shellOpenFindingSheet(elementId, card.dataset.id));
     });
+    SwipeDelete.attachAll(box, '.shell-finding-card', (card) => ({ title: 'Delete finding?', message: 'This finding will be deleted. This can\'t be undone.', onDelete: async () => { await DB.deleteFindingCascade(card.dataset.id); renderFindings(await DB.listFindings(elementId)); } }));
   };
   renderFindings(findings);
 
@@ -1022,6 +1031,7 @@ async function shellRenderAppendicesTab(content) {
   content.querySelectorAll('.shell-apx-row').forEach((row) => {
     row.addEventListener('click', () => shellOpenAppendixItems(row.dataset.section, row.dataset.id));
   });
+  SwipeDelete.attachAll(content, '.shell-apx-row', (row) => ({ title: 'Delete appendix?', message: 'This appendix and its items will be deleted. This can\'t be undone.', onDelete: async () => { await DB.deleteSectionAppendixCascade(row.dataset.section, row.dataset.id); renderShellTabContent(); } }));
 }
 
 async function shellOpenAppendixItems(reportSectionId, appendixId) {
@@ -1135,6 +1145,12 @@ async function shellRenderRiskTab(content) {
   content.querySelectorAll('.shell-risk-row').forEach((row) => {
     row.addEventListener('click', () => shellOpenRiskDetailSheet(row.dataset.id));
   });
+  SwipeDelete.attachAll(content, '.shell-risk-row', (row) => ({ title: 'Delete hazard?', message: 'This hazard and its signature will be deleted. This can\'t be undone.', onDelete: async () => {
+    const ra2 = await DB.getOrCreateRiskAssessment(shellState.selectedInspectionId);
+    await DB.removeSignature(ra2.id, `risk:${row.dataset.id}`);
+    await DB.updateRiskAssessment(ra2.id, { risks: (ra2.risks || []).filter((x) => x.id !== row.dataset.id) });
+    renderShellTabContent();
+  } }));
 }
 
 async function shellOpenRiskDetailSheet(riskId) {
@@ -1760,6 +1776,8 @@ async function shellEditInspectionFindingsSection(body, section) {
   wrap.querySelectorAll('.shell-if-el-row').forEach((row) => {
     row.addEventListener('click', () => shellOpenElementDrawer(row.dataset.id));
   });
+  SwipeDelete.attachAll(wrap, '.shell-if-ss-row', (row) => ({ title: 'Delete structure section?', message: 'This section and all its elements, findings and photos will be deleted. This can\'t be undone.', onDelete: async () => { await DB.deleteSectionCascade(row.dataset.id); shellRenderReportMainArea(); } }));
+  SwipeDelete.attachAll(wrap, '.shell-if-el-row', (row) => ({ title: 'Delete element?', message: 'This element and all its findings and photos will be deleted. This can\'t be undone.', onDelete: async () => { await DB.deleteElementCascade(row.dataset.id); shellRenderReportMainArea(); } }));
 }
 
 // Small overlay for the elements within one Structure Section — the shell has no full
@@ -1799,6 +1817,7 @@ async function shellOpenStructureSectionDetail(structureSectionId, inspectionId,
     box.querySelectorAll('.shell-ss-el-row').forEach((row) => {
       row.addEventListener('click', () => shellOpenElementDrawer(row.dataset.id));
     });
+    SwipeDelete.attachAll(box, '.shell-ss-el-row', (row) => ({ title: 'Delete element?', message: 'This element and all its findings and photos will be deleted. This can\'t be undone.', onDelete: async () => { await DB.deleteElementCascade(row.dataset.id); elements = elements.filter((x) => x.id !== row.dataset.id); renderList(); } }));
   }
   renderList();
 
@@ -1874,6 +1893,7 @@ async function shellEditAppendicesSection(body, section) {
     box.querySelectorAll('.shell-sec-apx-row').forEach((row) => {
       row.addEventListener('click', () => shellOpenAppendixItems(section.id, row.dataset.id));
     });
+    SwipeDelete.attachAll(box, '.shell-sec-apx-row', (row) => ({ title: 'Delete appendix?', message: 'This appendix and its items will be deleted. This can\'t be undone.', onDelete: async () => { await DB.deleteSectionAppendixCascade(section.id, row.dataset.id); appendices = await DB.listSectionAppendices(section.id); renderList(); } }));
   }
   renderList();
 

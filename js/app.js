@@ -14,7 +14,7 @@ function appendixLetter(index) {
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return letters[index] || String(index + 1);
 }
-const APP_VERSION = '1.0.6.28';
+const APP_VERSION = '1.0.6.30';
 
 let activeObjectUrls = [];
 function blobUrl(blob) {
@@ -380,6 +380,7 @@ function parseHash() {
 
 async function route() {
   clearObjectUrls();
+  if (typeof cadTeardown === 'function') cadTeardown();
   const p = parseHash();
   try {
     if (p.length === 0) await renderLauncher();
@@ -390,6 +391,7 @@ async function route() {
     else if (p[0] === 'pdf-editor') await renderPdfEditor();
     else if (p[0] === 'pm') await renderPM();
     else if (p[0] === 'design') await renderDesign();
+    else if (p[0] === 'cad') await renderCad(p[1]);
     else if (p[0] === 'quiz') await renderQuiz();
     else if (p[0] === 'graphcalc') await renderGraphCalc();
     else await renderLauncher();
@@ -3751,6 +3753,7 @@ async function renderTemplates() {
   `;
   document.getElementById('btn-back').addEventListener('click', () => navigate('#/'));
   document.getElementById('btn-new-template').addEventListener('click', openNewTemplateSheet);
+  SwipeDelete.attachAll(appEl, '.list-item', (row) => ({ title: 'Delete template?', message: `${(row.querySelector('h3') ? row.querySelector('h3').textContent : 'this item')}: this element template will be deleted.`, onDelete: async () => { await DB.deleteTemplate(row.dataset.id); renderTemplates(); } }));
   appEl.querySelectorAll('[data-del]').forEach((btn) => {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();

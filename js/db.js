@@ -2,7 +2,7 @@
 // Stores: inspections, sections, elements, findings, photos, templates
 
 const DB_NAME = 'siteInspectionDB';
-const DB_VERSION = 12;
+const DB_VERSION = 13;
 
 let dbPromise = null;
 
@@ -193,6 +193,17 @@ function openDB() {
         if (!db.objectStoreNames.contains('monitoringImages')) {
           const miStore = db.createObjectStore('monitoringImages', { keyPath: 'id' });
           miStore.createIndex('planId', 'planId', { unique: false });
+        }
+      }
+      if (oldVersion < 13) {
+        // CAD module: one record per drawing (whole document as JSON) plus a short trail of
+        // autosave snapshots per drawing. No existing store is touched.
+        if (!db.objectStoreNames.contains('cadDrawings')) {
+          db.createObjectStore('cadDrawings', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('cadSnapshots')) {
+          const csStore = db.createObjectStore('cadSnapshots', { keyPath: 'id' });
+          csStore.createIndex('drawingId', 'drawingId', { unique: false });
         }
       }
     };
@@ -1658,6 +1669,33 @@ const DB = {
     if (!existing) throw new Error('Design project not found');
     return this.put('designProjects', { ...existing, ...patch, updatedAt: new Date().toISOString() });
   },
+  // --- CAD module: drawings are whole JSON documents; snapshots are periodic autosave copies ---
+  async createCadDrawing(data) {
+    const doc = { ...CadCmd.CadDoc.blank(data || {}), id: uid() };
+    return this.put('cadDrawings', doc);
+  },
+  async listCadDrawings() {
+    const all = await this.getAll('cadDrawings');
+    return all.sort((a, b) => new Date(b.modified) - new Date(a.modified));
+  },
+  async saveCadDrawing(doc) {
+    return this.put('cadDrawings', doc);
+  },
+  async addCadSnapshot(doc, keep) {
+    const snap = { id: uid(), drawingId: doc.id, savedAt: new Date().toISOString(), doc: JSON.parse(JSON.stringify(doc)) };
+    await this.put('cadSnapshots', snap);
+    const all = (await this.getAllByIndex('cadSnapshots', 'drawingId', doc.id)).sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
+    for (const old of all.slice(keep || 20)) await this.delete('cadSnapshots', old.id);
+    return snap;
+  },
+  async listCadSnapshots(drawingId) {
+    return (await this.getAllByIndex('cadSnapshots', 'drawingId', drawingId)).sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
+  },
+  async deleteCadDrawing(id) {
+    for (const s of await this.getAllByIndex('cadSnapshots', 'drawingId', id)) await this.delete('cadSnapshots', s.id);
+    await this.delete('cadDrawings', id);
+  },
+
   async deleteDesignProjectCascade(id) {
     const items = await this.getAllByIndex('designItems', 'projectId', id);
     for (const item of items) await this.deleteDesignItemCascade(item.id);

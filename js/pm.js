@@ -62,6 +62,7 @@ async function renderPM() {
   appEl.querySelectorAll('#pm-list-content .list-item').forEach((row) => {
     row.addEventListener('click', () => renderPMWorkspace(row.dataset.id));
   });
+  SwipeDelete.attachAll(appEl, '#pm-list-content .list-item', (row) => ({ title: 'Delete project?', message: `${(row.querySelector('h3') ? row.querySelector('h3').textContent : 'this item')}: this project and all its tasks will be deleted. This can\'t be undone.`, onDelete: async () => { await DB.deletePMProjectCascade(row.dataset.id); renderPM(); } }));
 }
 
 // ---------- Resource Templates (global, reusable rosters) ----------
@@ -118,6 +119,7 @@ async function renderPMResourceTemplates() {
   appEl.querySelectorAll('#pm-templates-content .list-item').forEach((row) => {
     row.addEventListener('click', () => renderPMResourceTemplateDetail(row.dataset.id));
   });
+  SwipeDelete.attachAll(appEl, '#pm-templates-content .list-item', (row) => ({ title: 'Delete template?', message: `${(row.querySelector('h3') ? row.querySelector('h3').textContent : 'this item')}: this template and all its resource profiles will be deleted. Projects that already imported a copy are unaffected.`, onDelete: async () => { await DB.deletePMResourceTemplateCascade(row.dataset.id); renderPMResourceTemplates(); } }));
 }
 
 function openPMResourceTemplateSheet(template, onSaved) {
@@ -203,6 +205,7 @@ async function renderPMResourceTemplateDetail(templateId) {
     const item = items.find((i) => i.id === row.dataset.id);
     row.addEventListener('click', () => openPMResourceTemplateItemSheet(templateId, item, () => renderPMResourceTemplateDetail(templateId)));
   });
+  SwipeDelete.attachAll(appEl, '#pmtpl-detail-content .list-item', (row) => ({ title: 'Remove item?', message: `${(row.querySelector('h3') ? row.querySelector('h3').textContent : 'this item')}: this item will be removed from the template.`, onDelete: async () => { await DB.deletePMResourceTemplateItem(row.dataset.id); renderPMResourceTemplateDetail(templateId); } }));
 }
 
 function pmFormatRate(resourceLike) {
@@ -1363,6 +1366,7 @@ async function renderPMProjectResources() {
     const resource = resources.find((r) => r.id === row.dataset.id);
     row.addEventListener('click', () => openPMProjectResourceSheet(resource, renderPMProjectResources));
   });
+  SwipeDelete.attachAll(appEl, '#pm-presources-content .list-item', (row) => ({ title: 'Delete resource?', message: `${(row.querySelector('h3') ? row.querySelector('h3').textContent : 'this item')}: this resource will be removed from the project and from every task it is assigned to.`, onDelete: async () => { await DB.deletePMProjectResourceCascade(row.dataset.id); renderPMProjectResources(); } }));
   document.getElementById('btn-pm-presources-import').addEventListener('click', async () => {
     const templates = await DB.listPMResourceTemplates();
     if (!templates.length) { toast('No templates exist yet — create one from the Templates screen first'); return; }
