@@ -11,10 +11,10 @@
 //                    option keywords, command names and AutoCAD aliases.
 
 const CAD_ACI = { 1: '#d32f2f', 2: '#b8860b', 3: '#2e7d32', 4: '#00838f', 5: '#1565c0', 6: '#8e24aa', 7: '#111111', 8: '#808080', 9: '#a0a0a0' };
-const CAD_SNAP_NAMES = { end: 'Endpoint', mid: 'Midpoint', cen: 'Center', gcen: 'Geometric center', node: 'Node', quad: 'Quadrant', int: 'Intersection', per: 'Perpendicular', tan: 'Tangent', nea: 'Nearest' };
+const CAD_SNAP_NAMES = { end: 'Endpoint', mid: 'Midpoint', cen: 'Center', gcen: 'Geometric center', node: 'Node', quad: 'Quadrant', int: 'Intersection', per: 'Perpendicular', tan: 'Tangent', nea: 'Nearest', ins: 'Text insertion' };
 const CAD_DEFAULT_PREFS = {
   toggles: { osnap: true, grid: true, snap: false, ortho: false, polar: false, dyn: true },
-  modes: { end: true, mid: true, cen: true, int: true, node: true, quad: false, per: true, tan: false, nea: false, gcen: false },
+  modes: { end: true, mid: true, cen: true, int: true, node: true, quad: false, per: true, tan: false, nea: false, gcen: false, ins: true },
   polarInc: 45, finger: 'pan'
 };
 const CAD_TOOLS = [
@@ -25,7 +25,14 @@ const CAD_TOOLS = [
   { cmd: 'MOVE', label: 'Move' }, { cmd: 'COPY', label: 'Copy' }, { cmd: 'ROTATE', label: 'Rotate' }, { cmd: 'SCALE', label: 'Scale' },
   { cmd: 'MIRROR', label: 'Mirror' }, { cmd: 'OFFSET', label: 'Offset' }, { cmd: 'TRIM', label: 'Trim' }, { cmd: 'EXTEND', label: 'Extend' },
   { cmd: 'FILLET', label: 'Fillet' }, { cmd: 'CHAMFER', label: 'Chamfer' }, { cmd: 'STRETCH', label: 'Stretch' }, { cmd: 'EXPLODE', label: 'Explode' },
-  { cmd: 'ERASE', label: 'Erase' }
+  { cmd: 'ERASE', label: 'Erase' },
+  { group: 'Annotate' },
+  { cmd: 'TEXT', label: 'Text' }, { cmd: 'MTEXT', label: 'Multi text' }, { cmd: 'TEXTEDIT', label: 'Edit text' },
+  { cmd: 'DIMLINEAR', label: 'Dim linear' }, { cmd: 'DIMALIGNED', label: 'Dim aligned' }, { cmd: 'DIMCONTINUE', label: 'Dim continue' },
+  { group: 'Measure' },
+  { cmd: 'DIST', label: 'Distance' }, { cmd: 'AREA', label: 'Area' },
+  { group: 'Setup' },
+  { cmd: 'LAYER', label: 'Layers' }, { cmd: 'PROPERTIES', label: 'Properties' }
 ];
 const CAD_UNITS = { mm: { prec: 2, label: 'mm' }, m: { prec: 4, label: 'm' }, in: { prec: 3, label: 'in' } };
 
@@ -54,6 +61,16 @@ function cadIcon(cmd) {
     FIT: '<path d="M5 10 V5 H10 M16 5 H21 V10 M21 16 V21 H16 M10 21 H5 V16"/>',
     UNDO: '<path d="M8 10 H16 A4.5 4.5 0 0 1 16 19 H10"/><path d="M11 6 L7.5 10 L11 14"/>',
     REDO: '<path d="M18 10 H10 A4.5 4.5 0 0 0 10 19 H16"/><path d="M15 6 L18.5 10 L15 14"/>',
+    TEXT: '<path d="M6 7 H20 M13 7 V21 M10 21 H16"/>',
+    MTEXT: '<path d="M4 6 H22 M4 11 H22 M4 16 H22 M4 21 H14"/>',
+    TEXTEDIT: '<path d="M4 7 H14 M9 7 V19"/><path d="M14 21 L15 17 L22 10 L24 12 L17 19 Z"/>',
+    DIMLINEAR: '<path d="M4 8 V20 M22 8 V20 M4 16 H22 M4 16 L8 14 V18 Z M22 16 L18 14 V18 Z" />',
+    DIMALIGNED: '<path d="M4 20 L4 12 M18 6 L18 -2 M6 17 L20 3"/><path d="M4 21 L20 5"/><path d="M4 21 L8 20 M4 21 L5 17" />',
+    DIMCONTINUE: '<path d="M3 8 V20 M12 8 V20 M23 8 V20 M3 16 H23"/>',
+    DIST: '<path d="M4 20 L22 6"/><circle cx="4" cy="20" r="2"/><circle cx="22" cy="6" r="2"/>',
+    AREA: '<path d="M5 20 L8 6 L21 9 L19 21 Z" fill="currentColor" fill-opacity=".18"/>',
+    LAYER: '<path d="M13 4 L23 9 L13 14 L3 9 Z"/><path d="M3 13 L13 18 L23 13"/><path d="M3 17 L13 22 L23 17"/>',
+    PROPERTIES: '<path d="M5 7 H21 M5 13 H21 M5 19 H21"/><circle cx="9" cy="7" r="2" fill="#fff"/><circle cx="17" cy="13" r="2" fill="#fff"/><circle cx="11" cy="19" r="2" fill="#fff"/>',
     GEAR: '<circle cx="13" cy="13" r="3.2"/><path d="M13 3.5 V6 M13 20 V22.5 M3.5 13 H6 M20 13 H22.5 M6.3 6.3 L8 8 M18 18 L19.7 19.7 M19.7 6.3 L18 8 M8 18 L6.3 19.7"/>'
   };
   return `<svg ${a}>${paths[cmd] || ''}</svg>`;
@@ -152,6 +169,7 @@ function cadOpenNewSheet() {
 // ---------------------------------------------------------------------------
 function cadMountEditor(data) {
   const prefs = cadLoadPrefs();
+  if (prefs.modes && prefs.modes.ins === undefined) prefs.modes.ins = true;
   const doc = new CadCmd.CadDoc(data);
   const unit = CAD_UNITS[doc.d.units] || CAD_UNITS.mm;
   const fmt = (n) => CadGeo.fmtNum(n, unit.prec);
@@ -204,6 +222,7 @@ function cadMountEditor(data) {
         <div class="cad-status">
           <span class="cad-coords" id="cad-coords">X: –  Y: –</span>
           <span class="cad-units">${esc(unit.label)}</span>
+          <button class="cad-tog on" id="cad-layer" title="Current layer. Tap for layers"></button>
           <span style="flex:1"></span>
           ${['snap', 'grid', 'ortho', 'polar', 'osnap', 'dyn'].map((k) => `<button class="cad-tog" data-t="${k}">${k.toUpperCase()}</button>`).join('')}
         </div>
@@ -223,7 +242,9 @@ function cadMountEditor(data) {
     zoomScale: (f) => { pushView(); view.scale = clampScale(view.scale * f); requestDraw(); },
     panBy: (d) => { pushView(); view.cx -= d[0]; view.cy -= d[1]; requestDraw(); },
     redraw: () => requestDraw(),
-    toast: (m) => toast(m)
+    toast: (m) => toast(m),
+    openLayers: () => openLayers(),
+    openProperties: () => openProperties()
   };
   const engine = new CadCmd.Engine(doc, host);
   engine.onChange = () => { refreshUI(); requestDraw(); };
@@ -308,7 +329,7 @@ function cadMountEditor(data) {
     }
     if (wants && t.osnap) {
       const ap = apertureFor(ptype) / view.scale;
-      const near = doc.query(raw[0] - ap, raw[1] - ap, raw[0] + ap, raw[1] + ap);
+      const near = doc.queryVis(raw[0] - ap, raw[1] - ap, raw[0] + ap, raw[1] + ap);
       snap = G.findSnap(near, raw, ap, prefs.modes, base || engine.lastPoint);
       if (snap) { pt = snap.pt; track = null; }
     }
@@ -343,7 +364,38 @@ function cadMountEditor(data) {
     }
     if (e.closed) c.closePath();
   }
-  function drawEntity(c, e) {
+  function drawText(c, p, rot, h, str, align) {
+    const px = h * view.scale, o = w2s(p);
+    if (px < 2.5) { c.beginPath(); c.moveTo(o[0], o[1]); c.lineTo(o[0] + Math.cos(rot) * Math.max(str.length * px * 0.58, 4), o[1] - Math.sin(rot) * Math.max(str.length * px * 0.58, 4)); c.stroke(); return; }
+    c.save(); c.translate(o[0], o[1]); c.rotate(-rot);
+    c.font = `${px}px -apple-system, system-ui, "Helvetica Neue", Arial, sans-serif`; c.textAlign = align || 'left'; c.textBaseline = 'alphabetic';
+    c.fillText(str, 0, 0); c.restore();
+  }
+  function polyPath(c, pts) { c.beginPath(); pts.forEach((q, i) => { const s = w2s(q); if (i) c.lineTo(s[0], s[1]); else c.moveTo(s[0], s[1]); }); c.closePath(); }
+  function drawAnno(c, e, mode) {
+    if (e.t === 'TEXT' || e.t === 'MTEXT') {
+      if (mode === 'sel') { polyPath(c, CadDim.textCorners(e)); c.stroke(); return; }
+      if (e.t === 'TEXT') drawText(c, e.p, e.rot || 0, e.h, e.text || '');
+      else {
+        const cs = Math.cos(e.rot || 0), sn = Math.sin(e.rot || 0);
+        CadDim.mtextLines(e).forEach((ln, i) => { const y = -(i * CadDim.LH * e.h) - e.h; drawText(c, [e.p[0] - y * sn, e.p[1] + y * cs], e.rot || 0, e.h, ln); });
+      }
+      return;
+    }
+    const g = CadDim.geom(e);
+    c.beginPath();
+    for (const [a, b] of g.lines) { const A = w2s(a), B = w2s(b); c.moveTo(A[0], A[1]); c.lineTo(B[0], B[1]); }
+    c.stroke();
+    for (const ar of g.arrows) {
+      const n = [-ar.dir[1], ar.dir[0]], base = [ar.tip[0] + ar.dir[0] * ar.size, ar.tip[1] + ar.dir[1] * ar.size], w = ar.size / 3;
+      const t = w2s(ar.tip), b1 = w2s([base[0] + n[0] * w, base[1] + n[1] * w]), b2 = w2s([base[0] - n[0] * w, base[1] - n[1] * w]);
+      c.beginPath(); c.moveTo(t[0], t[1]); c.lineTo(b1[0], b1[1]); c.lineTo(b2[0], b2[1]); c.closePath(); c.fill();
+    }
+    if (mode === 'sel') { polyPath(c, CadDim.textBoxOf(e)); c.stroke(); }
+    else drawText(c, g.text.p, g.text.rot, g.text.h, g.text.str, 'center');
+  }
+  function drawEntity(c, e, mode) {
+    if (e.t === 'TEXT' || e.t === 'MTEXT' || e.t === 'DIM') { drawAnno(c, e, mode); return; }
     c.beginPath();
     if (e.t === 'LINE') { const a = w2s(e.p1), b = w2s(e.p2); c.moveTo(a[0], a[1]); c.lineTo(b[0], b[1]); }
     else if (e.t === 'CIRCLE') { const ce = w2s(e.c); c.arc(ce[0], ce[1], e.r * view.scale, 0, Math.PI * 2); }
@@ -410,17 +462,20 @@ function cadMountEditor(data) {
     c.strokeStyle = '#b9bdc4'; c.lineWidth = 1; c.beginPath(); c.moveTo(o[0] - 10, o[1]); c.lineTo(o[0] + 10, o[1]); c.moveTo(o[0], o[1] - 10); c.lineTo(o[0], o[1] + 10); c.stroke();
     // entities in view
     const tl = s2w(0, 0), br = s2w(W, H);
-    const vis = doc.query(tl[0], br[1], br[0], tl[1]);
+    const vis = doc.queryVis(tl[0], br[1], br[0], tl[1]);
     c.lineWidth = 1.6; c.lineJoin = 'round'; c.lineCap = 'round';
-    const layers = new Map(doc.d.layers.map((l) => [l.name, l]));
     for (const e of vis) {
-      const l = layers.get(e.layer); if (l && (!l.on || l.frozen)) continue;
-      c.strokeStyle = layerColor(e); drawEntity(c, e);
+      c.strokeStyle = layerColor(e); c.fillStyle = c.strokeStyle; drawEntity(c, e);
     }
     // selection
     if (engine.selection.size) {
       c.strokeStyle = '#1565c0'; c.lineWidth = 2.6; c.setLineDash([7, 4]);
-      for (const id of engine.selection) { const e = doc.byId.get(id); if (e) drawEntity(c, e); }
+      for (const id of engine.selection) { const e = doc.byId.get(id); if (e) drawEntity(c, e, 'sel'); }
+      c.setLineDash([]); c.lineWidth = 1.6;
+    }
+    if (engine.overlay && engine.overlay.length) {
+      c.strokeStyle = '#e65100'; c.fillStyle = '#e65100'; c.lineWidth = 2.6; c.setLineDash([2, 5]);
+      for (const e of engine.overlay) drawEntity(c, e, 'sel');
       c.setLineDash([]); c.lineWidth = 1.6;
     }
     // grips on the idle selection
@@ -446,9 +501,19 @@ function cadMountEditor(data) {
     if (cur.active && cur.pt && engine.prompt) {
       const pv = engine.preview(cur.pt);
       if (pv.length) {
-        c.strokeStyle = '#1565c0'; c.lineWidth = 1.6; c.setLineDash([6, 4]);
-        for (const e of pv) drawEntity(c, e);
+        c.strokeStyle = '#1565c0'; c.fillStyle = '#1565c0'; c.lineWidth = 1.6; c.setLineDash([6, 4]);
+        for (const e of pv) drawEntity(c, e, 'pv');
         c.setLineDash([]);
+      }
+    }
+    // base point marker and displacement line for the modify commands, so it is clear where the move is anchored
+    if (cur.active && cur.pt && engine.wantsPoint() && ['MOVE', 'COPY', 'ROTATE', 'SCALE', 'STRETCH', 'MIRROR', 'GRIP'].includes(engine.active)) {
+      const bp = engine.base();
+      if (bp) {
+        const a = w2s(bp), b = w2s(cur.pt);
+        c.strokeStyle = 'rgba(21,101,192,0.7)'; c.lineWidth = 1; c.setLineDash([2, 4]);
+        c.beginPath(); c.moveTo(a[0], a[1]); c.lineTo(b[0], b[1]); c.stroke(); c.setLineDash([]);
+        c.strokeStyle = '#1565c0'; c.lineWidth = 2; c.beginPath(); c.arc(a[0], a[1], 5, 0, Math.PI * 2); c.moveTo(a[0] - 8, a[1]); c.lineTo(a[0] + 8, a[1]); c.moveTo(a[0], a[1] - 8); c.lineTo(a[0], a[1] + 8); c.stroke(); c.lineWidth = 1.6;
       }
     }
     // selection window
@@ -476,6 +541,109 @@ function cadMountEditor(data) {
     }
   }
 
+  // ---- text prompts: single line goes to the command line, multi-line opens a sheet ----
+  let lastTextPrompt = null;
+  function textPromptUI() {
+    const p = engine.prompt;
+    if (!engine.active || !p || p.kind !== 'text') { lastTextPrompt = null; return; }
+    if (p === lastTextPrompt) return;
+    lastTextPrompt = p;
+    if (!p.multiline) { cmdInput.value = p.current || ''; setTimeout(() => { cmdInput.focus(); cmdInput.select(); }, 30); return; }
+    const sheet = el(`<div class="sheet-backdrop"><div class="sheet"><div class="sheet-handle"></div><h2>${esc(p.msg || 'Text')}</h2>
+      <div class="field"><textarea id="cad-mt" rows="6" style="width:100%;font-size:17px;-webkit-user-select:text;user-select:text">${esc(p.current || '')}</textarea></div>
+      <div class="row" style="display:flex;gap:10px"><button class="btn btn-block" id="mt-cancel">Cancel</button><button class="btn btn-primary btn-block" id="mt-ok">OK</button></div></div></div>`);
+    presentOverlay(sheet);
+    const ta = sheet.querySelector('#cad-mt'); setTimeout(() => ta.focus(), 50);
+    sheet.querySelector('#mt-cancel').addEventListener('click', () => { sheet.remove(); engine.cancel(); });
+    sheet.querySelector('#mt-ok').addEventListener('click', () => { const v = ta.value; sheet.remove(); engine.submitText(v.trim() ? v : ''); refreshUI(); });
+  }
+
+  // ---- layers ----
+  const ACI_NAMES = { 1: 'Red', 2: 'Yellow', 3: 'Green', 4: 'Cyan', 5: 'Blue', 6: 'Magenta', 7: 'Black', 8: 'Dark grey', 9: 'Light grey' };
+  function openLayers() {
+    if (engine.active) { toast('Finish or cancel the current command first.'); return; }
+    const sheet = el('<div class="sheet-backdrop"><div class="sheet" style="max-height:86vh;overflow:auto"><div class="sheet-handle"></div><h2>Layers</h2><div id="ly-list"></div><button class="btn btn-block" id="ly-add" style="margin:8px 0">+ New layer</button><button class="btn btn-primary btn-block" id="ly-done">Done</button></div></div>');
+    presentOverlay(sheet);
+    const list = sheet.querySelector('#ly-list');
+    const cloneLayers = () => JSON.parse(JSON.stringify(doc.d.layers));
+    const change = (name, patch) => { const ls = cloneLayers(); const l = ls.find((x) => x.name === name); Object.assign(l, patch); doc.setLayers(ls, null); engine.selection = new Set(Array.from(engine.selection).filter((id) => { const e = doc.byId.get(id); return e && doc.isSelectable(e); })); render(); };
+    function render() {
+      list.innerHTML = doc.d.layers.map((l) => `<div class="ly-row" data-n="${esc(l.name)}">
+        <button class="ly-cur ${doc.d.currentLayer === l.name ? 'on' : ''}" data-a="cur" title="Make current">${doc.d.currentLayer === l.name ? '●' : '○'}</button>
+        <span class="ly-dot" style="background:${CAD_ACI[l.color] || '#111'}"></span>
+        <input class="ly-name" value="${esc(l.name)}" ${l.name === '0' ? 'readonly' : ''}>
+        <select class="ly-col" data-a="col">${Object.keys(ACI_NAMES).map((k) => `<option value="${k}" ${+k === l.color ? 'selected' : ''}>${ACI_NAMES[k]}</option>`).join('')}</select>
+        <button class="ly-b ${l.on !== false ? 'on' : ''}" data-a="on" title="Show or hide">${l.on !== false ? '👁' : '–'}</button>
+        <button class="ly-b ${l.frozen ? 'on' : ''}" data-a="fr" title="Freeze">❄</button>
+        <button class="ly-b ${l.locked ? 'on' : ''}" data-a="lk" title="Lock">${l.locked ? '🔒' : '🔓'}</button>
+        <button class="ly-b" data-a="del" title="Delete layer" ${l.name === '0' ? 'disabled' : ''}>🗑</button></div>`).join('');
+    }
+    list.addEventListener('click', (ev) => {
+      const b = ev.target.closest('button[data-a]'); if (!b) return;
+      const n = b.closest('.ly-row').dataset.n, l = doc.layer(n), a = b.dataset.a;
+      if (a === 'cur') { if (!l.frozen && l.on !== false) { doc.setLayers(cloneLayers(), n); render(); refreshUI(); } else toast('A hidden or frozen layer cannot be current.'); }
+      else if (a === 'on') change(n, { on: l.on === false });
+      else if (a === 'fr') { if (!l.frozen && doc.d.currentLayer === n) { toast('The current layer cannot be frozen.'); return; } change(n, { frozen: !l.frozen }); }
+      else if (a === 'lk') change(n, { locked: !l.locked });
+      else if (a === 'del') { const err = doc.deleteLayer(n); if (err) toast(err); render(); refreshUI(); }
+    });
+    list.addEventListener('change', (ev) => {
+      const row = ev.target.closest('.ly-row'); if (!row) return; const n = row.dataset.n;
+      if (ev.target.classList.contains('ly-col')) change(n, { color: +ev.target.value });
+      else if (ev.target.classList.contains('ly-name')) {
+        const nn = ev.target.value.trim();
+        if (nn === n) return;
+        if (!nn || !doc.renameLayer(n, nn)) { toast(nn ? 'That layer name is taken.' : 'A layer needs a name.'); }
+        render(); refreshUI();
+      }
+    });
+    sheet.querySelector('#ly-add').addEventListener('click', () => {
+      let i = doc.d.layers.length, nm; do { nm = 'Layer' + i++; } while (doc.layer(nm));
+      const cur = doc.layer(doc.d.currentLayer) || {};
+      doc.setLayers(cloneLayers().concat([{ name: nm, color: cur.color || 7, ltype: 'Continuous', lw: -3, on: true, frozen: false, locked: false, plot: true }]), nm); render(); refreshUI();
+    });
+    const close = () => { sheet.remove(); refreshUI(); requestDraw(); };
+    sheet.addEventListener('click', (e) => { if (e.target === sheet) close(); });
+    sheet.querySelector('#ly-done').addEventListener('click', close);
+    render();
+  }
+  $('cad-layer').addEventListener('click', openLayers);
+
+  // ---- properties of the selection ----
+  function openProperties() {
+    const ids = Array.from(engine.selection).filter((id) => { const e = doc.byId.get(id); return e && doc.isSelectable(e); });
+    if (!ids.length) { toast('Select objects first, then open Properties.'); return; }
+    if (engine.active) { toast('Finish or cancel the current command first.'); return; }
+    const ents = ids.map((id) => doc.byId.get(id)), one = ents.length === 1 ? ents[0] : null;
+    const same = (f) => (ents.every((e) => f(e) === f(ents[0])) ? f(ents[0]) : '*');
+    const lay = same((e) => e.layer), col = same((e) => (e.color == null ? 'by' : String(e.color)));
+    const isTxt = one && (one.t === 'TEXT' || one.t === 'MTEXT'), isDim = one && one.t === 'DIM';
+    const sheet = el(`<div class="sheet-backdrop"><div class="sheet" style="max-height:86vh;overflow:auto"><div class="sheet-handle"></div>
+      <h2>Properties <span style="font-weight:500;font-size:14px;color:#6b717c">${ents.length} object${ents.length > 1 ? 's' : ''}${one ? ' · ' + one.t : ''}</span></h2>
+      <div class="field"><label>Layer</label><select id="pp-layer">${lay === '*' ? '<option value="*">Various</option>' : ''}${doc.d.layers.map((l) => `<option ${l.name === lay ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Colour</label><select id="pp-color">${col === '*' ? '<option value="*">Various</option>' : ''}<option value="by" ${col === 'by' ? 'selected' : ''}>ByLayer</option>${Object.keys(ACI_NAMES).map((k) => `<option value="${k}" ${col === k ? 'selected' : ''}>${ACI_NAMES[k]}</option>`).join('')}</select></div>
+      ${isTxt ? `<div class="field"><label>Text</label><textarea id="pp-text" rows="${one.t === 'MTEXT' ? 4 : 2}" style="width:100%;font-size:16px;-webkit-user-select:text;user-select:text">${esc(one.text)}</textarea></div>
+        <div class="field"><label>Height (${esc(unit.label)})</label><input type="number" id="pp-h" step="any" min="0" value="${+one.h.toFixed(4)}"></div>
+        <div class="field"><label>Rotation (degrees)</label><input type="number" id="pp-rot" step="any" value="${+(((one.rot || 0) * 180 / Math.PI)).toFixed(3)}"></div>` : ''}
+      ${isDim ? `<div class="field"><label>Dimension text (&lt;&gt; = measured value ${esc(CadDim.dimText({ ...one, txt: '' }))})</label><input type="text" id="pp-dim" value="${esc(one.txt || '<>')}"></div>` : ''}
+      <div style="display:flex;gap:10px"><button class="btn btn-block" id="pp-cancel">Cancel</button><button class="btn btn-primary btn-block" id="pp-ok">Apply</button></div></div></div>`);
+    presentOverlay(sheet);
+    sheet.querySelector('#pp-cancel').addEventListener('click', () => sheet.remove());
+    sheet.querySelector('#pp-ok').addEventListener('click', () => {
+      const q = (id) => sheet.querySelector(id);
+      const layerV = q('#pp-layer').value, colV = q('#pp-color').value;
+      if (layerV !== '*' && layerV !== lay) doc.setProps(ids, { layer: layerV });
+      if (colV !== '*' && colV !== col) doc.setProps(ids, { color: colV === 'by' ? null : +colV });
+      if (isTxt) {
+        const t = q('#pp-text').value.trim(), h = parseFloat(q('#pp-h').value), r = parseFloat(q('#pp-rot').value);
+        const patch = {}; if (t && t !== one.text) patch.text = t; if (h > 0 && h !== one.h) patch.h = h; if (isFinite(r) && Math.abs(r * Math.PI / 180 - (one.rot || 0)) > 1e-9) patch.rot = r * Math.PI / 180;
+        if (Object.keys(patch).length) doc.setProps([one.id], patch);
+      }
+      if (isDim) { const t = q('#pp-dim').value.trim(), cur = one.txt || '<>'; if (t && t !== cur) doc.setProps([one.id], { txt: t === '<>' ? null : t }); }
+      sheet.remove(); engine.selection = new Set(Array.from(engine.selection).filter((id) => { const e = doc.byId.get(id); return e && doc.isSelectable(e); })); refreshUI(); requestDraw();
+    });
+  }
+
   // ---- UI refresh ----
   function refreshUI() {
     if (destroyed) return;
@@ -495,11 +663,15 @@ function cadMountEditor(data) {
         const acts = [['Delete', 'ERASE'], ['Move', 'MOVE'], ['Copy', 'COPY'], ['Rotate', 'ROTATE'], ['Scale', 'SCALE'], ['Mirror', 'MIRROR']];
         if (Array.from(engine.selection).some((id) => { const e = doc.byId.get(id); return e && e.t === 'LWPOLYLINE'; })) acts.push(['Explode', 'EXPLODE']);
         for (const [label, cmd] of acts) chips.appendChild(chipEl(label, () => { engine.start(cmd); }));
+        chips.appendChild(chipEl('Properties', () => openProperties()));
+        if (Array.from(engine.selection).some((id) => { const e = doc.byId.get(id); return e && (e.t === 'TEXT' || e.t === 'MTEXT' || e.t === 'DIM'); })) chips.appendChild(chipEl('Edit text', () => engine.start('TEXTEDIT')));
         chips.appendChild(chipEl('Clear', () => engine.clearSelection()));
       }
     }
     if (engine.active && engine.wantsSelect()) chips.appendChild(chipEl('Done', () => engine.enter(), true));
     root.classList.toggle('cad-active', !!engine.active);
+    const lb = $('cad-layer'); if (lb) lb.textContent = '▤ ' + doc.d.currentLayer;
+    textPromptUI();
     document.querySelectorAll('.cad-tool').forEach((b) => b.classList.toggle('on', b.dataset.cmd === engine.active));
     $('cad-undo').disabled = !doc.undoStack.length && !engine.active;
     $('cad-redo').disabled = !doc.redoStack.length || !!engine.active;
@@ -721,7 +893,7 @@ function cadMountEditor(data) {
       const [a, b] = windowRect; windowRect = null;
       const w1 = s2w(a[0], a[1]), w2 = s2w(b[0], b[1]), r = G.rectOf(w1, w2);
       const crossing = b[0] < a[0];
-      const hits = doc.query(r.minX, r.minY, r.maxX, r.maxY).filter((x) => (crossing ? G.entCrossesRect(x, r) : G.entInWindow(x, r)));
+      const hits = doc.queryVis(r.minX, r.minY, r.maxX, r.maxY).filter((x) => (crossing ? G.entCrossesRect(x, r) : G.entInWindow(x, r)));
       if (!engine.active) { if (!e.shiftKey) engine.clearSelection(); engine.selectAdd(hits.map((x) => x.id)); }
       else if (e.shiftKey) engine.selectRemove(hits.map((x) => x.id)); else engine.selectAdd(hits.map((x) => x.id));
       requestDraw(); return;
@@ -776,10 +948,20 @@ function cadMountEditor(data) {
         <div class="field"><label>Polar angle increment</label>
           <select id="cad-s-polar">${polarOpts.map((v) => `<option value="${v}" ${prefs.polarInc === v ? 'selected' : ''}>${v}°</option>`).join('')}</select></div>
         <div class="field"><label>Grid and snap spacing (${esc(unit.label)})</label><input type="number" id="cad-s-grid" min="0" step="any" value="${doc.d.gridSpacing || 10}"></div>
+        <div class="field"><label>Plot scale 1 : <span style="font-weight:400">(annotation is sized on paper, then scaled)</span></label><input type="number" id="cad-s-scale" min="1" step="any" value="${doc.d.plotScale || 50}"></div>
+        <div class="field"><label>Text height on paper (mm)</label><input type="number" id="cad-s-th" min="0.5" step="any" value="${doc.d.textH || 2.5}"></div>
+        <div class="field"><label>Dimension arrow size on paper (mm)</label><input type="number" id="cad-s-ar" min="0.5" step="any" value="${(doc.d.dimStyle && doc.d.dimStyle.arrow) || 2.5}"></div>
+        <div class="field"><label>Dimension decimals</label><input type="number" id="cad-s-dec" min="0" max="6" step="1" placeholder="auto" value="${doc.d.dimStyle && doc.d.dimStyle.decimals != null ? doc.d.dimStyle.decimals : ''}"></div>
+        <p style="font-size:12.5px;color:#6b717c;margin:0 0 10px">These apply to text and dimensions you add from now on. Existing ones keep their size.</p>
         <button class="btn btn-primary btn-block" id="btn-save">Done</button>
       </div></div>`);
     presentOverlay(sheet);
     const close = () => {
+      const num = (id) => parseFloat(sheet.querySelector(id).value);
+      const ps = num('#cad-s-scale'), th = num('#cad-s-th'), ar = num('#cad-s-ar'), dc = sheet.querySelector('#cad-s-dec').value.trim();
+      if (ps > 0) doc.d.plotScale = ps; if (th > 0) doc.d.textH = th;
+      doc.d.dimStyle = { ...(doc.d.dimStyle || {}), arrow: ar > 0 ? ar : 2.5, decimals: dc === '' ? null : Math.max(0, Math.min(6, parseInt(dc, 10) || 0)) };
+      markDirty();
       sheet.querySelectorAll('[data-m]').forEach((c) => { prefs.modes[c.dataset.m] = c.checked; });
       prefs.polarInc = parseFloat(sheet.querySelector('#cad-s-polar').value) || 45;
       const g = parseFloat(sheet.querySelector('#cad-s-grid').value);
@@ -854,6 +1036,13 @@ function injectCadCss() {
 .cad-menu{position:absolute;width:170px;background:#fff;border:1px solid #cfd2d8;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.25);padding:4px;z-index:10;display:flex;flex-direction:column}
 .cad-menu button{border:0;background:none;text-align:left;padding:0 12px;height:42px;border-radius:8px;font-size:15px;font-weight:600;color:#22252b}
 .cad-menu button:active{background:#eceef1}
+.ly-row{display:flex;align-items:center;gap:5px;padding:5px 0;border-bottom:1px solid #eceef1}
+.ly-cur{border:0;background:none;font-size:20px;width:32px;color:#1565c0}
+.ly-dot{width:14px;height:14px;border-radius:50%;flex-shrink:0;border:1px solid #bbb}
+.ly-name{flex:1;min-width:60px;height:38px;border:1px solid #d3d6db;border-radius:8px;padding:0 8px;font-size:16px;-webkit-user-select:text;user-select:text}
+.ly-col{height:38px;border:1px solid #d3d6db;border-radius:8px;font-size:13px;max-width:92px}
+.ly-b{width:38px;height:38px;border:1px solid #d3d6db;background:#fff;border-radius:8px;font-size:16px;opacity:.5}
+.ly-b.on{opacity:1;background:#eef3fb} .ly-b:disabled{opacity:.2}
 .cad-modes{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px}
 .cad-mode{display:flex;align-items:center;gap:8px;font-size:14.5px}
 .cad-mode input{width:20px;height:20px}

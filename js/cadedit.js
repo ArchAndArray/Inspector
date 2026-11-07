@@ -7,6 +7,7 @@ const CadEdit = (() => {
   'use strict';
   const G = (typeof CadGeo !== 'undefined') ? CadGeo : require('./cadgeo.js');
   const { sub, add, mul, dot, cross, len, dist, polar, angleBetween, normAng, sweepOf, TAU } = G;
+  const D = (typeof CadDim !== 'undefined') ? CadDim : require('./caddim.js');
   const EPS = 1e-9;
   const clone = (e) => JSON.parse(JSON.stringify(e));
   const clamp1 = (x) => Math.max(-1, Math.min(1, x));
@@ -48,6 +49,18 @@ const CadEdit = (() => {
       case 'LWPOLYLINE':
         n.v = e.v.map((q) => { const p = xf.fn([q[0], q[1]]); return [p[0], p[1], xf.flip ? -(q[2] || 0) : (q[2] || 0)]; });
         break;
+      case 'TEXT': case 'MTEXT': {
+        n.p = xf.fn(e.p); n.h = e.h * xf.k; if (e.w) n.w = e.w * xf.k;
+        const o = xf.fn([e.p[0] + Math.cos(e.rot || 0), e.p[1] + Math.sin(e.rot || 0)]);
+        let r = Math.atan2(o[1] - n.p[1], o[0] - n.p[0]);
+        if (xf.flip && Math.cos(r) < -1e-9) r += Math.PI;      // mirrored text stays readable
+        n.rot = r; break;
+      }
+      case 'DIM': {
+        n.p1 = xf.fn(e.p1); n.p2 = xf.fn(e.p2); n.off = xf.fn(e.off);
+        if (e.k === 'lin') { const o = xf.fn([e.p1[0] + Math.cos(e.ang || 0), e.p1[1] + Math.sin(e.ang || 0)]); n.ang = Math.atan2(o[1] - n.p1[1], o[0] - n.p1[0]); }
+        break;
+      }
       default: break;
     }
     return n;
@@ -73,6 +86,8 @@ const CadEdit = (() => {
         G.polySegments(e).forEach((s, k) => out.push({ pt: s.k === 's' ? G.mid(s.p1, s.p2) : G.arcMid(s), i: e.v.length + k, kind: 'mid', seg: k }));
         break;
       }
+      case 'TEXT': case 'MTEXT': out.push({ pt: e.p, i: 0, kind: 'end' }); break;
+      case 'DIM': { const f = D.frame(e); out.push({ pt: e.p1, i: 0, kind: 'end' }, { pt: e.p2, i: 1, kind: 'end' }, { pt: G.mid(f.A, f.B), i: 2, kind: 'mid' }); break; }
       default: break;
     }
     return out;
@@ -109,6 +124,8 @@ const CadEdit = (() => {
         }
         break;
       }
+      case 'TEXT': case 'MTEXT': n.p = np; break;
+      case 'DIM': if (g.i === 0) n.p1 = np; else if (g.i === 1) n.p2 = np; else n.off = add(e.off, d); break;
       default: return null;
     }
     return n;
@@ -135,6 +152,11 @@ const CadEdit = (() => {
         let any = false; const n = clone(e);
         n.v = e.v.map((q) => { if (ins([q[0], q[1]])) { any = true; return [q[0] + d[0], q[1] + d[1], q[2] || 0]; } return [q[0], q[1], q[2] || 0]; });
         return any ? n : null;
+      }
+      case 'TEXT': case 'MTEXT': return ins(e.p) ? { ...clone(e), p: mv(e.p) } : null;
+      case 'DIM': {
+        const a = ins(e.p1), b = ins(e.p2), c = ins(e.off); if (!a && !b && !c) return null;
+        const n = clone(e); if (a) n.p1 = mv(e.p1); if (b) n.p2 = mv(e.p2); if (c) n.off = mv(e.off); return n;
       }
       default: return null;
     }
@@ -485,8 +507,39 @@ const CadEdit = (() => {
     const n = clone(e); n.v = out; return n;
   }
 
+  // ---------- area / perimeter ----------
+  // v: [[x,y,bulge]...]. The loop is closed by a straight chord when `closed` is false (area only).
+  function areaPerimeter(v, closed) {
+    const n = v.length; let sh = 0, per = 0, seg = 0;
+    for (let i = 0; i < n; i++) {
+      const isClosing = i === n - 1;
+      if (isClosing && !closed && n < 3) continue;
+      const p = v[i], q = v[(i + 1) % n], b = (isClosing && !closed) ? 0 : (p[2] || 0), chord = dist(p, q);
+      sh += p[0] * q[1] - q[0] * p[1];
+      let l = chord;
+      if (Math.abs(b) > 1e-12 && chord > EPS) {
+        const th = 4 * Math.atan(Math.abs(b)), r = chord / (2 * Math.sin(th / 2));
+        l = r * th; seg += Math.sign(b) * r * r / 2 * (th - Math.sin(th));
+      }
+      if (!(isClosing && !closed)) per += l;
+    }
+    return { area: Math.abs(sh / 2 + seg), perimeter: per };
+  }
+
   // ---------- explode ----------
   function explode(e) {
+    if (e.t === 'DIM') {
+      const g = D.geom(e), base = clone(e);
+      ['k', 'p1', 'p2', 'off', 'ang', 'th', 'ar', 'eo', 'ee', 'gap', 'dec', 'txt', 'id'].forEach((k) => delete base[k]);
+      const out = g.lines.map(([p1, p2]) => ({ ...base, t: 'LINE', p1, p2 }));
+      for (const a of g.arrows) {
+        const nrm = [-a.dir[1], a.dir[0]], b = [a.tip[0] + a.dir[0] * a.size, a.tip[1] + a.dir[1] * a.size], w = a.size / 6;
+        out.push({ ...base, t: 'LWPOLYLINE', closed: true, v: [[a.tip[0], a.tip[1], 0], [b[0] + nrm[0] * w, b[1] + nrm[1] * w, 0], [b[0] - nrm[0] * w, b[1] - nrm[1] * w, 0]] });
+      }
+      const tw = D.CW * g.text.h * g.text.str.length;
+      out.push({ ...base, t: 'TEXT', p: [g.text.p[0] - Math.cos(g.text.rot) * tw / 2, g.text.p[1] - Math.sin(g.text.rot) * tw / 2], h: g.text.h, rot: g.text.rot, text: g.text.str });
+      return out;
+    }
     if (e.t !== 'LWPOLYLINE') return null;
     const base = clone(e); delete base.v; delete base.closed; delete base.id;
     return G.polySegments(e).map((s) => (s.k === 's' ? { ...base, t: 'LINE', p1: s.p1, p2: s.p2 } : { ...base, t: 'ARC', c: s.c, r: s.r, a0: s.a0, a1: s.a1 }));
@@ -495,7 +548,7 @@ const CadEdit = (() => {
   return {
     moveXf, rotXf, scaleXf, mirrorXf, transformEntity, grips, gripApply, stretchEntity,
     offsetSide, offsetDistanceThrough, offsetEntity, trimEntity, extendEntity,
-    filletLines, chamferLines, polyCorners, explode, pathOf, bulge3
+    filletLines, chamferLines, polyCorners, explode, pathOf, bulge3, areaPerimeter
   };
 })();
 

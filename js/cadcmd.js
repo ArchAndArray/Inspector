@@ -14,6 +14,7 @@ const CadCmd = (() => {
   'use strict';
   const G = (typeof CadGeo !== 'undefined') ? CadGeo : require('./cadgeo.js');
   const X = (typeof CadEdit !== 'undefined') ? CadEdit : require('./cadedit.js');
+  const DM = (typeof CadDim !== 'undefined') ? CadDim : require('./caddim.js');
 
   // ---------- document ----------
   class CadDoc {
@@ -86,11 +87,14 @@ const CadCmd = (() => {
     _invert(op) {
       if (op.k === 'add') this._doDel(op.ent.id);
       else if (op.k === 'del') this._doAdd(op.ent, op.i);
+      else if (op.k === 'meta') this._applyMeta(op.before);
       else { this._doDel(op.ent.id); this._doAdd(op.prev, op.i); }
     }
+    _applyMeta(m) { this.d.layers = JSON.parse(JSON.stringify(m.layers)); this.d.currentLayer = m.cur; }
     _reapply(op) {
       if (op.k === 'add') this._doAdd(op.ent);
       else if (op.k === 'del') this._doDel(op.ent.id);
+      else if (op.k === 'meta') this._applyMeta(op.after);
       else { this._doDel(op.prev.id); this._doAdd(op.ent, op.i); }
     }
     // Undo the most recent op inside the open command group (LINE's Undo option).
@@ -109,11 +113,55 @@ const CadCmd = (() => {
       for (const op of g) this._reapply(op);
       this.undoStack.push(g); this._touch(); return true;
     }
+    // ---- layers and properties (each is one undoable step) ----
+    layer(name) { return this.d.layers.find((l) => l.name === name) || null; }
+    isVisible(e) { const l = this.layer(e.layer); return !l || (l.on !== false && !l.frozen); }
+    isSelectable(e) { const l = this.layer(e.layer); return !l || (l.on !== false && !l.frozen && !l.locked); }
+    transact(fn) {
+      const own = !this.group; if (own) this.beginGroup();
+      try { return fn(); } finally { if (own) this.endGroup(); }
+    }
+    setLayers(layers, currentLayer) {
+      const cl = (x) => JSON.parse(JSON.stringify(x));
+      const before = { layers: cl(this.d.layers), cur: this.d.currentLayer };
+      this.d.layers = cl(layers);
+      if (currentLayer != null) this.d.currentLayer = currentLayer;
+      this._record({ k: 'meta', before, after: { layers: cl(this.d.layers), cur: this.d.currentLayer } });
+      this._touch();
+    }
+    renameLayer(oldName, newName) {
+      if (oldName === '0' || !newName || this.layer(newName)) return false;
+      this.transact(() => {
+        this.setLayers(this.d.layers.map((l) => (l.name === oldName ? { ...l, name: newName } : l)), this.d.currentLayer === oldName ? newName : this.d.currentLayer);
+        for (const e of this.entities.filter((x) => x.layer === oldName)) this.replace(e.id, { ...e, layer: newName });
+      });
+      return true;
+    }
+    // Returns an error message, or null when deleted.
+    deleteLayer(name) {
+      if (name === '0') return 'Layer 0 cannot be deleted.';
+      if (this.d.currentLayer === name) return 'The current layer cannot be deleted.';
+      if (this.entities.some((e) => e.layer === name)) return 'That layer has objects on it. Move or erase them first.';
+      this.transact(() => this.setLayers(this.d.layers.filter((l) => l.name !== name), null));
+      return null;
+    }
+    // props: any of layer, color (null = ByLayer), text, h, rot, w, txt.
+    setProps(ids, props) {
+      this.transact(() => {
+        for (const id of ids) {
+          const e = this.byId.get(id); if (!e) continue;
+          const n = JSON.parse(JSON.stringify(e));
+          for (const k of Object.keys(props)) { if (props[k] === null || props[k] === undefined) delete n[k]; else n[k] = props[k]; }
+          this.replace(id, n);
+        }
+      });
+    }
     extents() {
       let box = null;
       for (const e of this.entities) box = G.unionBox(box, G.bbox(e));
       return box;
     }
+    queryVis(a, b, c2, d) { return this.query(a, b, c2, d).filter((e) => this.isVisible(e)); }
     // Entities whose bounding box overlaps the rectangle (spatial-index query).
     query(minX, minY, maxX, maxY) {
       const out = [];
@@ -124,6 +172,7 @@ const CadCmd = (() => {
     pick(pt, tol) {
       let best = null, bd = tol;
       for (const e of this.query(pt[0] - tol, pt[1] - tol, pt[0] + tol, pt[1] + tol)) {
+        if (!this.isVisible(e)) continue;
         const d = G.entityDist(e, pt);
         if (d <= bd) { bd = d; best = e; }
       }
@@ -157,7 +206,9 @@ const CadCmd = (() => {
   // ---------- commands ----------
   const ALIASES = { L: 'LINE', PL: 'PLINE', REC: 'RECTANG', C: 'CIRCLE', A: 'ARC', PO: 'POINT', E: 'ERASE', U: 'UNDO', Z: 'ZOOM', P: 'PAN', RE: 'REGEN', R: 'REDRAW', POLYLINE: 'PLINE', RECTANGLE: 'RECTANG',
     M: 'MOVE', CO: 'COPY', CP: 'COPY', RO: 'ROTATE', SC: 'SCALE', MI: 'MIRROR', O: 'OFFSET', TR: 'TRIM', EX: 'EXTEND',
-    F: 'FILLET', CHA: 'CHAMFER', S: 'STRETCH', X: 'EXPLODE', DEL: 'ERASE', DELETE: 'ERASE' };
+    F: 'FILLET', CHA: 'CHAMFER', S: 'STRETCH', X: 'EXPLODE', DEL: 'ERASE', DELETE: 'ERASE',
+    T: 'MTEXT', MT: 'MTEXT', DT: 'TEXT', ED: 'TEXTEDIT', DDEDIT: 'TEXTEDIT', DLI: 'DIMLINEAR', DIMLIN: 'DIMLINEAR', DAL: 'DIMALIGNED', DIMALI: 'DIMALIGNED',
+    DCO: 'DIMCONTINUE', DI: 'DIST', AA: 'AREA', LA: 'LAYER', PR: 'PROPERTIES', PROPS: 'PROPERTIES', CH: 'PROPERTIES' };
   const opt = (name, short) => ({ name, short: short || name[0] });
   const bulge3 = (p1, p2, p3) => {
     const a = G.arcThrough3(p1, p2, p3); if (!a) return null;
@@ -166,6 +217,13 @@ const CadCmd = (() => {
     return Math.tan(th / 4);
   };
   const same = (a, b) => G.dist(a, b) < 1e-9;
+  // Annotation sizes are set in millimetres on paper; model size = paper size x plot scale, converted to drawing units.
+  function annoStyle(doc) {
+    const d = doc.d, f = ({ mm: 1, m: 0.001, in: 1 / 25.4 })[d.units] || 1, k = (d.plotScale || 50) * f, ds = d.dimStyle || {};
+    return { th: (d.textH || 2.5) * k, ar: (ds.arrow || 2.5) * k, eo: (ds.extOff || 1) * k, ee: (ds.extExt || 1.25) * k, gap: (ds.gap || 0.6) * k, dec: ds.decimals == null ? (d.units === 'mm' ? 0 : d.units === 'm' ? 3 : 2) : ds.decimals };
+  }
+  const fmtLen = (doc, v) => { const u = doc.d.units; return u === 'mm' ? G.fmtNum(v, 2) + ' mm (= ' + G.fmtNum(v / 1000, 3) + ' m)' : u === 'm' ? G.fmtNum(v, 4) + ' m' : G.fmtNum(v, 3) + ' in (= ' + G.fmtNum(v / 12, 3) + ' ft)'; };
+  const fmtArea = (doc, a) => { const u = doc.d.units; return u === 'mm' ? G.fmtNum(a / 1e6, 3) + ' m\u00b2 (' + G.fmtNum(a, 1) + ' mm\u00b2)' : u === 'm' ? G.fmtNum(a, 4) + ' m\u00b2' : G.fmtNum(a, 2) + ' in\u00b2 (= ' + G.fmtNum(a / 144, 3) + ' ft\u00b2)'; };
   const rectPoly = (a, b) => ({ t: 'LWPOLYLINE', closed: true, v: [[a[0], a[1], 0], [b[0], a[1], 0], [b[0], b[1], 0], [a[0], b[1], 0]] });
   const withoutId = (e) => { const n = { ...e }; delete n.id; return n; };
   const polySegAt = (e, pt) => { let best = 0, bd = Infinity; G.polySegments(e).forEach((s, k) => { const d = G.nearestOnPrim(s, pt).d; if (d < bd) { bd = d; best = k; } }); return best; };
@@ -178,6 +236,45 @@ const CadCmd = (() => {
     return null;
   };
 
+  // Shared by DIMLINEAR and DIMALIGNED.
+  function* dimBody(c, kind) {
+    const st = annoStyle(c.doc);
+    const p1 = yield c.point('Specify first extension line origin:'); if (p1.kind !== 'point') return;
+    const p2 = yield c.point('Specify second extension line origin:', { base: p1.pt, preview: (pt) => [{ t: 'LINE', p1: p1.pt, p2: pt }] }); if (p2.kind !== 'point') return;
+    if (same(p1.pt, p2.pt)) { c.warn('The two points are identical.'); return; }
+    let forced = null;                                   // null = decide from the cursor, 'H', 'V' or an angle in radians
+    const mk = (off) => {
+      let ang = 0;
+      if (kind === 'lin') {
+        if (typeof forced === 'number') ang = forced;
+        else if (forced === 'V') ang = Math.PI / 2;
+        else if (forced === 'H') ang = 0;
+        else {
+          const x0 = Math.min(p1.pt[0], p2.pt[0]), x1 = Math.max(p1.pt[0], p2.pt[0]), y0 = Math.min(p1.pt[1], p2.pt[1]), y1 = Math.max(p1.pt[1], p2.pt[1]);
+          const vo = Math.max(0, y0 - off[1], off[1] - y1), ho = Math.max(0, x0 - off[0], off[0] - x1);
+          ang = vo >= ho ? 0 : Math.PI / 2;
+        }
+      }
+      return { t: 'DIM', k: kind, p1: p1.pt, p2: p2.pt, off, ang, ...st };
+    };
+    for (;;) {
+      const r = yield c.point('Specify dimension line location or', { options: kind === 'lin' ? [opt('Horizontal', 'H'), opt('Vertical', 'V'), opt('Rotated', 'R')] : [], preview: (pt) => [mk(pt)] });
+      if (r.kind === 'option') {
+        if (r.name === 'Horizontal') forced = 'H'; else if (r.name === 'Vertical') forced = 'V';
+        else { const a = yield c.number('Specify angle of dimension line', { default: 0 }); if (a.kind === 'number') forced = G.rad(a.value); }
+        continue;
+      }
+      if (r.kind !== 'point') return;
+      const d = mk(r.pt);
+      c.add(d);
+      const dd = { k: kind, p1: d.p1, p2: d.p2, off: r.pt, ang: d.ang, st };
+      const f = DM.frame(d);
+      dd.sd = G.dot(G.sub(r.pt, d.p2), f.n);
+      c.engine.lastDim = dd;
+      c.log('Dimension text = ' + DM.dimText(d));
+      return;
+    }
+  }
   const COMMANDS = {
     *LINE(c) {
       let r = yield c.point('Specify first point:');
@@ -489,7 +586,7 @@ const CadCmd = (() => {
         }
         if (s.kind !== 'select' || !s.ids.length) return;
         const e = c.doc.byId.get(s.ids[0]); if (!e) continue;
-        const bb = G.bbox(e), others = c.doc.query(bb.minX, bb.minY, bb.maxX, bb.maxY).filter((o) => o.id !== e.id);
+        const bb = G.bbox(e), others = c.doc.queryVis(bb.minX, bb.minY, bb.maxX, bb.maxY).filter((o) => o.id !== e.id);
         const res = X.trimEntity(e, s.pt || G.mid([bb.minX, bb.minY], [bb.maxX, bb.maxY]), others);
         if (res.error) { c.warn(res.error); continue; }
         const before = c.opCount();
@@ -636,7 +733,7 @@ const CadCmd = (() => {
         const a = yield c.point('Specify first corner of the crossing window (enclose the endpoints to move):'); if (a.kind !== 'point') return;
         const q = yield c.point('Specify opposite corner:', { base: a.pt, preview: (pt) => [rectPoly(a.pt, pt)] }); if (q.kind !== 'point') return;
         R = G.rectOf(a.pt, q.pt);
-        const found = c.doc.query(R.minX, R.minY, R.maxX, R.maxY).filter((e) => G.entCrossesRect(e, R) || G.entInWindow(e, R));
+        const found = c.doc.queryVis(R.minX, R.minY, R.maxX, R.maxY).filter((e) => c.doc.isSelectable(e) && (G.entCrossesRect(e, R) || G.entInWindow(e, R)));
         movers = found.filter((e) => X.stretchEntity(e, R, [0, 0]));
         if (movers.length) break;
         c.warn(found.length ? 'No endpoints or vertices inside the window. Draw the window around the points you want to move.' : 'No objects found in the window.');
@@ -661,6 +758,101 @@ const CadCmd = (() => {
         c.remove(e.id); for (const p of parts) c.add(p); n++;
       }
       c.log(n + ' exploded.' + (skipped ? ' ' + skipped + ' cannot be exploded.' : ''));
+    },
+
+    // ----- annotate and measure (slice 1c) -----
+    *TEXT(c) {
+      const st = annoStyle(c.doc);
+      const p = yield c.point('Specify start point of text:'); if (p.kind !== 'point') return;
+      const h = yield c.number('Specify text height', { default: c.engine.lastTextH || st.th }); if (h.kind !== 'number' || !(h.value > 0)) return;
+      c.engine.lastTextH = h.value;
+      const r = yield c.point('Specify rotation angle of text <0>', { base: p.pt, allowNumber: true });
+      let rot = 0;
+      if (r.kind === 'number') rot = G.rad(r.value); else if (r.kind === 'point') rot = G.angleBetween(p.pt, r.pt); else if (r.kind !== 'enter') return;
+      const t = yield c.text('Enter text');
+      if (t.kind !== 'text' || !t.value.trim()) return;
+      c.add({ t: 'TEXT', p: p.pt, h: h.value, rot, text: t.value.trim() });
+    },
+
+    *MTEXT(c) {
+      const st = annoStyle(c.doc);
+      const a = yield c.point('Specify first corner of the text box:'); if (a.kind !== 'point') return;
+      const b = yield c.point('Specify opposite corner:', { base: a.pt, preview: (pt) => [rectPoly(a.pt, pt)] }); if (b.kind !== 'point') return;
+      const R = G.rectOf(a.pt, b.pt), w = R.maxX - R.minX;
+      const t = yield c.text('Enter text', { multiline: true });
+      if (t.kind !== 'text' || !t.value.trim()) return;
+      c.add({ t: 'MTEXT', p: [R.minX, R.maxY], h: c.engine.lastTextH || st.th, rot: 0, w: w > st.th ? w : 0, text: t.value.trim() });
+    },
+
+    *TEXTEDIT(c) {
+      const sel = yield c.select('Select text or a dimension to edit:'); if (sel.kind !== 'select' || !sel.ids.length) return;
+      const e = sel.ids.map((id) => c.doc.byId.get(id)).find((x) => x && (x.t === 'TEXT' || x.t === 'MTEXT' || x.t === 'DIM'));
+      if (!e) { c.warn('Select text, multiline text or a dimension.'); return; }
+      const isDim = e.t === 'DIM';
+      const t = yield c.text(isDim ? 'Dimension text (<> = measured value)' : 'Edit text', { multiline: e.t === 'MTEXT', current: isDim ? (e.txt || '<>') : e.text });
+      if (t.kind !== 'text' || !t.value.trim()) return;
+      const n = JSON.parse(JSON.stringify(e));
+      if (isDim) { if (t.value.trim() === '<>') delete n.txt; else n.txt = t.value.trim(); } else n.text = t.value.trim();
+      c.replace(e.id, n);
+    },
+
+    *DIMLINEAR(c) { yield* dimBody(c, 'lin'); },
+    *DIMALIGNED(c) { yield* dimBody(c, 'ali'); },
+
+    *DIMCONTINUE(c) {
+      const ld = c.engine.lastDim;
+      if (!ld) { c.warn('Place a dimension first (DIMLINEAR or DIMALIGNED), then continue from it.'); return; }
+      let from = ld.p2;
+      const make = (to) => {
+        let off = ld.off;
+        if (ld.k === 'ali') { const d = G.sub(to, from), l = G.len(d) || 1, n = [-d[1] / l, d[0] / l]; off = G.add(to, G.mul(n, ld.sd)); }
+        return { t: 'DIM', k: ld.k, p1: from, p2: to, off, ang: ld.ang, ...ld.st };
+      };
+      for (;;) {
+        const r = yield c.point('Specify next extension line origin or', { base: from, options: [opt('Exit', 'E')], preview: (pt) => (G.dist(from, pt) > 1e-9 ? [make(pt)] : []) });
+        if (r.kind !== 'point' || G.dist(from, r.pt) < 1e-9) return;
+        c.add(make(r.pt)); from = r.pt; ld.p2 = from;
+      }
+    },
+
+    *DIST(c) {
+      const a = yield c.point('Specify first point:'); if (a.kind !== 'point') return;
+      const b = yield c.point('Specify second point:', { base: a.pt, preview: (pt) => [{ t: 'LINE', p1: a.pt, p2: pt }] }); if (b.kind !== 'point') return;
+      const d = G.dist(a.pt, b.pt), dx = b.pt[0] - a.pt[0], dy = b.pt[1] - a.pt[1], ang = (G.deg(G.angleBetween(a.pt, b.pt)) + 360) % 360;
+      c.log('Distance = ' + fmtLen(c.doc, d));
+      c.log('Angle in XY plane = ' + G.fmtNum(ang, 2) + ' deg, Delta X = ' + G.fmtNum(dx, 3) + ', Delta Y = ' + G.fmtNum(dy, 3));
+      c.engine.overlay = [{ t: 'LINE', p1: a.pt, p2: b.pt }];
+      c.warn('Distance ' + fmtLen(c.doc, d) + '  ·  ∠ ' + G.fmtNum(ang, 1) + '°  ·  ΔX ' + G.fmtNum(dx, 3) + '  ΔY ' + G.fmtNum(dy, 3));
+    },
+
+    *AREA(c) {
+      const first = yield c.point('Specify first corner point or', { options: [opt('Object', 'O')] });
+      let verts, closed = true, label = '';
+      if (first.kind === 'option') {
+        const s = yield c.select('Select a polyline or circle:', { single: true }); if (s.kind !== 'select' || !s.ids.length) return;
+        const e = c.doc.byId.get(s.ids[0]);
+        if (e && e.t === 'CIRCLE') {
+          const a = Math.PI * e.r * e.r, l = 2 * Math.PI * e.r;
+          c.log('Area = ' + fmtArea(c.doc, a)); c.log('Circumference = ' + fmtLen(c.doc, l));
+          c.engine.overlay = [e]; c.warn('Area ' + fmtArea(c.doc, a)); return;
+        }
+        if (!e || e.t !== 'LWPOLYLINE') { c.warn('Pick a polyline or a circle.'); return; }
+        verts = e.v; closed = !!e.closed; label = e.closed ? 'Perimeter' : 'Length';
+        c.engine.overlay = [e];
+      } else {
+        if (first.kind !== 'point') return;
+        const pts = [first.pt];
+        for (;;) {
+          const r = yield c.point('Specify next corner point or press ENTER for total', { base: pts[pts.length - 1], preview: (pt) => [{ t: 'LWPOLYLINE', closed: true, v: pts.concat([pt]).map((q) => [q[0], q[1], 0]) }] });
+          if (r.kind === 'point') pts.push(r.pt); else break;
+        }
+        if (pts.length < 3) { c.warn('An area needs at least three points.'); return; }
+        verts = pts.map((q) => [q[0], q[1], 0]); label = 'Perimeter';
+        c.engine.overlay = [{ t: 'LWPOLYLINE', closed: true, v: verts }];
+      }
+      const ap = X.areaPerimeter(verts, closed);
+      c.log('Area = ' + fmtArea(c.doc, ap.area)); c.log(label + ' = ' + fmtLen(c.doc, ap.perimeter));
+      c.warn('Area ' + fmtArea(c.doc, ap.area) + '  ·  ' + label + ' ' + fmtLen(c.doc, ap.perimeter));
     },
 
     // Internal: drag a grip of a selected object (started by the canvas, not typed).
@@ -711,7 +903,9 @@ const CadCmd = (() => {
     UNDO(e) { e.log(e.doc.undo() ? 'Undo.' : 'Nothing to undo.'); },
     REDO(e) { e.log(e.doc.redo() ? 'Redo.' : 'Nothing to redo.'); },
     REGEN(e) { if (e.host.redraw) e.host.redraw(); e.log('Regenerating model.'); },
-    REDRAW(e) { if (e.host.redraw) e.host.redraw(); }
+    REDRAW(e) { if (e.host.redraw) e.host.redraw(); },
+    LAYER(e) { if (e.host.openLayers) e.host.openLayers(); else e.log('The layers panel is not available here.'); },
+    PROPERTIES(e) { if (e.host.openProperties) e.host.openProperties(); else e.log('The properties panel is not available here.'); }
   };
   const ALL_COMMANDS = Object.keys(COMMANDS).filter((n) => n !== 'GRIP').concat(Object.keys(INSTANT));
 
@@ -724,6 +918,7 @@ const CadCmd = (() => {
       this.lastCommand = null; this.selection = new Set(); this.onChange = null;
       this.lastRadius = null; this.lastRect = null;
       this.preselect = null; this.params = null; this.keepSel = null;
+      this.overlay = []; this.lastTextH = null; this.lastDim = null;
       this.lastOffset = null; this.filletR = null; this.filletTrim = null; this.chamD1 = null; this.chamD2 = null; this.chamTrim = null;
     }
     // Like log, but also shown as a message on screen (history lines scroll away under the next prompt).
@@ -748,6 +943,7 @@ const CadCmd = (() => {
       if (this.active) return false;
       const name = this.resolve(text);
       if (!name) { this.log('Unknown command "' + String(text).trim() + '". Press F1 for help.'); this._emit(); return false; }
+      this.overlay = [];
       this.log('Command: ' + name);
       this.lastCommand = name;
       if (INSTANT[name]) { INSTANT[name](this); this._emit(); return true; }
@@ -759,7 +955,7 @@ const CadCmd = (() => {
     _begin(name, params) {
       this.params = params || null;
       // Objects selected before the command (noun-verb) answer its first "Select objects" prompt.
-      this.preselect = this.selection.size ? new Set(Array.from(this.selection).filter((id) => this.doc.byId.has(id))) : null;
+      this.preselect = this.selection.size ? new Set(Array.from(this.selection).filter((id) => { const e = this.doc.byId.get(id); return e && this.doc.isSelectable(e); })) : null;
       this.active = name; this.selection = new Set(); this.keepSel = null;
       this.doc.beginGroup();
       const c = this._ctx();
@@ -774,6 +970,7 @@ const CadCmd = (() => {
         number: (msg, o) => ({ kind: 'number', msg, ...(o || {}) }),
         key: (msg, options, o) => ({ kind: 'key', msg, options, ...(o || {}) }),
         select: (msg, o) => ({ kind: 'select', msg, ...(o || {}) }),
+        text: (msg, o) => ({ kind: 'text', msg, ...(o || {}) }),
         add: (ent) => d.add(ent), remove: (id) => d.remove(id), replace: (id, ent) => d.replace(id, ent),
         undoOp: () => d.popOp(), opCount: () => (d.group ? d.group.length : 0), log: (m) => e.log(m), warn: (m) => e.warn(m)
       };
@@ -801,7 +998,7 @@ const CadCmd = (() => {
       this._emit();
     }
     cancel() {
-      if (!this.active) { if (this.selection.size) { this.selection = new Set(); this._emit(); } return; }
+      if (!this.active) { if (this.selection.size || this.overlay.length) { this.selection = new Set(); this.overlay = []; this._emit(); } return; }
       this.log('*Cancel*');
       try { this.gen.return(); } catch (e) { /* ignore */ }
       this._finish();
@@ -810,7 +1007,7 @@ const CadCmd = (() => {
       const p = this.prompt; if (!p) return 'Command:';
       let s = p.msg;
       if (p.options && p.options.length) s += ' [' + p.options.map((o) => o.short && o.name.toLowerCase().startsWith(o.short.toLowerCase()) ? o.short.toUpperCase() + o.name.slice(o.short.length) : o.name + '(' + o.short + ')').join('/') + ']';
-      if (p.default !== undefined && p.default !== null) s += ' <' + G.fmtNum(p.default, 4) + '>';
+      if (p.default !== undefined && p.default !== null && typeof p.default === 'number') s += ' <' + G.fmtNum(p.default, 4) + '>';
       return s.endsWith(':') ? s : s + ':';
     }
     setCursor(pt) { this.cursor = pt; }
@@ -831,6 +1028,9 @@ const CadCmd = (() => {
     clearSelection() { if (this.selection.size) { this.selection = new Set(); this._emit(); } }
     // pt: where the user picked (Trim, Extend and Fillet need it to know which part or end).
     selectAdd(ids, pt) {
+      const total = ids.length;
+      ids = ids.filter((id) => { const e = this.doc.byId.get(id); return e && this.doc.isSelectable(e); });
+      if (total && !ids.length) { if (this.host.toast) this.host.toast('That object is on a locked or hidden layer.'); return; }
       if (!this.active) { for (const id of ids) this.selection.add(id); this._emit(); return; }   // idle: pick-first selection
       if (!this.wantsSelect()) return;
       if (this.prompt.single) {
@@ -872,6 +1072,7 @@ const CadCmd = (() => {
       if (!t) return this.enter();
       const p = this.prompt; if (!p) return false;
       this.log(t);
+      if (p.kind === 'text') { this._step({ kind: 'text', value: String(text).replace(/\s+$/, '') }); return true; }
       const o = (/^[A-Za-z]/.test(t) || /^[23][Pp]$/.test(t)) ? this._matchOption(t) : null;
       if (o) { this._step({ kind: 'option', name: o.name }); return true; }
       if (p.kind === 'select') {

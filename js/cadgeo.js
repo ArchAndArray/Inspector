@@ -17,6 +17,7 @@
 
 const CadGeo = (() => {
   'use strict';
+  const D = (typeof CadDim !== 'undefined') ? CadDim : require('./caddim.js');
   const EPS = 1e-9;
   const TAU = Math.PI * 2;
 
@@ -103,8 +104,23 @@ const CadGeo = (() => {
       case 'CIRCLE': return [{ k: 'c', c: e.c, r: e.r }];
       case 'ARC': return [{ k: 'c', c: e.c, r: e.r, a0: e.a0, a1: e.a1 }];
       case 'LWPOLYLINE': return polySegments(e);
+      case 'DIM': return D.geom(e).lines.map(([p1, p2]) => ({ k: 's', p1, p2 }));
       default: return [];
     }
+  }
+  // Annotation boxes (text, dimension text) as closed segment loops: used for picking and crossing selection only.
+  function boxSegs(c) { return c.map((p, i) => ({ k: 's', p1: p, p2: c[(i + 1) % c.length] })); }
+  function hitPrims(e) {
+    if (e.t === 'TEXT' || e.t === 'MTEXT') return boxSegs(D.textCorners(e));
+    if (e.t === 'DIM') return prims(e).concat(boxSegs(D.textBoxOf(e)));
+    return prims(e);
+  }
+  function ptInPoly(pt, c) {
+    let inside = false;
+    for (let i = 0, j = c.length - 1; i < c.length; j = i++) {
+      if (((c[i][1] > pt[1]) !== (c[j][1] > pt[1])) && (pt[0] < (c[j][0] - c[i][0]) * (pt[1] - c[i][1]) / (c[j][1] - c[i][1]) + c[i][0])) inside = !inside;
+    }
+    return inside;
   }
   const isArc = (p) => p.k === 'c' && p.a0 !== undefined;
   function primEnds(p) {
@@ -117,6 +133,8 @@ const CadGeo = (() => {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     const grow = (p) => { if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0]; if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1]; };
     if (e.t === 'POINT') grow(e.p);
+    if (e.t === 'TEXT' || e.t === 'MTEXT') for (const q of D.textCorners(e)) grow(q);
+    if (e.t === 'DIM') for (const q of D.textBoxOf(e)) grow(q);
     for (const p of prims(e)) {
       if (p.k === 's') { grow(p.p1); grow(p.p2); continue; }
       if (!isArc(p)) { grow([p.c[0] - p.r, p.c[1] - p.r]); grow([p.c[0] + p.r, p.c[1] + p.r]); continue; }
@@ -225,8 +243,10 @@ const CadGeo = (() => {
   // ---- distance for picking ----
   function entityDist(e, pt) {
     if (e.t === 'POINT') return dist(e.p, pt);
+    if ((e.t === 'TEXT' || e.t === 'MTEXT') && ptInPoly(pt, D.textCorners(e))) return 0;
+    if (e.t === 'DIM' && ptInPoly(pt, D.textBoxOf(e))) return 0;
     let best = Infinity;
-    for (const p of prims(e)) { const n = nearestOnPrim(p, pt); if (n.d < best) best = n.d; }
+    for (const p of hitPrims(e)) { const n = nearestOnPrim(p, pt); if (n.d < best) best = n.d; }
     return best;
   }
 
@@ -245,7 +265,7 @@ const CadGeo = (() => {
       { k: 's', p1: [r.minX, r.minY], p2: [r.maxX, r.minY] }, { k: 's', p1: [r.maxX, r.minY], p2: [r.maxX, r.maxY] },
       { k: 's', p1: [r.maxX, r.maxY], p2: [r.minX, r.maxY] }, { k: 's', p1: [r.minX, r.maxY], p2: [r.minX, r.minY] }
     ];
-    for (const p of prims(e)) {
+    for (const p of hitPrims(e)) {
       const probe = p.k === 's' ? p.p1 : (isArc(p) ? polar(p.c, p.a0, p.r) : polar(p.c, 0, p.r));
       if (inRect(probe, r)) return true;
       for (const ed of edges) if (intersectPrims(p, ed).length) return true;
@@ -270,7 +290,7 @@ const CadGeo = (() => {
 
   // ---- object snap ----
   // modes: { end, mid, cen, gcen, node, quad, int, per, tan, nea } booleans.
-  const SNAP_PRIORITY = ['end', 'int', 'mid', 'cen', 'gcen', 'quad', 'node', 'per', 'tan', 'nea'];
+  const SNAP_PRIORITY = ['end', 'int', 'mid', 'cen', 'gcen', 'quad', 'node', 'ins', 'per', 'tan', 'nea'];
   function polyCentroid(e) {
     const pts = [];
     for (const p of polySegments(e)) {
@@ -295,6 +315,7 @@ const CadGeo = (() => {
     const out = [];
     const push = (pt, type) => out.push({ pt, type });
     if (e.t === 'POINT') { if (modes.node) push(e.p, 'node'); return out; }
+    if (e.t === 'TEXT' || e.t === 'MTEXT') { if (modes.ins) push(e.p, 'ins'); return out; }
     const ps = prims(e);
     for (const p of ps) {
       if (p.k === 's') {
@@ -440,7 +461,7 @@ const CadGeo = (() => {
   return {
     EPS, TAU, add, sub, mul, dot, cross, len, dist, mid, polar, angleOf, angleBetween, normAng, sweepOf, angleInArc, deg, rad,
     bulgeArc, bulgeFromTangent, circumcircle, arcThrough3, arcPoints, arcMid,
-    prims, polySegments, isArc, primEnds, bbox, nearestOnPrim, perpFeet, tangentPoints,
+    prims, hitPrims, ptInPoly, polySegments, isArc, primEnds, bbox, nearestOnPrim, perpFeet, tangentPoints,
     intersectPrims, intersectEntities, entityDist, rectOf, inRect, entInWindow, entCrossesRect,
     constrain, staticSnaps, findSnap, SNAP_PRIORITY, polyCentroid, CadIndex, unionBox, fmtNum, translate
   };
