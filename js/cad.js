@@ -71,6 +71,7 @@ function cadIcon(cmd) {
     AREA: '<path d="M5 20 L8 6 L21 9 L19 21 Z" fill="currentColor" fill-opacity=".18"/>',
     LAYER: '<path d="M13 4 L23 9 L13 14 L3 9 Z"/><path d="M3 13 L13 18 L23 13"/><path d="M3 17 L13 22 L23 17"/>',
     PROPERTIES: '<path d="M5 7 H21 M5 13 H21 M5 19 H21"/><circle cx="9" cy="7" r="2" fill="#fff"/><circle cx="17" cy="13" r="2" fill="#fff"/><circle cx="11" cy="19" r="2" fill="#fff"/>',
+    EXPORT: '<path d="M13 3 V15 M8 8 L13 3 L18 8"/><path d="M5 13 V21 H21 V13"/>',
     GEAR: '<circle cx="13" cy="13" r="3.2"/><path d="M13 3.5 V6 M13 20 V22.5 M3.5 13 H6 M20 13 H22.5 M6.3 6.3 L8 8 M18 18 L19.7 19.7 M19.7 6.3 L18 8 M8 18 L6.3 19.7"/>'
   };
   return `<svg ${a}>${paths[cmd] || ''}</svg>`;
@@ -118,6 +119,7 @@ async function renderCadList() {
     <div class="topbar">
       <button class="icon-btn" id="btn-cad-back">‹</button>
       <div style="flex:1; min-width:0;"><h1>CAD</h1><span class="sub">2D drawings</span></div>
+      <button class="text-btn" id="btn-cad-import">Import DXF</button>
     </div>
     <div class="content">
       ${drawings.length ? rows : `
@@ -130,6 +132,7 @@ async function renderCadList() {
     <button class="fab" id="btn-new-cad">＋</button>`;
   document.getElementById('btn-cad-back').addEventListener('click', () => navigate('#/'));
   document.getElementById('btn-new-cad').addEventListener('click', () => cadOpenNewSheet());
+  document.getElementById('btn-cad-import').addEventListener('click', () => cadPickDxfFile());
   appEl.querySelectorAll('.list-item').forEach((row) => row.addEventListener('click', () => navigate('#/cad/' + row.dataset.id)));
   SwipeDelete.attachAll(appEl, '.list-item', (row) => ({
     title: 'Delete drawing?',
@@ -194,6 +197,7 @@ function cadMountEditor(data) {
         <button class="cad-btn" id="cad-undo" title="Undo">${cadIcon('UNDO')}</button>
         <button class="cad-btn" id="cad-redo" title="Redo">${cadIcon('REDO')}</button>
         <button class="cad-btn" id="cad-fit" title="Zoom to fit">${cadIcon('FIT')}</button>
+        <button class="cad-btn" id="cad-export" title="Export / print">${cadIcon('EXPORT')}</button>
         <button class="cad-btn cad-finger" id="cad-finger" title="What one finger does"></button>
         <button class="cad-btn" id="cad-settings" title="Drafting settings">${cadIcon('GEAR')}</button>
       </div>
@@ -710,6 +714,7 @@ function cadMountEditor(data) {
   $('cad-undo').addEventListener('click', doUndo);
   $('cad-redo').addEventListener('click', doRedo);
   $('cad-fit').addEventListener('click', zoomExtents);
+  $('cad-export').addEventListener('click', () => { if (engine.active) engine.cancel(); cadOpenExportSheet(doc, markDirty); });
   $('cad-cancel').addEventListener('click', () => engine.cancel());
   $('cad-enter').addEventListener('click', () => submitCmd());
   $('cad-back').addEventListener('click', async () => { await save(); navigate('#/cad'); });
