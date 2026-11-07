@@ -222,7 +222,8 @@ function cadMountEditor(data) {
     zoomPrevious: () => { const v = prevViews.pop(); if (v) { view = v; requestDraw(); } },
     zoomScale: (f) => { pushView(); view.scale = clampScale(view.scale * f); requestDraw(); },
     panBy: (d) => { pushView(); view.cx -= d[0]; view.cy -= d[1]; requestDraw(); },
-    redraw: () => requestDraw()
+    redraw: () => requestDraw(),
+    toast: (m) => toast(m)
   };
   const engine = new CadCmd.Engine(doc, host);
   engine.onChange = () => { refreshUI(); requestDraw(); };

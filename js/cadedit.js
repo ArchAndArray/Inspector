@@ -347,25 +347,32 @@ const CadEdit = (() => {
   }
 
   // ---------- extend ----------
-  function rayPrim(o, d, p) {
+  function rayPrim(o, d, p, inf) {
     if (p.k === 's') {
       const s2 = sub(p.p2, p.p1), den = cross(d, s2);
       if (Math.abs(den) < 1e-12 * len(s2)) return [];
       const qp = sub(p.p1, o), t = cross(qp, s2) / den, u = cross(qp, d) / den;
-      return u < -1e-9 || u > 1 + 1e-9 ? [] : [t];
+      return !inf && (u < -1e-9 || u > 1 + 1e-9) ? [] : [t];
     }
     const f = sub(o, p.c), B = 2 * dot(f, d), C = dot(f, f) - p.r * p.r, disc = B * B - 4 * C;
     if (disc < 0) return [];
     const sq = Math.sqrt(disc), out = [];
     for (const t of [(-B - sq) / 2, (-B + sq) / 2]) {
       const q = add(o, mul(d, t));
-      if (G.isArc(p) && !G.angleInArc(angleBetween(p.c, q), p.a0, p.a1)) continue;
+      if (!inf && G.isArc(p) && !G.angleInArc(angleBetween(p.c, q), p.a0, p.a1)) continue;
       out.push(t);
     }
     return out;
   }
   // Extend the end of e nearest pickPt to the nearest boundary among others. Returns { entity } or { error }.
   function extendEntity(e, pickPt, others) {
+    const r = extendPass(e, pickPt, others, false);
+    if (!r.error) return r;
+    const r2 = extendPass(e, pickPt, others, true);     // no real boundary: try where the boundaries would meet if extended
+    if (!r2.error) { r2.implied = true; return r2; }
+    return r;
+  }
+  function extendPass(e, pickPt, others, inf) {
     const path = pathOf(e); if (!path || path.closed) return { error: 'This object cannot be extended.' };
     const n = path.segs.length, up = pickParam(path, pickPt), atEnd = up >= n / 2;
     const seg = atEnd ? path.segs[n - 1] : path.segs[0];
@@ -374,8 +381,8 @@ const CadEdit = (() => {
     if (seg.k === 's') {
       const o = atEnd ? seg.p2 : seg.p1, d = unit(sub(o, atEnd ? seg.p1 : seg.p2));
       let best = Infinity;
-      for (const op of otherPrims) for (const t of rayPrim(o, d, op)) if (t > 1e-7 && t < best) best = t;
-      if (!isFinite(best)) return { error: 'No boundary edge in that direction.' };
+      for (const op of otherPrims) for (const t of rayPrim(o, d, op, inf)) if (t > 1e-7 && t < best) best = t;
+      if (!isFinite(best)) return { error: 'Nothing to extend to in that direction. Pick the end you want to extend, nearest its end.' };
       const np = add(o, mul(d, best)), n2 = clone(e);
       if (e.t === 'LINE') { if (atEnd) n2.p2 = np; else n2.p1 = np; }
       else n2.v[vi] = [np[0], np[1], e.v[vi][2] || 0];
@@ -386,13 +393,17 @@ const CadEdit = (() => {
     const S = sweepOf(seg.a0, seg.a1);
     let best = Infinity;
     for (const op of otherPrims) {
-      for (const q of G.intersectPrims({ k: 'c', c: seg.c, r: seg.r }, op)) {
+      let pts;
+      if (inf && op.k === 's') pts = lineCircleInf(op, { c: seg.c, r: seg.r });
+      else if (inf) pts = G.intersectPrims({ k: 'c', c: seg.c, r: seg.r }, { k: 'c', c: op.c, r: op.r });
+      else pts = G.intersectPrims({ k: 'c', c: seg.c, r: seg.r }, op);
+      for (const q of pts) {
         const ang = angleBetween(seg.c, q);
         const delta = extDir > 0 ? normAng(ang - angEnd) : normAng(angEnd - ang);
         if (delta > 1e-7 && delta < best && S + delta < TAU - 1e-6) best = delta;
       }
     }
-    if (!isFinite(best)) return { error: 'No boundary edge in that direction.' };
+    if (!isFinite(best)) return { error: 'Nothing to extend to in that direction. Pick the end you want to extend, nearest its end.' };
     const newAng = angEnd + extDir * best, n2 = clone(e);
     if (e.t === 'ARC') { if (extDir > 0) n2.a1 = newAng; else n2.a0 = newAng; return { entity: n2 }; }
     const q = polar(seg.c, newAng, seg.r), si = atEnd ? n - 1 : 0;
@@ -441,11 +452,12 @@ const CadEdit = (() => {
     return out;
   }
   // Fillet or chamfer every straight-straight vertex of a polyline. Returns the new entity or null if nothing changed.
-  function polyCorners(e, mode, d1, d2) {
+  function polyCorners(e, mode, d1, d2, only) {
     const v = e.v.map((q) => [q[0], q[1], q[2] || 0]), nv = v.length, closed = !!e.closed, nSeg = closed ? nv : nv - 1;
     const info = new Array(nv).fill(null);
     for (let i = 0; i < nv; i++) {
       if (!closed && (i === 0 || i === nv - 1)) continue;
+      if (only != null && i !== only) continue;
       const kp = (i - 1 + nv) % nv, kn = i;
       if (kp >= nSeg || kn >= nSeg || v[kp][2] || v[kn][2]) continue;
       const P = v[kp], V = v[i], N = v[(i + 1) % nv], a = sub(P, V), b = sub(N, V), la = len(a), lb = len(b);

@@ -168,6 +168,15 @@ const CadCmd = (() => {
   const same = (a, b) => G.dist(a, b) < 1e-9;
   const rectPoly = (a, b) => ({ t: 'LWPOLYLINE', closed: true, v: [[a[0], a[1], 0], [b[0], a[1], 0], [b[0], b[1], 0], [a[0], b[1], 0]] });
   const withoutId = (e) => { const n = { ...e }; delete n.id; return n; };
+  const polySegAt = (e, pt) => { let best = 0, bd = Infinity; G.polySegments(e).forEach((s, k) => { const d = G.nearestOnPrim(s, pt).d; if (d < bd) { bd = d; best = k; } }); return best; };
+  // Vertex shared by two picked segments of one polyline (null when they are not neighbours).
+  const sharedVertex = (e, k1, k2) => {
+    const nSeg = G.polySegments(e).length;
+    if (k1 === k2 || nSeg < 2) return null;
+    if (k2 === (k1 + 1) % nSeg && (e.closed || k2 === k1 + 1)) return { v: k2, firstIsPrev: true };
+    if (k1 === (k2 + 1) % nSeg && (e.closed || k1 === k2 + 1)) return { v: k1, firstIsPrev: false };
+    return null;
+  };
 
   const COMMANDS = {
     *LINE(c) {
@@ -459,11 +468,11 @@ const CadCmd = (() => {
         const s = yield c.select('Select object to offset or', { single: true, options: [opt('Exit', 'E')] });
         if (s.kind !== 'select' || !s.ids.length) return;
         const e = c.doc.byId.get(s.ids[0]); if (!e) continue;
-        if (!['LINE', 'CIRCLE', 'ARC', 'LWPOLYLINE'].includes(e.t)) { c.log('This object cannot be offset.'); continue; }
+        if (!['LINE', 'CIRCLE', 'ARC', 'LWPOLYLINE'].includes(e.t)) { c.warn('This object cannot be offset.'); continue; }
         const q = yield c.point(through ? 'Specify through point or' : 'Specify point on side to offset or', { options: [opt('Exit', 'E')], preview: (pt) => { const o = make(e, pt); return o ? [o] : []; } });
         if (q.kind !== 'point') return;
         const o = make(e, q.pt);
-        if (!o) { c.log('Cannot offset: the result would collapse.'); continue; }
+        if (!o) { c.warn('Cannot offset: the result would collapse.'); continue; }
         c.add(withoutId(o));
       }
     },
@@ -482,7 +491,7 @@ const CadCmd = (() => {
         const e = c.doc.byId.get(s.ids[0]); if (!e) continue;
         const bb = G.bbox(e), others = c.doc.query(bb.minX, bb.minY, bb.maxX, bb.maxY).filter((o) => o.id !== e.id);
         const res = X.trimEntity(e, s.pt || G.mid([bb.minX, bb.minY], [bb.maxX, bb.maxY]), others);
-        if (res.error) { c.log(res.error); continue; }
+        if (res.error) { c.warn(res.error); continue; }
         const before = c.opCount();
         c.remove(e.id);
         for (const p of res.pieces) c.add(withoutId(p));
@@ -504,7 +513,8 @@ const CadCmd = (() => {
         const e = c.doc.byId.get(s.ids[0]); if (!e) continue;
         const others = c.doc.entities.filter((o) => o.id !== e.id);
         const res = X.extendEntity(e, s.pt || [0, 0], others);
-        if (res.error) { c.log(res.error); continue; }
+        if (res.error) { c.warn(res.error); continue; }
+        if (res.implied) c.log('Extended to where the boundary would meet it if extended.');
         const before = c.opCount();
         c.replace(e.id, res.entity);
         counts.push(c.opCount() - before);
@@ -513,11 +523,15 @@ const CadCmd = (() => {
 
     *FILLET(c) {
       const eng = c.engine;
-      if (eng.filletR == null) eng.filletR = 0;
       if (eng.filletTrim == null) eng.filletTrim = true;
-      c.log('Current settings: Mode = ' + (eng.filletTrim ? 'TRIM' : 'NOTRIM') + ', Radius = ' + G.fmtNum(eng.filletR, 4));
+      if (eng.filletR == null) {
+        const r0 = yield c.number('Specify fillet radius', { default: 0 });
+        if (r0.kind !== 'number' || r0.value < 0) return;
+        eng.filletR = r0.value;
+      }
+      c.log('Mode = ' + (eng.filletTrim ? 'TRIM' : 'NOTRIM') + ', Radius = ' + G.fmtNum(eng.filletR, 4));
       for (;;) {
-        const a = yield c.select('Select first line or', { single: true, options: [opt('Polyline', 'P'), opt('Radius', 'R'), opt('Trim', 'T')] });
+        const a = yield c.select('Fillet (radius ' + G.fmtNum(eng.filletR, 4) + '): select first line or', { single: true, options: [opt('Polyline', 'P'), opt('Radius', 'R'), opt('Trim', 'T')] });
         if (a.kind === 'option') {
           if (a.name === 'Radius') { const r = yield c.number('Specify fillet radius', { default: eng.filletR }); if (r.kind === 'number' && r.value >= 0) eng.filletR = r.value; continue; }
           if (a.name === 'Trim') { const t = yield c.key('Trim mode?', [opt('Trim', 'T'), opt('No trim', 'N')]); if (t.kind === 'option') eng.filletTrim = t.name === 'Trim'; continue; }
@@ -525,22 +539,31 @@ const CadCmd = (() => {
             const p = yield c.select('Select 2D polyline', { single: true });
             if (p.kind !== 'select' || !p.ids.length) return;
             const e = c.doc.byId.get(p.ids[0]);
-            if (!e || e.t !== 'LWPOLYLINE') { c.log('That is not a polyline.'); return; }
+            if (!e || e.t !== 'LWPOLYLINE') { c.warn('That is not a polyline.'); return; }
             const n = X.polyCorners(e, 'fillet', eng.filletR);
-            if (!n) { c.log('Nothing to fillet. Check the radius against the segment lengths.'); return; }
+            if (!n) { c.warn(eng.filletR > 0 ? 'Nothing to fillet. The radius is too big for the segment lengths, or the corners are arcs.' : 'The radius is 0, so there is nothing to round. Set a radius with R.'); return; }
             c.replace(e.id, n); c.log('Polyline corners filleted.'); return;
           }
           return;
         }
         if (a.kind !== 'select' || !a.ids.length) return;
         const e1 = c.doc.byId.get(a.ids[0]); if (!e1) continue;
-        if (e1.t !== 'LINE') { c.log('Fillet works on two lines here. Use the Polyline option for polylines.'); continue; }
-        const b = yield c.select('Select second line', { single: true });
+        if (e1.t !== 'LINE' && e1.t !== 'LWPOLYLINE') { c.warn('Fillet works on lines and polyline corners.'); continue; }
+        const b = yield c.select('Select second line' + (e1.t === 'LWPOLYLINE' ? ' (the neighbouring segment of the same polyline)' : ''), { single: true });
         if (b.kind !== 'select' || !b.ids.length) return;
         const e2 = c.doc.byId.get(b.ids[0]);
-        if (!e2 || e2.t !== 'LINE' || e2.id === e1.id) { c.log('Pick a second, different line.'); return; }
+        if (!e2) return;
+        if (e1.t === 'LWPOLYLINE' || e2.t === 'LWPOLYLINE') {
+          if (e1.id !== e2.id) { c.warn('To round a polyline corner, pick the two segments that meet at it.'); return; }
+          const sv = sharedVertex(e1, polySegAt(e1, a.pt || [0, 0]), polySegAt(e1, b.pt || [0, 0]));
+          if (!sv) { c.warn('Those two segments do not meet at a corner.'); return; }
+          const n = X.polyCorners(e1, 'fillet', eng.filletR, 0, sv.v);
+          if (!n) { c.warn(eng.filletR > 0 ? 'The radius is too big for these segments, or the corner is an arc.' : 'The radius is 0, so there is nothing to round. Set a radius with R.'); return; }
+          c.replace(e1.id, n); return;
+        }
+        if (e2.t !== 'LINE' || e2.id === e1.id) { c.warn('Pick a second, different line.'); return; }
         const res = X.filletLines(e1, a.pt || e1.p1, e2, b.pt || e2.p1, eng.filletR, eng.filletTrim);
-        if (res.error) { c.log(res.error); return; }
+        if (res.error) { c.warn(res.error); return; }
         if (res.l1) c.replace(e1.id, res.l1);
         if (res.l2) c.replace(e2.id, res.l2);
         if (res.arc) c.add(res.arc);
@@ -550,11 +573,17 @@ const CadCmd = (() => {
 
     *CHAMFER(c) {
       const eng = c.engine;
-      if (eng.chamD1 == null) { eng.chamD1 = 0; eng.chamD2 = 0; }
       if (eng.chamTrim == null) eng.chamTrim = true;
-      c.log('Current settings: Mode = ' + (eng.chamTrim ? 'TRIM' : 'NOTRIM') + ', Distances = ' + G.fmtNum(eng.chamD1, 4) + ', ' + G.fmtNum(eng.chamD2, 4));
+      if (eng.chamD1 == null) {
+        const d1 = yield c.number('Specify first chamfer distance', { default: 0 });
+        if (d1.kind !== 'number' || d1.value < 0) return;
+        const d2 = yield c.number('Specify second chamfer distance', { default: d1.value });
+        if (d2.kind !== 'number' || d2.value < 0) return;
+        eng.chamD1 = d1.value; eng.chamD2 = d2.value;
+      }
+      c.log('Mode = ' + (eng.chamTrim ? 'TRIM' : 'NOTRIM') + ', Distances = ' + G.fmtNum(eng.chamD1, 4) + ', ' + G.fmtNum(eng.chamD2, 4));
       for (;;) {
-        const a = yield c.select('Select first line or', { single: true, options: [opt('Polyline', 'P'), opt('Distance', 'D'), opt('Trim', 'T')] });
+        const a = yield c.select('Chamfer (' + G.fmtNum(eng.chamD1, 4) + ', ' + G.fmtNum(eng.chamD2, 4) + '): select first line or', { single: true, options: [opt('Polyline', 'P'), opt('Distance', 'D'), opt('Trim', 'T')] });
         if (a.kind === 'option') {
           if (a.name === 'Distance') {
             const d1 = yield c.number('Specify first chamfer distance', { default: eng.chamD1 });
@@ -568,22 +597,31 @@ const CadCmd = (() => {
             const p = yield c.select('Select 2D polyline', { single: true });
             if (p.kind !== 'select' || !p.ids.length) return;
             const e = c.doc.byId.get(p.ids[0]);
-            if (!e || e.t !== 'LWPOLYLINE') { c.log('That is not a polyline.'); return; }
+            if (!e || e.t !== 'LWPOLYLINE') { c.warn('That is not a polyline.'); return; }
             const n = X.polyCorners(e, 'chamfer', eng.chamD1, eng.chamD2);
-            if (!n) { c.log('Nothing to chamfer. Check the distances against the segment lengths.'); return; }
+            if (!n) { c.warn('Nothing to chamfer. The distances are 0 or too long for the segments.'); return; }
             c.replace(e.id, n); c.log('Polyline corners chamfered.'); return;
           }
           return;
         }
         if (a.kind !== 'select' || !a.ids.length) return;
         const e1 = c.doc.byId.get(a.ids[0]); if (!e1) continue;
-        if (e1.t !== 'LINE') { c.log('Chamfer works on two lines here. Use the Polyline option for polylines.'); continue; }
-        const b = yield c.select('Select second line', { single: true });
+        if (e1.t !== 'LINE' && e1.t !== 'LWPOLYLINE') { c.warn('Chamfer works on lines and polyline corners.'); continue; }
+        const b = yield c.select('Select second line' + (e1.t === 'LWPOLYLINE' ? ' (the neighbouring segment of the same polyline)' : ''), { single: true });
         if (b.kind !== 'select' || !b.ids.length) return;
         const e2 = c.doc.byId.get(b.ids[0]);
-        if (!e2 || e2.t !== 'LINE' || e2.id === e1.id) { c.log('Pick a second, different line.'); return; }
+        if (!e2) return;
+        if (e1.t === 'LWPOLYLINE' || e2.t === 'LWPOLYLINE') {
+          if (e1.id !== e2.id) { c.warn('To chamfer a polyline corner, pick the two segments that meet at it.'); return; }
+          const sv = sharedVertex(e1, polySegAt(e1, a.pt || [0, 0]), polySegAt(e1, b.pt || [0, 0]));
+          if (!sv) { c.warn('Those two segments do not meet at a corner.'); return; }
+          const n = X.polyCorners(e1, 'chamfer', sv.firstIsPrev ? eng.chamD1 : eng.chamD2, sv.firstIsPrev ? eng.chamD2 : eng.chamD1, sv.v);
+          if (!n) { c.warn('The distances are 0 or too long for these segments, or the corner is an arc.'); return; }
+          c.replace(e1.id, n); return;
+        }
+        if (e2.t !== 'LINE' || e2.id === e1.id) { c.warn('Pick a second, different line.'); return; }
         const res = X.chamferLines(e1, a.pt || e1.p1, e2, b.pt || e2.p1, eng.chamD1, eng.chamD2, eng.chamTrim);
-        if (res.error) { c.log(res.error); return; }
+        if (res.error) { c.warn(res.error); return; }
         if (res.l1) c.replace(e1.id, res.l1);
         if (res.l2) c.replace(e2.id, res.l2);
         if (res.line) c.add(res.line);
@@ -592,17 +630,24 @@ const CadCmd = (() => {
     },
 
     *STRETCH(c) {
-      const a = yield c.point('Specify first corner of the crossing window:'); if (a.kind !== 'point') return;
-      const q = yield c.point('Specify opposite corner:', { base: a.pt, preview: (pt) => [rectPoly(a.pt, pt)] }); if (q.kind !== 'point') return;
-      const R = G.rectOf(a.pt, q.pt);
-      const ents = c.doc.query(R.minX, R.minY, R.maxX, R.maxY).filter((e) => G.entCrossesRect(e, R) || G.entInWindow(e, R));
-      if (!ents.length) { c.log('No objects found.'); return; }
-      c.log(ents.length + ' found');
+      // The crossing window must ENCLOSE the endpoints / vertices / centres you want to move (as in AutoCAD).
+      let R, movers;
+      for (;;) {
+        const a = yield c.point('Specify first corner of the crossing window (enclose the endpoints to move):'); if (a.kind !== 'point') return;
+        const q = yield c.point('Specify opposite corner:', { base: a.pt, preview: (pt) => [rectPoly(a.pt, pt)] }); if (q.kind !== 'point') return;
+        R = G.rectOf(a.pt, q.pt);
+        const found = c.doc.query(R.minX, R.minY, R.maxX, R.maxY).filter((e) => G.entCrossesRect(e, R) || G.entInWindow(e, R));
+        movers = found.filter((e) => X.stretchEntity(e, R, [0, 0]));
+        if (movers.length) break;
+        c.warn(found.length ? 'No endpoints or vertices inside the window. Draw the window around the points you want to move.' : 'No objects found in the window.');
+      }
+      c.engine.selection = new Set(movers.map((e) => e.id));
+      c.log(movers.length + ' object' + (movers.length === 1 ? '' : 's') + ' will stretch');
       const b = yield c.point('Specify base point:'); if (b.kind !== 'point') return;
-      const s = yield c.point('Specify second point or <use first point as displacement>:', { base: b.pt, preview: (pt) => ents.map((e) => X.stretchEntity(e, R, G.sub(pt, b.pt))).filter(Boolean) });
+      const s = yield c.point('Specify second point or <use first point as displacement>:', { base: b.pt, preview: (pt) => movers.map((e) => X.stretchEntity(e, R, G.sub(pt, b.pt))).filter(Boolean) });
       let d; if (s.kind === 'point') d = G.sub(s.pt, b.pt); else if (s.kind === 'enter') d = b.pt; else return;
       let n = 0;
-      for (const e of ents) { const ne = X.stretchEntity(e, R, d); if (ne) { c.replace(e.id, ne); n++; } }
+      for (const e of movers) { const ne = X.stretchEntity(e, R, d); if (ne) { c.replace(e.id, ne); n++; } }
       c.log(n + ' stretched.');
     },
 
@@ -681,6 +726,8 @@ const CadCmd = (() => {
       this.preselect = null; this.params = null; this.keepSel = null;
       this.lastOffset = null; this.filletR = null; this.filletTrim = null; this.chamD1 = null; this.chamD2 = null; this.chamTrim = null;
     }
+    // Like log, but also shown as a message on screen (history lines scroll away under the next prompt).
+    warn(msg) { this.log(msg); if (this.host.toast) this.host.toast(msg); }
     log(msg) { this.history.push(msg); if (this.history.length > 200) this.history.shift(); }
     _emit() { if (this.onChange) this.onChange(); }
     resolve(text) {
@@ -728,7 +775,7 @@ const CadCmd = (() => {
         key: (msg, options, o) => ({ kind: 'key', msg, options, ...(o || {}) }),
         select: (msg, o) => ({ kind: 'select', msg, ...(o || {}) }),
         add: (ent) => d.add(ent), remove: (id) => d.remove(id), replace: (id, ent) => d.replace(id, ent),
-        undoOp: () => d.popOp(), opCount: () => (d.group ? d.group.length : 0), log: (m) => e.log(m)
+        undoOp: () => d.popOp(), opCount: () => (d.group ? d.group.length : 0), log: (m) => e.log(m), warn: (m) => e.warn(m)
       };
     }
     _step(val) {
