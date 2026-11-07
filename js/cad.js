@@ -10,17 +10,20 @@
 //   Typing           goes to the command line: coordinates (x,y  @dx,dy  @d<a), direct distance,
 //                    option keywords, command names and AutoCAD aliases.
 
-const CAD_ACI = { 1: '#d32f2f', 2: '#b8860b', 3: '#2e7d32', 4: '#00838f', 5: '#1565c0', 6: '#8e24aa', 7: '#111111', 8: '#808080', 9: '#a0a0a0' };
+const CAD_ACI = CadStyle.ACI;
+// small HTML builders shared by the layers and properties sheets
+function cadLtOptions(sel, byLayer) { return (byLayer ? `<option value="" ${!sel ? 'selected' : ''}>ByLayer</option>` : '') + Object.keys(CadStyle.LINETYPES).map((n) => `<option value="${n}" ${sel === n ? 'selected' : ''}>${CadStyle.LT_NOTE[n]}</option>`).join(''); }
+function cadLwOptions(sel, byLayer, defLabel) { return (byLayer ? `<option value="" ${sel == null ? 'selected' : ''}>ByLayer</option>` : `<option value="-3" ${sel === -3 || sel == null ? 'selected' : ''}>${defLabel || 'Default'}</option>`) + CadStyle.LW_LIST.map((v) => `<option value="${v}" ${sel === v ? 'selected' : ''}>${(v / 100).toFixed(2)} mm</option>`).join(''); }
 const CAD_SNAP_NAMES = { end: 'Endpoint', mid: 'Midpoint', cen: 'Center', gcen: 'Geometric center', node: 'Node', quad: 'Quadrant', int: 'Intersection', per: 'Perpendicular', tan: 'Tangent', nea: 'Nearest', ins: 'Text insertion' };
 const CAD_DEFAULT_PREFS = {
-  toggles: { osnap: true, grid: true, snap: false, ortho: false, polar: false, dyn: true },
+  toggles: { osnap: true, grid: true, snap: false, ortho: false, polar: false, dyn: true, lwt: true },
   modes: { end: true, mid: true, cen: true, int: true, node: true, quad: false, per: true, tan: false, nea: false, gcen: false, ins: true },
   polarInc: 45, finger: 'pan'
 };
 const CAD_TOOLS = [
   { group: 'Draw' },
   { cmd: 'LINE', label: 'Line' }, { cmd: 'PLINE', label: 'Polyline' }, { cmd: 'RECTANG', label: 'Rectangle' },
-  { cmd: 'CIRCLE', label: 'Circle' }, { cmd: 'ARC', label: 'Arc' }, { cmd: 'POINT', label: 'Point' },
+  { cmd: 'CIRCLE', label: 'Circle' }, { cmd: 'ARC', label: 'Arc' }, { cmd: 'POINT', label: 'Point' }, { cmd: 'HATCH', label: 'Hatch' }, { cmd: 'SYMBOL', label: 'Stencils' },
   { group: 'Modify' },
   { cmd: 'MOVE', label: 'Move' }, { cmd: 'COPY', label: 'Copy' }, { cmd: 'ROTATE', label: 'Rotate' }, { cmd: 'SCALE', label: 'Scale' },
   { cmd: 'MIRROR', label: 'Mirror' }, { cmd: 'OFFSET', label: 'Offset' }, { cmd: 'TRIM', label: 'Trim' }, { cmd: 'EXTEND', label: 'Extend' },
@@ -32,7 +35,9 @@ const CAD_TOOLS = [
   { group: 'Measure' },
   { cmd: 'DIST', label: 'Distance' }, { cmd: 'AREA', label: 'Area' },
   { group: 'Setup' },
-  { cmd: 'LAYER', label: 'Layers' }, { cmd: 'PROPERTIES', label: 'Properties' }
+  { cmd: 'LAYER', label: 'Layers' }, { cmd: 'PROPERTIES', label: 'Properties' },
+  { group: 'Underlay' },
+  { cmd: 'UNDERLAY', label: 'Underlays' }, { cmd: 'CALIBRATE', label: 'Calibrate' }, { cmd: 'UMOVE', label: 'Move underlay' }, { cmd: 'UROTATE', label: 'Rotate underlay' }
 ];
 const CAD_UNITS = { mm: { prec: 2, label: 'mm' }, m: { prec: 4, label: 'm' }, in: { prec: 3, label: 'in' } };
 
@@ -45,6 +50,8 @@ function cadIcon(cmd) {
     CIRCLE: '<circle cx="13" cy="13" r="8"/>',
     ARC: '<path d="M4 20 A10 10 0 0 1 22 20"/>',
     POINT: '<circle cx="13" cy="13" r="2.2" fill="currentColor"/><path d="M13 5 V8 M13 18 V21 M5 13 H8 M18 13 H21"/>',
+    SYMBOL: '<circle cx="9" cy="10" r="5"/><path d="M9 15 V22 M5 22 H13"/><ellipse cx="19" cy="19" rx="4" ry="3"/>',
+    HATCH: '<rect x="4.5" y="5.5" width="17" height="15" rx="0.5"/><path d="M8 20 L21 7 M4.5 15 L14 5.5 M13 20.5 L21.5 12"/>',
     ERASE: '<path d="M6 17 L14 6 L21 11 L14 20 H9 Z"/><path d="M10 14 L17 19"/>',
     MOVE: '<path d="M13 3 V23 M3 13 H23 M13 3 L10 6 M13 3 L16 6 M13 23 L10 20 M13 23 L16 20 M3 13 L6 10 M3 13 L6 16 M23 13 L20 10 M23 13 L20 16"/>',
     COPY: '<rect x="4" y="10" width="11" height="11" rx="1"/><path d="M10 6 H21 V17"/>',
@@ -71,6 +78,10 @@ function cadIcon(cmd) {
     AREA: '<path d="M5 20 L8 6 L21 9 L19 21 Z" fill="currentColor" fill-opacity=".18"/>',
     LAYER: '<path d="M13 4 L23 9 L13 14 L3 9 Z"/><path d="M3 13 L13 18 L23 13"/><path d="M3 17 L13 22 L23 17"/>',
     PROPERTIES: '<path d="M5 7 H21 M5 13 H21 M5 19 H21"/><circle cx="9" cy="7" r="2" fill="#fff"/><circle cx="17" cy="13" r="2" fill="#fff"/><circle cx="11" cy="19" r="2" fill="#fff"/>',
+    UNDERLAY: '<rect x="4" y="6" width="18" height="14" rx="1"/><path d="M4 16 L10 11 L14 15 L17 12 L22 17"/><circle cx="17" cy="10" r="1.5"/>',
+    CALIBRATE: '<path d="M3 17 H23 M3 13 V21 M23 13 V21 M8 17 V14 M13 17 V15 M18 17 V14"/>',
+    UMOVE: '<rect x="5" y="7" width="12" height="10" rx="1"/><path d="M13 13 L22 22 M22 22 H17 M22 22 V17"/>',
+    UROTATE: '<rect x="6" y="9" width="12" height="9" rx="1"/><path d="M20 6 A7 7 0 0 0 11 4 M11 4 L14 3 M11 4 L12 7"/>',
     EXPORT: '<path d="M13 3 V15 M8 8 L13 3 L18 8"/><path d="M5 13 V21 H21 V13"/>',
     GEAR: '<circle cx="13" cy="13" r="3.2"/><path d="M13 3.5 V6 M13 20 V22.5 M3.5 13 H6 M20 13 H22.5 M6.3 6.3 L8 8 M18 18 L19.7 19.7 M19.7 6.3 L18 8 M8 18 L6.3 19.7"/>'
   };
@@ -170,6 +181,10 @@ function cadOpenNewSheet() {
 // ---------------------------------------------------------------------------
 // Editor
 // ---------------------------------------------------------------------------
+function cadUnderlayCorners(u) {
+  const c = Math.cos(u.rot || 0), s = Math.sin(u.rot || 0);
+  return [[0, 0], [u.w, 0], [u.w, u.h], [0, u.h]].map(([x, y]) => [u.x + x * c - y * s, u.y + x * s + y * c]);
+}
 function cadMountEditor(data) {
   const prefs = cadLoadPrefs();
   if (prefs.modes && prefs.modes.ins === undefined) prefs.modes.ins = true;
@@ -228,7 +243,7 @@ function cadMountEditor(data) {
           <span class="cad-units">${esc(unit.label)}</span>
           <button class="cad-tog on" id="cad-layer" title="Current layer. Tap for layers"></button>
           <span style="flex:1"></span>
-          ${['snap', 'grid', 'ortho', 'polar', 'osnap', 'dyn'].map((k) => `<button class="cad-tog" data-t="${k}">${k.toUpperCase()}</button>`).join('')}
+          ${['snap', 'grid', 'ortho', 'polar', 'osnap', 'dyn', 'lwt'].map((k) => `<button class="cad-tog" data-t="${k}">${k.toUpperCase()}</button>`).join('')}
         </div>
       </div>
     </div>`;
@@ -248,7 +263,8 @@ function cadMountEditor(data) {
     redraw: () => requestDraw(),
     toast: (m) => toast(m),
     openLayers: () => openLayers(),
-    openProperties: () => openProperties()
+    openProperties: () => openProperties(),
+    openUnderlays: () => openUnderlays()
   };
   const engine = new CadCmd.Engine(doc, host);
   engine.onChange = () => { refreshUI(); requestDraw(); };
@@ -267,7 +283,16 @@ function cadMountEditor(data) {
     if (bw < 1e-3 && bh < 1e-3) s = view.scale;
     view = { cx: (b.minX + b.maxX) / 2, cy: (b.minY + b.maxY) / 2, scale: clampScale(s) };
   }
-  function zoomExtents() { pushView(); fitBox(doc.extents()); requestDraw(); }
+  function underlayBox() {
+    let b = null;
+    for (const u of (doc.d.underlays || [])) {
+      if (u.on === false) continue;
+      for (const q of cadUnderlayCorners(u)) { if (!b) b = { minX: q[0], minY: q[1], maxX: q[0], maxY: q[1] }; else { b.minX = Math.min(b.minX, q[0]); b.minY = Math.min(b.minY, q[1]); b.maxX = Math.max(b.maxX, q[0]); b.maxY = Math.max(b.maxY, q[1]); } }
+    }
+    return b;
+  }
+  function allBox() { const e = doc.extents(), u = underlayBox(); if (!e) return u; if (!u) return e; return { minX: Math.min(e.minX, u.minX), minY: Math.min(e.minY, u.minY), maxX: Math.max(e.maxX, u.maxX), maxY: Math.max(e.maxY, u.maxY) }; }
+  function zoomExtents() { pushView(); fitBox(allBox()); requestDraw(); }
   function zoomWindow(a, b) { pushView(); fitBox(G.rectOf(a, b), 1); requestDraw(); }
   function zoomAt(sx, sy, factor) {
     const before = s2w(sx, sy);
@@ -349,11 +374,7 @@ function cadMountEditor(data) {
 
   // ---- drawing ----
   function requestDraw() { if (rafPending || destroyed) return; rafPending = true; requestAnimationFrame(() => { rafPending = false; draw(); }); }
-  function layerColor(e) {
-    const l = doc.d.layers.find((x) => x.name === e.layer);
-    const aci = e.color != null ? e.color : (l ? l.color : 7);
-    return CAD_ACI[aci] || CAD_ACI[7];
-  }
+  function layerColor(e) { return CadStyle.colorHex(doc.d, e); }
   function tracePoly(c, e) {
     const segs = G.polySegments(e);
     if (!segs.length) return;
@@ -398,8 +419,58 @@ function cadMountEditor(data) {
     if (mode === 'sel') { polyPath(c, CadDim.textBoxOf(e)); c.stroke(); }
     else drawText(c, g.text.p, g.text.rot, g.text.h, g.text.str, 'center');
   }
+  function drawSym(c, e, mode) {
+    for (const sh of CadSym.shapes(e)) {
+      c.beginPath(); sh.pts.forEach((q, i) => { const p = w2s(q); if (i) c.lineTo(p[0], p[1]); else c.moveTo(p[0], p[1]); });
+      if (sh.closed) c.closePath();
+      if (sh.fill && mode !== 'sel') c.fill(); else c.stroke();
+    }
+  }
+  // Stencil picker: thumbnails of every symbol, tap one to start placing it.
+  function openStencils() {
+    if (engine.active) engine.cancel();
+    const cur = (engine.sym && engine.sym.name) || 'Tree';
+    const svg = (name) => {
+      const sh = CadSym.preview(name, 7);
+      const d = sh.map((q) => (q.fill ? `<path d="M${q.pts.map((p) => p[0].toFixed(3) + ' ' + (-p[1]).toFixed(3)).join(' L')} Z" fill="currentColor"/>` : `<path d="M${q.pts.map((p) => p[0].toFixed(3) + ' ' + (-p[1]).toFixed(3)).join(' L')}${q.closed ? ' Z' : ''}" fill="none" stroke="currentColor" stroke-width="0.035" stroke-linejoin="round" stroke-linecap="round"/>`)).join('');
+      return `<svg viewBox="-0.6 -0.6 1.2 1.2" width="64" height="64" style="color:#22252b">${d}</svg>`;
+    };
+    const sheet = el(`<div class="sheet-backdrop"><div class="sheet" style="max-height:86vh;overflow:auto"><div class="sheet-handle"></div>
+      <h2>Stencils</h2><div style="font-size:13px;color:#6b717c;margin-bottom:8px">Tap a symbol, then tap the drawing to place it. Use the Size and Rotate options while placing. Real-world symbols are sized in metres; the north arrow and water level are sized on paper.</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:8px">${CadSym.NAMES.map((n) => `<button class="btn" data-sym="${n}" style="display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 4px;${n === cur ? 'outline:2px solid #1565c0' : ''}">${svg(n)}<span style="font-size:12px">${esc(CadSym.SYMBOLS[n].label)}</span></button>`).join('')}</div>
+      <div style="display:flex;gap:10px;margin-top:12px"><button class="btn btn-block" id="st-cancel">Cancel</button></div></div></div>`);
+    presentOverlay(sheet);
+    sheet.querySelector('#st-cancel').addEventListener('click', () => sheet.remove());
+    sheet.querySelectorAll('[data-sym]').forEach((b) => b.addEventListener('click', () => {
+      engine.sym = engine.sym || { name: 'Tree', rot: 0, size: null };
+      if (engine.sym.name !== b.dataset.sym) { engine.sym.name = b.dataset.sym; engine.sym.size = null; }
+      sheet.remove(); engine.start('SYMBOL'); refreshUI(); requestDraw();
+    }));
+  }
+  // Hatch: solid or pattern lines in the entity colour. Selected hatches show their boundary instead.
+  function hatchPath(c, e) { c.beginPath(); for (const l of e.loops) tracePoly(c, { v: l, closed: true }); }
+  function drawHatch(c, e, mode) {
+    if (mode === 'sel') { hatchPath(c, e); c.stroke(); return; }
+    const pat = CadHatch.PATTERNS[e.pat] || CadHatch.PATTERNS.Lines;
+    if (pat.solid) { hatchPath(c, e); c.fill('evenodd'); return; }
+    const unit = (e.pk || 1) * (e.sc || 1) * view.scale;                 // screen px per paper mm of pattern
+    const minSp = pat.fam ? Math.min(...pat.fam.map((f) => f.sp)) : 1.6;
+    if (minSp * unit < 2.2) {                                             // too dense to resolve: show a tint
+      c.save(); c.globalAlpha = 0.35; hatchPath(c, e); c.fill('evenodd'); c.restore(); return;
+    }
+    const tl = s2w(0, 0), br = s2w(W, H), segs = CadHatch.segments(e);
+    c.beginPath();
+    for (const q of segs) {
+      const a = q[0], b = q[1];
+      if ((a[0] < tl[0] && b[0] < tl[0]) || (a[0] > br[0] && b[0] > br[0]) || (a[1] > tl[1] && b[1] > tl[1]) || (a[1] < br[1] && b[1] < br[1])) continue;
+      const p = w2s(a), r = w2s(b); c.moveTo(p[0], p[1]); c.lineTo(r[0], r[1]);
+    }
+    c.stroke();
+  }
   function drawEntity(c, e, mode) {
     if (e.t === 'TEXT' || e.t === 'MTEXT' || e.t === 'DIM') { drawAnno(c, e, mode); return; }
+    if (e.t === 'HATCH') { drawHatch(c, e, mode); return; }
+    if (e.t === 'SYM') { drawSym(c, e, mode); return; }
     c.beginPath();
     if (e.t === 'LINE') { const a = w2s(e.p1), b = w2s(e.p2); c.moveTo(a[0], a[1]); c.lineTo(b[0], b[1]); }
     else if (e.t === 'CIRCLE') { const ce = w2s(e.c); c.arc(ce[0], ce[1], e.r * view.scale, 0, Math.PI * 2); }
@@ -461,6 +532,7 @@ function cadMountEditor(data) {
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
     c.fillStyle = '#ffffff'; c.fillRect(0, 0, W, H);
     if (prefs.toggles.grid) drawGrid(c);
+    drawUnderlays(c);
     // origin marker
     const o = w2s([0, 0]);
     c.strokeStyle = '#b9bdc4'; c.lineWidth = 1; c.beginPath(); c.moveTo(o[0] - 10, o[1]); c.lineTo(o[0] + 10, o[1]); c.moveTo(o[0], o[1] - 10); c.lineTo(o[0], o[1] + 10); c.stroke();
@@ -468,9 +540,23 @@ function cadMountEditor(data) {
     const tl = s2w(0, 0), br = s2w(W, H);
     const vis = doc.queryVis(tl[0], br[1], br[0], tl[1]);
     c.lineWidth = 1.6; c.lineJoin = 'round'; c.lineCap = 'round';
+    const lwt = prefs.toggles.lwt !== false;
     for (const e of vis) {
-      c.strokeStyle = layerColor(e); c.fillStyle = c.strokeStyle; drawEntity(c, e);
+      if (e.t !== 'HATCH') continue;
+      c.strokeStyle = layerColor(e); c.fillStyle = c.strokeStyle;
+      c.lineWidth = lwt ? Math.max(1, (e.lw != null || CadStyle.layerOf(doc.d, e.layer) && CadStyle.layerOf(doc.d, e.layer).lw >= 0 ? CadStyle.lwMm(doc.d, e) : 0.13) * 3.78 * 1.3) : 1;
+      drawHatch(c, e);
     }
+    for (const e of vis) {
+      if (e.t === 'HATCH') continue;
+      c.strokeStyle = layerColor(e); c.fillStyle = c.strokeStyle;
+      c.lineWidth = lwt ? Math.max(1.2, CadStyle.lwMm(doc.d, e) * 3.78 * 1.3) : 1.6;
+      const lt = (e.t === 'DIM' || e.t === 'POINT' || e.t === 'SYM') ? 'Continuous' : CadStyle.ltypeName(doc.d, e);
+      if (lt !== 'Continuous') { const pat = CadStyle.dashModel(doc.d, lt).map((v) => Math.max(1, v * view.scale)); c.setLineDash(pat); }
+      drawEntity(c, e);
+      if (lt !== 'Continuous') c.setLineDash([]);
+    }
+    c.lineWidth = 1.6;
     // selection
     if (engine.selection.size) {
       c.strokeStyle = '#1565c0'; c.lineWidth = 2.6; c.setLineDash([7, 4]);
@@ -545,6 +631,95 @@ function cadMountEditor(data) {
     }
   }
 
+  // ---- underlays: picture behind the drawing ----
+  const ulImages = new Map();                       // assetId -> { img, url } once loaded
+  function ulLoad(u) {
+    if (ulImages.has(u.assetId)) return ulImages.get(u.assetId);
+    const rec = { img: null, url: null, failed: false }; ulImages.set(u.assetId, rec);
+    DB.getCadAsset(u.assetId).then((a) => {
+      if (!a || !a.blob || destroyed) { rec.failed = true; return; }
+      rec.url = URL.createObjectURL(a.blob); const im = new Image();
+      im.onload = () => { rec.img = im; requestDraw(); }; im.onerror = () => { rec.failed = true; }; im.src = rec.url;
+    }).catch(() => { rec.failed = true; });
+    return rec;
+  }
+  function drawUnderlays(c) {
+    for (const u of (doc.d.underlays || [])) {
+      if (u.on === false) continue;
+      const rec = ulLoad(u); if (!rec.img) continue;
+      const o = w2s([u.x, u.y]);
+      c.save(); c.globalAlpha = u.opacity == null ? 0.5 : u.opacity; c.translate(o[0], o[1]); c.rotate(-(u.rot || 0)); c.scale(view.scale, view.scale);
+      c.drawImage(rec.img, 0, -u.h, u.w, u.h); c.restore();
+    }
+  }
+  async function cadFileToUnderlayImage(file) {
+    const MAX = 3200;
+    if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) {
+      await loadPdfJs();
+      const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+      let pageNo = 1;
+      if (pdf.numPages > 1) {
+        const v = prompt(`This PDF has ${pdf.numPages} pages. Which page should be the underlay?`, '1'); if (v === null) return null;
+        pageNo = Math.max(1, Math.min(pdf.numPages, parseInt(v, 10) || 1));
+      }
+      const page = await pdf.getPage(pageNo), vp1 = page.getViewport({ scale: 1 }), sc = MAX / Math.max(vp1.width, vp1.height), vp = page.getViewport({ scale: sc });
+      const cv = document.createElement('canvas'); cv.width = Math.round(vp.width); cv.height = Math.round(vp.height);
+      const g2 = cv.getContext('2d'); g2.fillStyle = '#fff'; g2.fillRect(0, 0, cv.width, cv.height);
+      await page.render({ canvasContext: g2, viewport: vp }).promise;
+      return { blob: await new Promise((r) => cv.toBlob(r, 'image/jpeg', 0.92)), w: cv.width, h: cv.height, name: file.name + (pdf.numPages > 1 ? ' p' + pageNo : '') };
+    }
+    const bmp = await createImageBitmap(file), k = Math.min(1, MAX / Math.max(bmp.width, bmp.height));
+    const cv = document.createElement('canvas'); cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
+    const g2 = cv.getContext('2d'); g2.fillStyle = '#fff'; g2.fillRect(0, 0, cv.width, cv.height); g2.drawImage(bmp, 0, 0, cv.width, cv.height);
+    return { blob: await new Promise((r) => cv.toBlob(r, 'image/jpeg', 0.9)), w: cv.width, h: cv.height, name: file.name };
+  }
+  function pickUnderlayFile(onDone) {
+    const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*,application/pdf,.pdf';
+    inp.addEventListener('change', async () => {
+      const f = inp.files && inp.files[0]; if (!f) return;
+      try {
+        toast('Loading underlay…');
+        const r = await cadFileToUnderlayImage(f); if (!r) return;
+        const a = await DB.addCadAsset(doc.d.id, r.blob, r.name, r.w, r.h);
+        const wm = (W / view.scale) * 0.7, hm = wm * r.h / r.w;
+        const u = { id: 'u' + Date.now().toString(36), assetId: a.id, name: r.name, x: view.cx - wm / 2, y: view.cy - hm / 2, w: wm, h: hm, rot: 0, opacity: 0.5, on: true, iw: r.w, ih: r.h };
+        doc.setUnderlays((doc.d.underlays || []).concat([u]));
+        pushView(); fitBox(allBox(), 0.9); requestDraw();
+        toast('Underlay added. Use Calibrate to set its real scale.');
+        if (onDone) onDone();
+      } catch (err) { console.error(err); toast('Could not load that file' + (/PDF/.test(err.message) ? ': connect to the internet once to load the PDF reader.' : '.')); }
+    });
+    inp.click();
+  }
+  function openUnderlays() {
+    if (engine.active) { toast('Finish or cancel the current command first.'); return; }
+    const sheet = el('<div class="sheet-backdrop"><div class="sheet" style="max-height:86vh;overflow:auto"><div class="sheet-handle"></div><h2>Underlays</h2><p class="muted" style="font-size:13px;margin:0 0 8px">A photo or PDF page behind your drawing to trace over. Add it, then Calibrate: pick two points on it and type the real distance.</p><div id="ul-list"></div><button class="btn btn-secondary btn-block" id="ul-add" style="margin:8px 0">+ Add photo or PDF</button><button class="btn btn-primary btn-block" id="ul-done">Done</button></div></div>');
+    presentOverlay(sheet);
+    const list = sheet.querySelector('#ul-list');
+    function render() {
+      const us = doc.d.underlays || [];
+      list.innerHTML = us.length ? us.map((u) => `<div class="ul-row" data-id="${u.id}">
+        <div style="display:flex;align-items:center;gap:6px"><b style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(u.name)}</b>
+          <button class="ly-b ${u.on !== false ? 'on' : ''}" data-a="on" title="Show or hide">${u.on !== false ? '👁' : '–'}</button><button class="ly-b" data-a="del" title="Remove">🗑</button></div>
+        <div style="display:flex;align-items:center;gap:8px;margin:6px 0"><span style="font-size:13px;color:#6b717c">Fade</span><input type="range" min="10" max="100" value="${Math.round((u.opacity == null ? 0.5 : u.opacity) * 100)}" data-a="op" style="flex:1"></div>
+        <div style="display:flex;gap:6px"><button class="btn btn-secondary" data-a="cal" style="flex:1">Calibrate</button><button class="btn btn-secondary" data-a="mv" style="flex:1">Move</button><button class="btn btn-secondary" data-a="rot" style="flex:1">Rotate</button></div>
+        <div style="font-size:12px;color:#6b717c;margin-top:4px">${fmt(u.w)} × ${fmt(u.h)} ${esc(unit.label)}</div></div>`).join('') : '<p class="muted">No underlay yet.</p>';
+    }
+    list.addEventListener('click', (ev) => {
+      const b = ev.target.closest('[data-a]'); if (!b || b.type === 'range') return; const row = b.closest('.ul-row'), id = row.dataset.id, a = b.dataset.a;
+      if (a === 'on') { const u = doc.underlay(id); doc.patchUnderlay(id, { on: u.on === false }); render(); requestDraw(); }
+      else if (a === 'del') { if (confirm('Remove this underlay from the drawing?')) { const u = doc.underlay(id); doc.setUnderlays(doc.d.underlays.filter((x) => x.id !== id)); render(); requestDraw(); } }
+      else { sheet.remove(); engine.start(a === 'cal' ? 'CALIBRATE' : a === 'mv' ? 'UMOVE' : 'UROTATE', { ul: id }); }
+    });
+    // fade is a display setting: no undo step, just saved with the drawing
+    list.addEventListener('input', (ev) => { const r = ev.target.closest('input[data-a="op"]'); if (r) { const u = doc.underlay(r.closest('.ul-row').dataset.id); if (u) { u.opacity = +r.value / 100; markDirty(); requestDraw(); } } });
+    sheet.querySelector('#ul-add').addEventListener('click', () => pickUnderlayFile(() => { render(); }));
+    const close = () => { sheet.remove(); refreshUI(); requestDraw(); };
+    sheet.addEventListener('click', (e) => { if (e.target === sheet) close(); });
+    sheet.querySelector('#ul-done').addEventListener('click', close);
+    render();
+  }
+
   // ---- text prompts: single line goes to the command line, multi-line opens a sheet ----
   let lastTextPrompt = null;
   function textPromptUI() {
@@ -571,16 +746,24 @@ function cadMountEditor(data) {
     const list = sheet.querySelector('#ly-list');
     const cloneLayers = () => JSON.parse(JSON.stringify(doc.d.layers));
     const change = (name, patch) => { const ls = cloneLayers(); const l = ls.find((x) => x.name === name); Object.assign(l, patch); doc.setLayers(ls, null); engine.selection = new Set(Array.from(engine.selection).filter((id) => { const e = doc.byId.get(id); return e && doc.isSelectable(e); })); render(); };
+    let openDetail = null;
     function render() {
       list.innerHTML = doc.d.layers.map((l) => `<div class="ly-row" data-n="${esc(l.name)}">
         <button class="ly-cur ${doc.d.currentLayer === l.name ? 'on' : ''}" data-a="cur" title="Make current">${doc.d.currentLayer === l.name ? '●' : '○'}</button>
-        <span class="ly-dot" style="background:${CAD_ACI[l.color] || '#111'}"></span>
+        <button class="ly-dotb" data-a="det" title="Colour, line type, line weight"><span class="ly-dot" style="background:${CadStyle.layerHex(l)}"></span></button>
         <input class="ly-name" value="${esc(l.name)}" ${l.name === '0' ? 'readonly' : ''}>
-        <select class="ly-col" data-a="col">${Object.keys(ACI_NAMES).map((k) => `<option value="${k}" ${+k === l.color ? 'selected' : ''}>${ACI_NAMES[k]}</option>`).join('')}</select>
+        <button class="ly-b ${openDetail === l.name ? 'on' : ''}" data-a="det" title="Style">⋯</button>
         <button class="ly-b ${l.on !== false ? 'on' : ''}" data-a="on" title="Show or hide">${l.on !== false ? '👁' : '–'}</button>
         <button class="ly-b ${l.frozen ? 'on' : ''}" data-a="fr" title="Freeze">❄</button>
         <button class="ly-b ${l.locked ? 'on' : ''}" data-a="lk" title="Lock">${l.locked ? '🔒' : '🔓'}</button>
-        <button class="ly-b" data-a="del" title="Delete layer" ${l.name === '0' ? 'disabled' : ''}>🗑</button></div>`).join('');
+        <button class="ly-b" data-a="del" title="Delete layer" ${l.name === '0' ? 'disabled' : ''}>🗑</button></div>
+        ${openDetail === l.name ? `<div class="ly-det" data-n="${esc(l.name)}">
+          <label>Colour <select class="ly-d-col">${Object.keys(ACI_NAMES).map((k) => `<option value="${k}" ${!l.rgb && +k === l.color ? 'selected' : ''}>${ACI_NAMES[k]}</option>`).join('')}<option value="custom" ${l.rgb ? 'selected' : ''}>Custom…</option></select>
+            <input type="color" class="ly-d-rgb" value="${l.rgb || CadStyle.layerHex(l)}" style="${l.rgb ? '' : 'opacity:.55'}"></label>
+          <label>Line type <select class="ly-d-lt">${cadLtOptions(l.ltype || 'Continuous', false)}</select></label>
+          <label>Line weight <select class="ly-d-lw">${cadLwOptions(l.lw == null ? -3 : l.lw, false, 'Default (' + (doc.d.defaultLw || 0.25).toFixed(2) + ' mm)')}</select></label>
+          <label class="ly-d-plot"><input type="checkbox" class="ly-d-pl" ${l.plot !== false ? 'checked' : ''}> Plot this layer</label>
+        </div>` : ''}`).join('');
     }
     list.addEventListener('click', (ev) => {
       const b = ev.target.closest('button[data-a]'); if (!b) return;
@@ -590,10 +773,21 @@ function cadMountEditor(data) {
       else if (a === 'fr') { if (!l.frozen && doc.d.currentLayer === n) { toast('The current layer cannot be frozen.'); return; } change(n, { frozen: !l.frozen }); }
       else if (a === 'lk') change(n, { locked: !l.locked });
       else if (a === 'del') { const err = doc.deleteLayer(n); if (err) toast(err); render(); refreshUI(); }
+      else if (a === 'det') { openDetail = openDetail === n ? null : n; render(); }
     });
     list.addEventListener('change', (ev) => {
+      const det = ev.target.closest('.ly-det');
+      if (det) {
+        const n = det.dataset.n, cl = ev.target.classList, v = ev.target.value;
+        if (cl.contains('ly-d-col')) { if (v === 'custom') { const l = doc.layer(n); change(n, { rgb: CadStyle.layerHex(l) }); } else change(n, { color: +v, rgb: undefined }); }
+        else if (cl.contains('ly-d-rgb')) { const h = CadStyle.normHex(v); if (h) change(n, { rgb: h, color: CadStyle.nearestAci(h) }); }
+        else if (cl.contains('ly-d-lt')) change(n, { ltype: v });
+        else if (cl.contains('ly-d-lw')) change(n, { lw: parseInt(v, 10) });
+        else if (cl.contains('ly-d-pl')) change(n, { plot: ev.target.checked });
+        return;
+      }
       const row = ev.target.closest('.ly-row'); if (!row) return; const n = row.dataset.n;
-      if (ev.target.classList.contains('ly-col')) change(n, { color: +ev.target.value });
+      if (false) { }
       else if (ev.target.classList.contains('ly-name')) {
         const nn = ev.target.value.trim();
         if (nn === n) return;
@@ -620,32 +814,50 @@ function cadMountEditor(data) {
     if (engine.active) { toast('Finish or cancel the current command first.'); return; }
     const ents = ids.map((id) => doc.byId.get(id)), one = ents.length === 1 ? ents[0] : null;
     const same = (f) => (ents.every((e) => f(e) === f(ents[0])) ? f(ents[0]) : '*');
-    const lay = same((e) => e.layer), col = same((e) => (e.color == null ? 'by' : String(e.color)));
-    const isTxt = one && (one.t === 'TEXT' || one.t === 'MTEXT'), isDim = one && one.t === 'DIM';
+    const lay = same((e) => e.layer), col = same((e) => (e.rgb ? 'c:' + e.rgb : e.color == null ? 'by' : String(e.color)));
+    const ltS = same((e) => e.lt || ''), lwS = same((e) => (e.lw == null ? '' : String(e.lw)));
+    const rgb0 = one && one.rgb ? one.rgb : CadStyle.colorHex(doc.d, ents[0]);
+    const isTxt = one && (one.t === 'TEXT' || one.t === 'MTEXT'), isDim = one && one.t === 'DIM', isHat = one && one.t === 'HATCH';
     const sheet = el(`<div class="sheet-backdrop"><div class="sheet" style="max-height:86vh;overflow:auto"><div class="sheet-handle"></div>
       <h2>Properties <span style="font-weight:500;font-size:14px;color:#6b717c">${ents.length} object${ents.length > 1 ? 's' : ''}${one ? ' · ' + one.t : ''}</span></h2>
       <div class="field"><label>Layer</label><select id="pp-layer">${lay === '*' ? '<option value="*">Various</option>' : ''}${doc.d.layers.map((l) => `<option ${l.name === lay ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select></div>
-      <div class="field"><label>Colour</label><select id="pp-color">${col === '*' ? '<option value="*">Various</option>' : ''}<option value="by" ${col === 'by' ? 'selected' : ''}>ByLayer</option>${Object.keys(ACI_NAMES).map((k) => `<option value="${k}" ${col === k ? 'selected' : ''}>${ACI_NAMES[k]}</option>`).join('')}</select></div>
+      <div class="field"><label>Colour</label><div style="display:flex;gap:8px"><select id="pp-color" style="flex:1">${col === '*' ? '<option value="*">Various</option>' : ''}<option value="by" ${col === 'by' ? 'selected' : ''}>ByLayer</option>${Object.keys(ACI_NAMES).map((k) => `<option value="${k}" ${col === k ? 'selected' : ''}>${ACI_NAMES[k]}</option>`).join('')}<option value="custom" ${col.startsWith('c:') ? 'selected' : ''}>Custom…</option></select><input type="color" id="pp-rgb" value="${rgb0}" style="width:56px;height:44px"></div></div>
+      <div class="field"><label>Line type</label><select id="pp-lt">${ltS === '*' ? '<option value="*">Various</option>' : ''}${cadLtOptions(ltS === '*' ? '' : ltS, true)}</select></div>
+      <div class="field"><label>Line weight</label><select id="pp-lw">${lwS === '*' ? '<option value="*">Various</option>' : ''}${cadLwOptions(lwS === '*' || lwS === '' ? null : parseInt(lwS, 10), true)}</select></div>
       ${isTxt ? `<div class="field"><label>Text</label><textarea id="pp-text" rows="${one.t === 'MTEXT' ? 4 : 2}" style="width:100%;font-size:16px;-webkit-user-select:text;user-select:text">${esc(one.text)}</textarea></div>
         <div class="field"><label>Height (${esc(unit.label)})</label><input type="number" id="pp-h" step="any" min="0" value="${+one.h.toFixed(4)}"></div>
         <div class="field"><label>Rotation (degrees)</label><input type="number" id="pp-rot" step="any" value="${+(((one.rot || 0) * 180 / Math.PI)).toFixed(3)}"></div>` : ''}
+      ${isHat ? `<div class="field" style="font-size:13px;color:${one.det ? '#b3261e' : '#6b717c'}">${one.det ? 'Detached: the boundary was opened or erased, so the hatch kept its last shape.' : one.src ? 'Linked to its boundary: it follows when you edit the shape.' : 'Not linked to a boundary (it was moved on its own or copied).'}</div>
+        <div class="field"><label>Hatch pattern</label><select id="pp-pat">${CadHatch.NAMES.map((n) => `<option value="${n}" ${n === one.pat ? 'selected' : ''}>${esc(CadHatch.PATTERNS[n].label)}</option>`).join('')}</select></div>
+        <div class="field"><label>Pattern scale</label><input type="number" id="pp-hsc" step="any" min="0.01" value="${+(one.sc || 1).toFixed(4)}"></div>
+        <div class="field"><label>Pattern angle (degrees)</label><input type="number" id="pp-hang" step="any" value="${+(((one.ang || 0) * 180 / Math.PI)).toFixed(3)}"></div>` : ''}
       ${isDim ? `<div class="field"><label>Dimension text (&lt;&gt; = measured value ${esc(CadDim.dimText({ ...one, txt: '' }))})</label><input type="text" id="pp-dim" value="${esc(one.txt || '<>')}"></div>` : ''}
       <div style="display:flex;gap:10px"><button class="btn btn-block" id="pp-cancel">Cancel</button><button class="btn btn-primary btn-block" id="pp-ok">Apply</button></div></div></div>`);
     presentOverlay(sheet);
     sheet.querySelector('#pp-cancel').addEventListener('click', () => sheet.remove());
-    sheet.querySelector('#pp-ok').addEventListener('click', () => {
+    sheet.querySelector('#pp-ok').addEventListener('click', () => doc.transact(() => {
       const q = (id) => sheet.querySelector(id);
       const layerV = q('#pp-layer').value, colV = q('#pp-color').value;
       if (layerV !== '*' && layerV !== lay) doc.setProps(ids, { layer: layerV });
-      if (colV !== '*' && colV !== col) doc.setProps(ids, { color: colV === 'by' ? null : +colV });
+      const rgbV = CadStyle.normHex(q('#pp-rgb').value);
+      if (colV === 'custom') { if (col !== 'c:' + rgbV) doc.setProps(ids, { rgb: rgbV, color: null }); }
+      else if (colV !== '*' && colV !== col) doc.setProps(ids, { color: colV === 'by' ? null : +colV, rgb: null });
+      const ltV = q('#pp-lt').value, lwV = q('#pp-lw').value;
+      if (ltV !== '*' && ltV !== ltS) doc.setProps(ids, { lt: ltV === '' ? null : ltV });
+      if (lwV !== '*' && lwV !== lwS) doc.setProps(ids, { lw: lwV === '' ? null : parseInt(lwV, 10) });
       if (isTxt) {
         const t = q('#pp-text').value.trim(), h = parseFloat(q('#pp-h').value), r = parseFloat(q('#pp-rot').value);
         const patch = {}; if (t && t !== one.text) patch.text = t; if (h > 0 && h !== one.h) patch.h = h; if (isFinite(r) && Math.abs(r * Math.PI / 180 - (one.rot || 0)) > 1e-9) patch.rot = r * Math.PI / 180;
         if (Object.keys(patch).length) doc.setProps([one.id], patch);
       }
+      if (isHat) {
+        const pat = q('#pp-pat').value, sc = parseFloat(q('#pp-hsc').value), an = parseFloat(q('#pp-hang').value) * Math.PI / 180, patch = {};
+        if (pat !== one.pat) patch.pat = pat; if (sc > 0 && sc !== (one.sc || 1)) patch.sc = sc; if (isFinite(an) && Math.abs(an - (one.ang || 0)) > 1e-9) patch.ang = an;
+        if (Object.keys(patch).length) doc.setProps([one.id], patch);
+      }
       if (isDim) { const t = q('#pp-dim').value.trim(), cur = one.txt || '<>'; if (t && t !== cur) doc.setProps([one.id], { txt: t === '<>' ? null : t }); }
       sheet.remove(); engine.selection = new Set(Array.from(engine.selection).filter((id) => { const e = doc.byId.get(id); return e && doc.isSelectable(e); })); refreshUI(); requestDraw();
-    });
+    }));
   }
 
   // ---- UI refresh ----
@@ -665,7 +877,7 @@ function cadMountEditor(data) {
         const n = engine.selection.size, count = document.createElement('span');
         count.className = 'cad-selcount'; count.textContent = n + ' selected'; chips.appendChild(count);
         const acts = [['Delete', 'ERASE'], ['Move', 'MOVE'], ['Copy', 'COPY'], ['Rotate', 'ROTATE'], ['Scale', 'SCALE'], ['Mirror', 'MIRROR']];
-        if (Array.from(engine.selection).some((id) => { const e = doc.byId.get(id); return e && e.t === 'LWPOLYLINE'; })) acts.push(['Explode', 'EXPLODE']);
+        if (Array.from(engine.selection).some((id) => { const e = doc.byId.get(id); return e && (e.t === 'LWPOLYLINE' || e.t === 'HATCH' || e.t === 'SYM'); })) acts.push(['Explode', 'EXPLODE']);
         for (const [label, cmd] of acts) chips.appendChild(chipEl(label, () => { engine.start(cmd); }));
         chips.appendChild(chipEl('Properties', () => openProperties()));
         if (Array.from(engine.selection).some((id) => { const e = doc.byId.get(id); return e && (e.t === 'TEXT' || e.t === 'MTEXT' || e.t === 'DIM'); })) chips.appendChild(chipEl('Edit text', () => engine.start('TEXTEDIT')));
@@ -679,7 +891,7 @@ function cadMountEditor(data) {
     document.querySelectorAll('.cad-tool').forEach((b) => b.classList.toggle('on', b.dataset.cmd === engine.active));
     $('cad-undo').disabled = !doc.undoStack.length && !engine.active;
     $('cad-redo').disabled = !doc.redoStack.length || !!engine.active;
-    document.querySelectorAll('.cad-tog').forEach((b) => b.classList.toggle('on', !!prefs.toggles[b.dataset.t]));
+    document.querySelectorAll('.cad-tog[data-t]').forEach((b) => b.classList.toggle('on', !!prefs.toggles[b.dataset.t]));
     $('cad-finger').textContent = prefs.finger === 'pan' ? '☝ Pan' : '☝ Draw';
     setSaveLabel();
   }
@@ -709,8 +921,8 @@ function cadMountEditor(data) {
     if (k === 'polar' && prefs.toggles.polar) prefs.toggles.ortho = false;
     cadSavePrefs(prefs); refreshUI(); requestDraw();
   }
-  document.querySelectorAll('.cad-tool').forEach((b) => b.addEventListener('click', () => runCommand(b.dataset.cmd)));
-  document.querySelectorAll('.cad-tog').forEach((b) => b.addEventListener('click', () => toggle(b.dataset.t)));
+  document.querySelectorAll('.cad-tool').forEach((b) => b.addEventListener('click', () => (b.dataset.cmd === 'SYMBOL' ? openStencils() : runCommand(b.dataset.cmd))));
+  document.querySelectorAll('.cad-tog[data-t]').forEach((b) => b.addEventListener('click', () => { toggle(b.dataset.t); requestDraw(); }));
   $('cad-undo').addEventListener('click', doUndo);
   $('cad-redo').addEventListener('click', doRedo);
   $('cad-fit').addEventListener('click', zoomExtents);
@@ -957,13 +1169,19 @@ function cadMountEditor(data) {
         <div class="field"><label>Text height on paper (mm)</label><input type="number" id="cad-s-th" min="0.5" step="any" value="${doc.d.textH || 2.5}"></div>
         <div class="field"><label>Dimension arrow size on paper (mm)</label><input type="number" id="cad-s-ar" min="0.5" step="any" value="${(doc.d.dimStyle && doc.d.dimStyle.arrow) || 2.5}"></div>
         <div class="field"><label>Dimension decimals</label><input type="number" id="cad-s-dec" min="0" max="6" step="1" placeholder="auto" value="${doc.d.dimStyle && doc.d.dimStyle.decimals != null ? doc.d.dimStyle.decimals : ''}"></div>
+        <div class="field"><label>Default line weight</label><select id="cad-s-lw">${[18, 25, 30, 35, 50].map((v) => `<option value="${v}" ${Math.round((doc.d.defaultLw || 0.25) * 100) === v ? 'selected' : ''}>${(v / 100).toFixed(2)} mm</option>`).join('')}</select></div>
+        <div class="field"><label>Line type scale <span style="font-weight:400">(1 = dash lengths as defined on paper at the plot scale)</span></label><input type="number" id="cad-s-lts" min="0.05" step="any" value="${doc.d.ltScale || 1}"></div>
+        <button class="btn btn-secondary btn-block" id="cad-s-pens" style="margin-bottom:10px">Pen settings (print colours and weights)…</button>
         <p style="font-size:12.5px;color:#6b717c;margin:0 0 10px">These apply to text and dimensions you add from now on. Existing ones keep their size.</p>
         <button class="btn btn-primary btn-block" id="btn-save">Done</button>
       </div></div>`);
     presentOverlay(sheet);
+    sheet.querySelector('#cad-s-pens').addEventListener('click', () => cadOpenPenSheet(doc, () => { markDirty(); requestDraw(); }));
     const close = () => {
       const num = (id) => parseFloat(sheet.querySelector(id).value);
       const ps = num('#cad-s-scale'), th = num('#cad-s-th'), ar = num('#cad-s-ar'), dc = sheet.querySelector('#cad-s-dec').value.trim();
+      const lwv = parseInt(sheet.querySelector('#cad-s-lw').value, 10) / 100, lts = num('#cad-s-lts');
+      if (lwv > 0) doc.d.defaultLw = lwv; if (lts > 0) doc.d.ltScale = lts;
       if (ps > 0) doc.d.plotScale = ps; if (th > 0) doc.d.textH = th;
       doc.d.dimStyle = { ...(doc.d.dimStyle || {}), arrow: ar > 0 ? ar : 2.5, decimals: dc === '' ? null : Math.max(0, Math.min(6, parseInt(dc, 10) || 0)) };
       markDirty();
@@ -983,6 +1201,7 @@ function cadMountEditor(data) {
     screenOf: (p) => { const s = w2s(p); const r = canvas.getBoundingClientRect(); return [r.left + s[0], r.top + s[1]]; },
     save,
     destroy() {
+      for (const r of ulImages.values()) { if (r.url) URL.revokeObjectURL(r.url); }
       destroyed = true;
       clearTimeout(saveTimer); clearLong();
       if (saveState !== 'saved') { try { DB.saveCadDrawing(snapshotData()); } catch (e) { /* ignore */ } }
@@ -1046,6 +1265,11 @@ function injectCadCss() {
 .ly-dot{width:14px;height:14px;border-radius:50%;flex-shrink:0;border:1px solid #bbb}
 .ly-name{flex:1;min-width:60px;height:38px;border:1px solid #d3d6db;border-radius:8px;padding:0 8px;font-size:16px;-webkit-user-select:text;user-select:text}
 .ly-col{height:38px;border:1px solid #d3d6db;border-radius:8px;font-size:13px;max-width:92px}
+.ly-dotb{border:0;background:none;padding:0;width:22px;height:22px;flex-shrink:0;display:flex;align-items:center;justify-content:center}
+.ly-det{display:flex;flex-wrap:wrap;gap:8px 14px;padding:8px 6px 10px 38px;background:#f6f7f9;border-bottom:1px solid #eceef1;font-size:13px;color:#4a505c}
+.ly-det label{display:flex;align-items:center;gap:6px}
+.ly-det select{height:36px;border:1px solid #d3d6db;border-radius:8px;font-size:14px}
+.ly-det input[type=color]{width:44px;height:36px;border:1px solid #d3d6db;border-radius:8px;padding:2px;background:#fff}
 .ly-b{width:38px;height:38px;border:1px solid #d3d6db;background:#fff;border-radius:8px;font-size:16px;opacity:.5}
 .ly-b.on{opacity:1;background:#eef3fb} .ly-b:disabled{opacity:.2}
 .cad-modes{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px}

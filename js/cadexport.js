@@ -23,6 +23,8 @@ function cadOpenExportSheet(doc, onChanged) {
         </div>
         <div class="field"><label>Scale</label><select id="ex-scale"><option value="fit">Fit to sheet</option><option value="plot">Drawing plot scale (1 : ${d.plotScale || 50})</option>${stdOpts}</select></div>
         <label class="cad-mode" style="margin-bottom:10px"><input type="checkbox" id="ex-mono"> Black and white</label>
+        ${(d.underlays || []).length ? `<div class="field"><label>Pictures to include</label>${d.underlays.map((u) => `<label class="cad-mode" style="margin-bottom:4px"><input type="checkbox" class="ex-ul" data-id="${esc(u.id)}" ${(ex0.ulOff || []).indexOf(u.id) >= 0 ? '' : 'checked'}> ${esc(u.name)}${u.on === false ? ' (hidden in editor)' : ''}</label>`).join('')}</div>` : ''}
+        <button class="btn btn-secondary btn-block" id="ex-pens" style="margin-bottom:10px">Pen settings (print colours and weights)…</button>
         <div id="ex-warn" style="display:none; color:#b3261e; font-size:13px; margin-bottom:8px"></div>
         <canvas id="ex-prev" style="display:block; max-width:100%; max-height:230px; margin:0 auto 12px; border:1px solid #d3d6db; border-radius:8px; background:#fff"></canvas>
         <div class="field"><label>Project / structure</label><input type="text" id="tb-project" value="${esc(tb0.project)}"></div>
@@ -49,7 +51,8 @@ function cadOpenExportSheet(doc, onChanged) {
   $('#ex-format').value = ex0.format; $('#ex-size').value = ex0.size; $('#ex-orient').value = ex0.landscape ? 'l' : 'p';
   $('#ex-scale').value = ex0.scale === 'fit' || ex0.scale === 'plot' ? ex0.scale : String(ex0.scale); $('#ex-mono').checked = !!ex0.mono;
   const tbNow = () => ({ project: $('#tb-project').value.trim(), title: $('#tb-title').value.trim(), drawingNo: $('#tb-no').value.trim(), rev: $('#tb-rev').value.trim(), date: $('#tb-date').value.trim(), drawnBy: $('#tb-drawn').value.trim(), checkedBy: $('#tb-checked').value.trim() });
-  const optsNow = () => { const s = $('#ex-scale').value; return { format: $('#ex-format').value, size: $('#ex-size').value, landscape: $('#ex-orient').value === 'l', scale: s === 'fit' || s === 'plot' ? s : parseFloat(s), mono: $('#ex-mono').checked }; };
+  const ulIds = () => Array.from(sheet.querySelectorAll('.ex-ul')).filter((x) => x.checked).map((x) => x.dataset.id);
+  const optsNow = () => { const s = $('#ex-scale').value; return { underlayIds: ulIds(), underlays: true, format: $('#ex-format').value, size: $('#ex-size').value, landscape: $('#ex-orient').value === 'l', scale: s === 'fit' || s === 'plot' ? s : parseFloat(s), mono: $('#ex-mono').checked }; };
   const planNow = () => CadPlot.plan(d, { ...optsNow(), tb: tbNow() });
   function refresh() {
     const o = optsNow(), isDxf = o.format === 'dxf';
@@ -59,21 +62,24 @@ function cadOpenExportSheet(doc, onChanged) {
     const p = planNow(), warn = $('#ex-warn');
     if (!p.fits) { warn.style.display = ''; warn.textContent = `The drawing does not fit the sheet at 1:${p.scale}. Use Fit to sheet (1:${p.suggested}) or a larger sheet.`; } else warn.style.display = 'none';
     if (o.scale === 'fit') $('#ex-scale').options[0].textContent = `Fit to sheet (1 : ${p.suggested || p.scale})`;
-    CadPlot.renderCanvas(p, $('#ex-prev'), 2.5);
+    CadPlot.renderCanvas(p, $('#ex-prev'), 2.5, images);
   }
+  // underlay pictures are loaded once from the asset store
+  const images = {};
+  (async () => { for (const u of (d.underlays || [])) { try { const a = await DB.getCadAsset(u.assetId); if (a && a.blob) { const im = await createImageBitmap(a.blob); images[u.assetId] = im; } } catch (e) { console.error(e); } } refresh(); })();
   sheet.addEventListener('input', refresh); sheet.addEventListener('change', refresh);
-  function persist() { d.titleBlock = tbNow(); const o = optsNow(); d.exportOpts = { format: o.format, size: o.size, landscape: o.landscape, scale: o.scale, mono: o.mono }; if (onChanged) onChanged(); }
+  function persist() { d.titleBlock = tbNow(); const o = optsNow(); d.exportOpts = { format: o.format, size: o.size, landscape: o.landscape, scale: o.scale, mono: o.mono, ulOff: Array.from(sheet.querySelectorAll('.ex-ul')).filter((x) => !x.checked).map((x) => x.dataset.id) }; if (onChanged) onChanged(); }
   async function makeBlob() {
     const o = optsNow(), base = cadSafeFile(tbNow().title || d.name);
     if (o.format === 'dxf') return { blob: new Blob([CadDxf.write(d)], { type: 'application/dxf' }), name: base + '.dxf' };
     const p = planNow();
     if (o.format === 'png') {
-      const c = document.createElement('canvas'); CadPlot.renderCanvas(p, c, 200 / 25.4);
+      const c = document.createElement('canvas'); CadPlot.renderCanvas(p, c, 200 / 25.4, images);
       const blob = await new Promise((res) => c.toBlob(res, 'image/png'));
       return { blob, name: base + '.png' };
     }
     if (!window.jspdf) { toast('PDF library not loaded. Connect to the internet once, then try again.'); return null; }
-    const pdf = CadPlot.renderPdf(p, window.jspdf.jsPDF);
+    const pdf = CadPlot.renderPdf(p, window.jspdf.jsPDF, images);
     return { blob: pdf.output('blob'), name: base + '.pdf' };
   }
   $('#ex-cancel').addEventListener('click', () => { persist(); sheet.remove(); });
@@ -86,6 +92,7 @@ function cadOpenExportSheet(doc, onChanged) {
     persist();
     try { const r = await makeBlob(); if (r) cadOpenInsertSheet(r.blob, tbNow().title || d.name); } catch (err) { console.error(err); toast('Export failed: ' + err.message); }
   });
+  const pb = $('#ex-pens'); if (pb) pb.addEventListener('click', () => cadOpenPenSheet(doc, () => { if (onChanged) onChanged(); refresh(); }));
   refresh();
 }
 
@@ -146,3 +153,43 @@ function cadPickDxfFile() {
 }
 window.cadOpenExportSheet = cadOpenExportSheet;
 window.cadPickDxfFile = cadPickDxfFile;
+
+// ---- Pen settings: how each colour prints (colour and line weight), like a plot style table ----
+function cadOpenPenSheet(doc, onChanged) {
+  const dd = doc.d;
+  const hexes = new Map();
+  const add = (h, label) => { if (!hexes.has(h)) hexes.set(h, label); };
+  for (const l of (dd.layers || [])) add(CadStyle.layerHex(l), l.name);
+  for (const e of doc.entities) add(CadStyle.colorHex(dd, e), e.layer);
+  const pens = dd.pens = dd.pens || {};
+  const lwOpts = (sel) => `<option value="" ${sel == null ? 'selected' : ''}>Object weight</option>` + CadStyle.LW_LIST.map((v) => `<option value="${v / 100}" ${sel === v / 100 ? 'selected' : ''}>${(v / 100).toFixed(2)} mm</option>`).join('');
+  const sheet = el(`<div class="sheet-backdrop"><div class="sheet" style="max-height:88vh;overflow:auto"><div class="sheet-handle"></div><h2>Pen settings</h2>
+    <p class="muted" style="font-size:13px;margin:0 0 8px">How each colour prints. Leave a pen on "Same colour" and "Object weight" to print exactly as drawn. A pen weight overrides the line weight of every object in that colour.</p>
+    <div id="pen-list"></div>
+    <button class="btn btn-secondary btn-block" id="pen-reset" style="margin:8px 0">Reset all pens</button>
+    <button class="btn btn-primary btn-block" id="pen-done">Done</button></div></div>`);
+  presentOverlay(sheet);
+  const list = sheet.querySelector('#pen-list');
+  function render() {
+    list.innerHTML = Array.from(hexes.entries()).map(([h, label]) => { const p = pens[h] || {}; const mode = !p.color ? 'same' : p.color === '#000000' ? 'black' : 'custom';
+      return `<div class="pen-row" data-h="${h}" style="display:flex;align-items:center;gap:6px;padding:6px 0;border-bottom:1px solid #eceef1;flex-wrap:wrap">
+        <span style="width:18px;height:18px;border-radius:50%;background:${h};border:1px solid #bbb;flex-shrink:0"></span>
+        <span style="flex:1;min-width:70px;font-size:14px">${esc(label)}</span>
+        <select class="pen-col" style="height:38px;border:1px solid #d3d6db;border-radius:8px"><option value="same" ${mode === 'same' ? 'selected' : ''}>Same colour</option><option value="black" ${mode === 'black' ? 'selected' : ''}>Black</option><option value="custom" ${mode === 'custom' ? 'selected' : ''}>Custom…</option></select>
+        <input type="color" class="pen-rgb" value="${p.color || CadStyle.printable(h)}" style="width:44px;height:38px;${mode === 'custom' ? '' : 'opacity:.4'}">
+        <select class="pen-lw" style="height:38px;border:1px solid #d3d6db;border-radius:8px">${lwOpts(p.lw == null ? null : p.lw)}</select></div>`; }).join('') || '<p class="muted">Nothing to set yet.</p>';
+  }
+  list.addEventListener('change', (ev) => {
+    const row = ev.target.closest('.pen-row'); if (!row) return; const h = row.dataset.h, p = pens[h] = pens[h] || {}, cl = ev.target.classList, v = ev.target.value;
+    if (cl.contains('pen-col')) { p.color = v === 'same' ? null : v === 'black' ? '#000000' : (CadStyle.normHex(row.querySelector('.pen-rgb').value) || '#000000'); }
+    else if (cl.contains('pen-rgb')) p.color = CadStyle.normHex(v);
+    else if (cl.contains('pen-lw')) p.lw = v === '' ? null : parseFloat(v);
+    if (!p.color && p.lw == null) delete pens[h];
+    if (onChanged) onChanged(); render();
+  });
+  sheet.querySelector('#pen-reset').addEventListener('click', () => { for (const k of Object.keys(pens)) delete pens[k]; if (onChanged) onChanged(); render(); });
+  sheet.querySelector('#pen-done').addEventListener('click', () => sheet.remove());
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.remove(); });
+  render();
+}
+window.cadOpenPenSheet = cadOpenPenSheet;

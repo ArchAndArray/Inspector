@@ -15,6 +15,8 @@ const CadCmd = (() => {
   const G = (typeof CadGeo !== 'undefined') ? CadGeo : require('./cadgeo.js');
   const X = (typeof CadEdit !== 'undefined') ? CadEdit : require('./cadedit.js');
   const DM = (typeof CadDim !== 'undefined') ? CadDim : require('./caddim.js');
+  const SYM = typeof CadSym !== 'undefined' ? CadSym : require('./cadsym.js');
+  const CH = typeof CadHatch !== 'undefined' ? CadHatch : require('./cadhatch.js');
 
   // ---------- document ----------
   class CadDoc {
@@ -28,7 +30,8 @@ const CadCmd = (() => {
       this.version = 0;
       this.onChange = null;
       const boxes = [];
-      for (const e of this.entities) { this.byId.set(e.id, e); boxes.push([e.id, G.bbox(e)]); }
+      this.assoc = new Set(); this.dirty = new Set();
+      for (const e of this.entities) { this.byId.set(e.id, e); boxes.push([e.id, G.bbox(e)]); if (e.t === 'HATCH' && e.src) this.assoc.add(e.id); }
       this.index.bulk(boxes);
     }
     static blank(opts) {
@@ -46,6 +49,7 @@ const CadCmd = (() => {
     _touch() { this.version++; this.d.modified = new Date().toISOString(); if (this.onChange) this.onChange(); }
     beginGroup() { this.group = []; }
     endGroup() {
+      if (this.dirty.size) this._flushAssoc();
       const g = this.group; this.group = null;
       if (g && g.length) { this.undoStack.push(g); this.redoStack.length = 0; }
     }
@@ -53,29 +57,59 @@ const CadCmd = (() => {
     _doAdd(ent, at) {
       if (at == null || at >= this.entities.length) this.entities.push(ent); else this.entities.splice(at, 0, ent);
       this.byId.set(ent.id, ent); this.index.insert(ent.id, G.bbox(ent));
+      if (ent.t === 'HATCH' && ent.src) this.assoc.add(ent.id);
     }
     _doDel(id) {
       const i = this.entities.findIndex((e) => e.id === id);
       if (i < 0) return -1;
-      this.entities.splice(i, 1); this.byId.delete(id); this.index.remove(id);
+      this.entities.splice(i, 1); this.byId.delete(id); this.index.remove(id); this.assoc.delete(id);
       return i;
     }
     add(input) {
       const ent = JSON.parse(JSON.stringify(input));
       if (!ent.id) ent.id = this._id();
       if (!ent.layer) ent.layer = this.d.currentLayer;
+      if (ent.t === 'HATCH' && ent.src) { if (ent.src.fresh) delete ent.src.fresh; else delete ent.src; }   // copies and pastes are not linked
       this._doAdd(ent);
       this._record({ k: 'add', ent });
       this._touch();
       return ent;
     }
+    // Associative hatches: boundary edits mark the hatch dirty; it is rebuilt when the command's undo group closes.
+    _markAssoc(id) {
+      if (!this.assoc.size) return;
+      for (const hid of this.assoc) { const h = this.byId.get(hid); if (h && h.src && h.src.ids.indexOf(id) >= 0) this.dirty.add(hid); }
+    }
+    _flushAssoc() {
+      const ids = Array.from(this.dirty); this.dirty.clear();
+      const cands = this.entities.filter((e) => CH.isBoundaryEnt(e) && this.isVisible(e));
+      for (const hid of ids) {
+        const h = this.byId.get(hid); if (!h || !h.src) continue;
+        const pk = h.pk || 1, n = CH.relink(h, this.byId, cands, 0.05 * pk);
+        if (n) this._replace0(hid, n);
+      }
+    }
     remove(id) {
+      const ent = this.byId.get(id); if (!ent) return;
+      if (ent.t !== 'HATCH' && this.assoc.size) { this.transact(() => { this._remove0(id); this._markAssoc(id); }); return; }
+      this._remove0(id);
+    }
+    _remove0(id) {
       const ent = this.byId.get(id); if (!ent) return;
       const i = this._doDel(id);
       this._record({ k: 'del', ent, i });
       this._touch();
     }
     replace(id, next) {
+      const prev = this.byId.get(id); if (!prev) return null;
+      if (prev.t === 'HATCH' && prev.src) {                // moving or reshaping a hatch itself unlinks it from its boundary
+        const moved = JSON.stringify(prev.loops) !== JSON.stringify(next.loops);
+        if (moved) { next = { ...next }; delete next.src; delete next.det; }
+      }
+      if (prev.t !== 'HATCH' && this.assoc.size) { let r; this.transact(() => { r = this._replace0(id, next); this._markAssoc(id); }); return r; }
+      return this._replace0(id, next);
+    }
+    _replace0(id, next) {
       const prev = this.byId.get(id); if (!prev) return null;
       const ent = { ...JSON.parse(JSON.stringify(next)), id, layer: next.layer || prev.layer };
       const i = this._doDel(id);
@@ -90,7 +124,7 @@ const CadCmd = (() => {
       else if (op.k === 'meta') this._applyMeta(op.before);
       else { this._doDel(op.ent.id); this._doAdd(op.prev, op.i); }
     }
-    _applyMeta(m) { this.d.layers = JSON.parse(JSON.stringify(m.layers)); this.d.currentLayer = m.cur; }
+    _applyMeta(m) { this.d.layers = JSON.parse(JSON.stringify(m.layers)); this.d.currentLayer = m.cur; if (m.ul) this.d.underlays = JSON.parse(JSON.stringify(m.ul)); }
     _reapply(op) {
       if (op.k === 'add') this._doAdd(op.ent);
       else if (op.k === 'del') this._doDel(op.ent.id);
@@ -121,14 +155,23 @@ const CadCmd = (() => {
       const own = !this.group; if (own) this.beginGroup();
       try { return fn(); } finally { if (own) this.endGroup(); }
     }
+    _metaSnap() { return JSON.parse(JSON.stringify({ layers: this.d.layers, cur: this.d.currentLayer, ul: this.d.underlays || [] })); }
     setLayers(layers, currentLayer) {
-      const cl = (x) => JSON.parse(JSON.stringify(x));
-      const before = { layers: cl(this.d.layers), cur: this.d.currentLayer };
-      this.d.layers = cl(layers);
+      const before = this._metaSnap();
+      this.d.layers = JSON.parse(JSON.stringify(layers));
       if (currentLayer != null) this.d.currentLayer = currentLayer;
-      this._record({ k: 'meta', before, after: { layers: cl(this.d.layers), cur: this.d.currentLayer } });
+      this._record({ k: 'meta', before, after: this._metaSnap() });
       this._touch();
     }
+    // Underlays: [{id, assetId, name, x, y, w, h, rot, opacity, on, iw, ih}], x,y = lower-left corner in model units.
+    underlay(id) { return (this.d.underlays || []).find((u) => u.id === id) || null; }
+    setUnderlays(list) {
+      const before = this._metaSnap();
+      this.d.underlays = JSON.parse(JSON.stringify(list));
+      this._record({ k: 'meta', before, after: this._metaSnap() });
+      this._touch();
+    }
+    patchUnderlay(id, patch) { this.setUnderlays((this.d.underlays || []).map((u) => (u.id === id ? { ...u, ...patch } : u))); }
     renameLayer(oldName, newName) {
       if (oldName === '0' || !newName || this.layer(newName)) return false;
       this.transact(() => {
@@ -173,7 +216,10 @@ const CadCmd = (() => {
       let best = null, bd = tol;
       for (const e of this.query(pt[0] - tol, pt[1] - tol, pt[0] + tol, pt[1] + tol)) {
         if (!this.isVisible(e)) continue;
-        const d = G.entityDist(e, pt);
+        let d = G.entityDist(e, pt);
+        // Inside a hatch counts as nearly background: lines and text under the finger win, but the hatch is still tappable.
+        if (e.t === 'HATCH' && d > 0 && CH.inside(CH.polysOf(e, 0.05 * (e.pk || 1)), pt)) d = tol * 0.98;
+        if (e.t === 'SYM' && d > 0 && G.dist(e.p, pt) <= (e.sz || 0) / 2) d = tol * 0.98;
         if (d <= bd) { bd = d; best = e; }
       }
       return best;
@@ -208,7 +254,7 @@ const CadCmd = (() => {
     M: 'MOVE', CO: 'COPY', CP: 'COPY', RO: 'ROTATE', SC: 'SCALE', MI: 'MIRROR', O: 'OFFSET', TR: 'TRIM', EX: 'EXTEND',
     F: 'FILLET', CHA: 'CHAMFER', S: 'STRETCH', X: 'EXPLODE', DEL: 'ERASE', DELETE: 'ERASE',
     T: 'MTEXT', MT: 'MTEXT', DT: 'TEXT', ED: 'TEXTEDIT', DDEDIT: 'TEXTEDIT', DLI: 'DIMLINEAR', DIMLIN: 'DIMLINEAR', DAL: 'DIMALIGNED', DIMALI: 'DIMALIGNED',
-    DCO: 'DIMCONTINUE', DI: 'DIST', AA: 'AREA', LA: 'LAYER', PR: 'PROPERTIES', PROPS: 'PROPERTIES', CH: 'PROPERTIES' };
+    DCO: 'DIMCONTINUE', DI: 'DIST', AA: 'AREA', LA: 'LAYER', PR: 'PROPERTIES', UL: 'UNDERLAY', CAL: 'CALIBRATE', UM: 'UMOVE', UR: 'UROTATE', PROPS: 'PROPERTIES', CH: 'PROPERTIES', H: 'HATCH', BH: 'HATCH', HA: 'HATCH', SY: 'SYMBOL', SYM: 'SYMBOL', STENCIL: 'SYMBOL' };
   const opt = (name, short) => ({ name, short: short || name[0] });
   const bulge3 = (p1, p2, p3) => {
     const a = G.arcThrough3(p1, p2, p3); if (!a) return null;
@@ -760,6 +806,68 @@ const CadCmd = (() => {
       c.log(n + ' exploded.' + (skipped ? ' ' + skipped + ' cannot be exploded.' : ''));
     },
 
+    // ----- hatching (slice 1e) -----
+    // Tap inside a closed shape (lines, arcs, circles, polylines meeting up) to fill it; Object picks closed polylines or circles.
+    *HATCH(c) {
+      const eng = c.engine; eng.hatch = eng.hatch || { pat: 'Lines', sc: 1, ang: 0 };
+      const h = eng.hatch, pk = (c.doc.d.plotScale || 50) * (({ mm: 1, m: 0.001, in: 1 / 25.4 })[c.doc.d.units] || 1);
+      const mk = (loops, src) => { const e = { t: 'HATCH', loops, pat: h.pat, sc: h.sc, ang: G.rad(h.ang), pk, seed: (Math.random() * 4294967295) >>> 0 }; if (src) e.src = { ...src, fresh: true }; return e; };
+      const boundaryEnts = () => c.doc.entities.filter((e) => e.t !== 'HATCH' && (e.t === 'LINE' || e.t === 'ARC' || e.t === 'CIRCLE' || e.t === 'LWPOLYLINE') && c.doc.isVisible(e));
+      c.log('Hatch: ' + CH.PATTERNS[h.pat].label + ', scale ' + G.fmtNum(h.sc, 3) + ', angle ' + G.fmtNum(h.ang, 2) + '.');
+      let n = 0;
+      for (;;) {
+        const r = yield c.point('Pick a point inside a closed shape, or', { options: [opt('Pattern', 'P'), opt('Scale', 'S'), opt('Angle', 'A'), opt('Object', 'O')] });
+        if (r.kind === 'option') {
+          if (r.name === 'Pattern') {
+            const k = yield c.key('Hatch pattern', CH.NAMES.map((nm) => opt(nm, nm === 'Solid' ? 'So' : nm === 'Gravel' ? 'Gv' : nm.slice(0, 2))));
+            if (k.kind === 'option') { h.pat = k.name; c.log('Pattern: ' + CH.PATTERNS[h.pat].label); }
+          } else if (r.name === 'Scale') {
+            const v = yield c.number('Pattern scale', { default: h.sc }); if (v.kind === 'number' && v.value > 0) h.sc = v.value;
+          } else if (r.name === 'Angle') {
+            const v = yield c.number('Pattern angle in degrees', { default: h.ang }); if (v.kind === 'number') h.ang = v.value;
+          } else if (r.name === 'Object') {
+            const sel = yield c.select('Select closed polylines or circles:'); if (sel.kind !== 'select' || !sel.ids.length) continue;
+            const picked = sel.ids.map((id) => c.doc.byId.get(id)).filter(Boolean), good = picked.filter((q) => (q.t === 'LWPOLYLINE' && q.closed && q.v.length >= 3) || q.t === 'CIRCLE');
+            const { loops, skipped } = CH.loopsFromObjects(good);
+            if (!loops.length) { c.warn('Select closed polylines or circles.'); continue; }
+            c.add(mk(loops, { mode: 'obj', ids: good.map((q) => q.id), c: CH.centreOf(good) })); n++;
+            if (skipped) c.log(skipped + ' object(s) skipped: not closed.');
+          }
+          continue;
+        }
+        if (r.kind !== 'point') break;
+        const res = CH.findBoundary(boundaryEnts(), r.pt, { tol: 0.05 * pk });
+        if (res.error) { c.warn(res.error); continue; }
+        const cands = boundaryEnts(), ids = CH.sourceIds(cands, res.loops, 0.02 * pk);
+        c.add(mk(res.loops, { mode: 'pt', pt: r.pt, ids, c: CH.centreOf(ids.map((id) => c.doc.byId.get(id)).filter(Boolean)) })); n++;
+        c.log('Hatch added' + (res.loops.length > 1 ? ' with ' + (res.loops.length - 1) + ' island(s)' : '') + '.');
+      }
+      if (n) c.log(n + ' hatch' + (n > 1 ? 'es' : '') + ' created.');
+    },
+
+    // ----- stencils (slice 1f) -----
+    // Place stone, tree and other symbols. Options: Symbol, Size (in the drawing's metres/units), Rotate.
+    *SYMBOL(c) {
+      const eng = c.engine; eng.sym = eng.sym || { name: 'Tree', rot: 0, size: null };
+      const s = eng.sym, d = c.doc.d, U = ({ mm: 1000, m: 1, in: 39.37007874 })[d.units] || 1000;
+      const size = () => s.size || SYM.defaultSize(s.name, d);
+      const mk = (pt) => ({ t: 'SYM', p: pt, name: s.name, sz: size(), rot: G.rad(s.rot), seed: 1 + Math.floor(Math.random() * 2147483000) });
+      let seed = mk([0, 0]).seed, n = 0;
+      c.log(SYM.SYMBOLS[s.name].label + ', size ' + G.fmtNum(size() / U, 3) + (SYM.SYMBOLS[s.name].paperMm ? ' m on the ground (' + SYM.SYMBOLS[s.name].paperMm + ' mm on paper)' : ' m') + ', rotation ' + G.fmtNum(s.rot, 1) + '.');
+      for (;;) {
+        const r = yield c.point('Pick where to place the ' + SYM.SYMBOLS[s.name].label.toLowerCase() + ', or', { options: [opt('Symbol', 'S'), opt('Size', 'Z'), opt('Rotate', 'R')], preview: (pt) => [{ ...mk(pt), seed }] });
+        if (r.kind === 'option') {
+          if (r.name === 'Symbol') { const k = yield c.key('Symbol', SYM.NAMES.map((nm) => opt(SYM.SYMBOLS[nm].label, nm.slice(0, 2)))); if (k.kind === 'option') { const nm = SYM.NAMES.find((x) => SYM.SYMBOLS[x].label === k.name); if (nm) { s.name = nm; s.size = null; } } }
+          else if (r.name === 'Size') { const v = yield c.number('Symbol size in metres', { default: +(size() / U).toFixed(3) }); if (v.kind === 'number' && v.value > 0) s.size = v.value * U; }
+          else if (r.name === 'Rotate') { const v = yield c.number('Rotation in degrees', { default: s.rot }); if (v.kind === 'number') s.rot = v.value; }
+          continue;
+        }
+        if (r.kind !== 'point') break;
+        c.add({ ...mk(r.pt), seed }); n++; seed = mk([0, 0]).seed;
+      }
+      if (n) c.log(n + ' symbol' + (n > 1 ? 's' : '') + ' placed.');
+    },
+
     // ----- annotate and measure (slice 1c) -----
     *TEXT(c) {
       const st = annoStyle(c.doc);
@@ -855,6 +963,40 @@ const CadCmd = (() => {
       c.warn('Area ' + fmtArea(c.doc, ap.area) + '  ·  ' + label + ' ' + fmtLen(c.doc, ap.perimeter));
     },
 
+    // ----- underlays (slice 1d) -----
+    // Scale the underlay so two points you pick on it are a known real distance apart.
+    *CALIBRATE(c) {
+      const list = c.doc.d.underlays || [], u = (c.engine.params && c.engine.params.ul && c.doc.underlay(c.engine.params.ul)) || list[list.length - 1];
+      if (!u) { c.warn('There is no underlay. Add one first.'); return; }
+      const a = yield c.point('Calibrate: specify first point on the underlay:'); if (a.kind !== 'point') return;
+      const b = yield c.point('Specify second point:', { base: a.pt, preview: (pt) => [{ t: 'LINE', p1: a.pt, p2: pt }] }); if (b.kind !== 'point') return;
+      const m = G.dist(a.pt, b.pt); if (m < 1e-9) { c.warn('The two points are identical.'); return; }
+      const r = yield c.number('Enter the real distance between the points', { base: a.pt, default: m }); if (r.kind !== 'number' || !(r.value > 0)) return;
+      const k = r.value / m;
+      c.doc.patchUnderlay(u.id, { x: a.pt[0] + (u.x - a.pt[0]) * k, y: a.pt[1] + (u.y - a.pt[1]) * k, w: u.w * k, h: u.h * k });
+      c.log('Underlay scaled by ' + G.fmtNum(k, 5) + '. The picked points are now ' + fmtLen(c.doc, r.value) + ' apart.');
+      c.engine.overlay = [{ t: 'LINE', p1: a.pt, p2: [a.pt[0] + (b.pt[0] - a.pt[0]) * k, a.pt[1] + (b.pt[1] - a.pt[1]) * k] }];
+      c.warn('Underlay scaled by ' + G.fmtNum(k, 4));
+    },
+
+    *UMOVE(c) {
+      const list = c.doc.d.underlays || [], u = (c.engine.params && c.engine.params.ul && c.doc.underlay(c.engine.params.ul)) || list[list.length - 1];
+      if (!u) { c.warn('There is no underlay.'); return; }
+      const a = yield c.point('Specify base point:'); if (a.kind !== 'point') return;
+      const b = yield c.point('Specify second point:', { base: a.pt, preview: (pt) => [{ t: 'LINE', p1: a.pt, p2: pt }] }); if (b.kind !== 'point') return;
+      c.doc.patchUnderlay(u.id, { x: u.x + b.pt[0] - a.pt[0], y: u.y + b.pt[1] - a.pt[1] });
+    },
+
+    *UROTATE(c) {
+      const list = c.doc.d.underlays || [], u = (c.engine.params && c.engine.params.ul && c.doc.underlay(c.engine.params.ul)) || list[list.length - 1];
+      if (!u) { c.warn('There is no underlay.'); return; }
+      const a = yield c.point('Specify base point:'); if (a.kind !== 'point') return;
+      const r = yield c.point('Specify rotation angle (or pick a point)', { base: a.pt, allowNumber: true }); let ang;
+      if (r.kind === 'number') ang = G.rad(r.value); else if (r.kind === 'point') ang = G.angleBetween(a.pt, r.pt); else return;
+      const cs = Math.cos(ang), sn = Math.sin(ang), dx = u.x - a.pt[0], dy = u.y - a.pt[1];
+      c.doc.patchUnderlay(u.id, { x: a.pt[0] + dx * cs - dy * sn, y: a.pt[1] + dx * sn + dy * cs, rot: (u.rot || 0) + ang });
+    },
+
     // Internal: drag a grip of a selected object (started by the canvas, not typed).
     *GRIP(c) {
       const { id, grip } = c.engine.params || {};
@@ -905,6 +1047,7 @@ const CadCmd = (() => {
     REGEN(e) { if (e.host.redraw) e.host.redraw(); e.log('Regenerating model.'); },
     REDRAW(e) { if (e.host.redraw) e.host.redraw(); },
     LAYER(e) { if (e.host.openLayers) e.host.openLayers(); else e.log('The layers panel is not available here.'); },
+    UNDERLAY(e) { if (e.host.openUnderlays) e.host.openUnderlays(); else e.log('The underlay panel is not available here.'); },
     PROPERTIES(e) { if (e.host.openProperties) e.host.openProperties(); else e.log('The properties panel is not available here.'); }
   };
   const ALL_COMMANDS = Object.keys(COMMANDS).filter((n) => n !== 'GRIP').concat(Object.keys(INSTANT));

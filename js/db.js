@@ -2,7 +2,7 @@
 // Stores: inspections, sections, elements, findings, photos, templates
 
 const DB_NAME = 'siteInspectionDB';
-const DB_VERSION = 13;
+const DB_VERSION = 14;
 
 let dbPromise = null;
 
@@ -204,6 +204,14 @@ function openDB() {
         if (!db.objectStoreNames.contains('cadSnapshots')) {
           const csStore = db.createObjectStore('cadSnapshots', { keyPath: 'id' });
           csStore.createIndex('drawingId', 'drawingId', { unique: false });
+        }
+      }
+      if (oldVersion < 14) {
+        // CAD underlays: the picture behind a drawing (photo or PDF page) lives here as a Blob,
+        // so drawing JSON, snapshots and undo stay small. One new store; nothing else is touched.
+        if (!db.objectStoreNames.contains('cadAssets')) {
+          const caStore = db.createObjectStore('cadAssets', { keyPath: 'id' });
+          caStore.createIndex('drawingId', 'drawingId', { unique: false });
         }
       }
     };
@@ -1691,7 +1699,13 @@ const DB = {
   async listCadSnapshots(drawingId) {
     return (await this.getAllByIndex('cadSnapshots', 'drawingId', drawingId)).sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
   },
+  async addCadAsset(drawingId, blob, name, w, h) {
+    return this.put('cadAssets', { id: uid(), drawingId, name: name || 'Underlay', blob, w, h, createdAt: new Date().toISOString() });
+  },
+  async getCadAsset(id) { return this.get('cadAssets', id); },
+  async deleteCadAsset(id) { await this.delete('cadAssets', id); },
   async deleteCadDrawing(id) {
+    for (const a of await this.getAllByIndex('cadAssets', 'drawingId', id)) await this.delete('cadAssets', a.id);
     for (const s of await this.getAllByIndex('cadSnapshots', 'drawingId', id)) await this.delete('cadSnapshots', s.id);
     await this.delete('cadDrawings', id);
   },

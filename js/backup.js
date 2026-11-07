@@ -3,7 +3,7 @@
 // database (inspections, elements, findings, photos, templates, risk assessments), meant
 // for safekeeping or moving to a new device. Photos are embedded as base64 data URLs.
 
-const BACKUP_STORES = ['inspections', 'sections', 'elements', 'findings', 'photos', 'templates', 'riskAssessments', 'reportSections', 'reportTemplates', 'monitoringPlans', 'monitoringReadings', 'monitoringPoints', 'monitoringVisits', 'monitoringImages', 'cadDrawings'];
+const BACKUP_STORES = ['inspections', 'sections', 'elements', 'findings', 'photos', 'templates', 'riskAssessments', 'reportSections', 'reportTemplates', 'monitoringPlans', 'monitoringReadings', 'monitoringPoints', 'monitoringVisits', 'monitoringImages', 'cadDrawings', 'cadAssets'];
 
 function blobToDataURLBackup(blob) {
   return new Promise((resolve, reject) => {
@@ -28,6 +28,10 @@ async function exportRawDataBackup() {
         ...p,
         originalBlob: p.originalBlob ? { __blob: true, mimeType: p.originalBlob.type, dataUrl: await blobToDataURLBackup(p.originalBlob) } : null,
         annotatedBlob: p.annotatedBlob ? { __blob: true, mimeType: p.annotatedBlob.type, dataUrl: await blobToDataURLBackup(p.annotatedBlob) } : null
+      })));
+    } else if (name === 'cadAssets') {
+      payload.stores[name] = await Promise.all(all.map(async (a) => ({
+        ...a, blob: a.blob ? { __blob: true, mimeType: a.blob.type, dataUrl: await blobToDataURLBackup(a.blob) } : null
       })));
     } else {
       payload.stores[name] = all;
@@ -76,6 +80,7 @@ async function importRawDataBackup(file) {
           clone.annotatedBlob = await dataURLToBlobBackup(clone.annotatedBlob.dataUrl);
         }
       }
+      if (name === 'cadAssets' && clone.blob && clone.blob.__blob) clone.blob = await dataURLToBlobBackup(clone.blob.dataUrl);
       await DB.put(name, clone);
       importedCount++;
     }

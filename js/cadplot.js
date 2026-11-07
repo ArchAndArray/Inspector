@@ -13,7 +13,9 @@ const CadPlot = (() => {
   'use strict';
   const G = (typeof CadGeo !== 'undefined') ? CadGeo : require('./cadgeo.js');
   const DM = (typeof CadDim !== 'undefined') ? CadDim : require('./caddim.js');
-  const ACI = { 1: '#d32f2f', 2: '#b8860b', 3: '#2e7d32', 4: '#00838f', 5: '#1565c0', 6: '#8e24aa', 7: '#000000', 8: '#808080', 9: '#a0a0a0' };
+  const ST = (typeof CadStyle !== 'undefined') ? CadStyle : require('./cadstyle.js');
+  const SY = (typeof CadSym !== 'undefined') ? CadSym : require('./cadsym.js');
+  const CH = (typeof CadHatch !== 'undefined') ? CadHatch : require('./cadhatch.js');
   const SIZES = { A4: [210, 297], A3: [297, 420] };
   const UNIT_MM = { mm: 1, m: 1000, in: 25.4 };
   const STD_SCALES = [1, 2, 5, 10, 20, 25, 50, 75, 100, 125, 150, 200, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 20000, 50000, 100000];
@@ -59,7 +61,11 @@ const CadPlot = (() => {
   // Returns { sheet, items, scale, scaleText, fits, suggested, empty }.
   function plan(data, opts) {
     const o = Object.assign({ size: 'A4', landscape: true, scale: 'fit', mono: false, tb: {} }, opts || {});
-    const lay = layout(o.size, o.landscape), ents = visibleEntities(data), box = boxOf(ents);
+    const lay = layout(o.size, o.landscape), ents = visibleEntities(data);
+    let box = boxOf(ents);
+    const uls = o.underlays === false ? [] : (data.underlays || []).filter((u) => u.on !== false && (!o.underlayIds || o.underlayIds.indexOf(u.id) >= 0));
+    const ulCorners = (u) => { const c = Math.cos(u.rot || 0), s = Math.sin(u.rot || 0); return [[0, 0], [u.w, 0], [u.w, u.h], [0, u.h]].map(([x, y]) => [u.x + x * c - y * s, u.y + x * s + y * c]); };
+    if (o.fitPictures !== false) for (const u of uls) for (const q of ulCorners(u)) { if (!box) box = { minX: q[0], minY: q[1], maxX: q[0], maxY: q[1] }; else { box.minX = Math.min(box.minX, q[0]); box.minY = Math.min(box.minY, q[1]); box.maxX = Math.max(box.maxX, q[0]); box.maxY = Math.max(box.maxY, q[1]); } }
     const um = UNIT_MM[data.units] || 1;
     const items = [];
     let denom = null, fits = true, suggested = null;
@@ -79,17 +85,23 @@ const CadPlot = (() => {
     const cx = box ? (box.minX + box.maxX) / 2 : 0, cy = box ? (box.minY + box.maxY) / 2 : 0;
     const ox = (lay.area.x0 + lay.area.x1) / 2, oy = (lay.area.y0 + lay.area.y1) / 2;
     const M = (p) => [ox + (p[0] - cx) * kmm, oy + (p[1] - cy) * kmm];
+    const pens = data.pens || {};
     const color = (e) => {
       if (o.mono) return '#000000';
-      const l = (data.layers || []).find((x) => x.name === e.layer);
-      return ACI[e.color != null ? e.color : (l ? l.color : 7)] || ACI[7];
+      const hex = ST.colorHex(data, e), pn = pens[hex];
+      return pn && pn.color ? pn.color : ST.printable(hex);
     };
+    let curW = 0.25, curDash = null;
     const LW = 0.25;
-    const poly = (pts, closed, col, w) => items.push({ k: 'poly', pts: pts.map(M), closed: !!closed, color: col, w: w || LW });
+    for (const u of uls) items.push({ k: 'img', id: u.assetId, pts: ulCorners(u).map(M), opacity: u.opacity == null ? 0.5 : u.opacity, iw: u.iw, ih: u.ih });
+    const poly = (pts, closed, col, w) => items.push({ k: 'poly', pts: pts.map(M), closed: !!closed, color: col, w: w || curW || LW, dash: curDash && curDash.length ? curDash : null });
     const txt = (p, h, rot, str, align, col) => { if (str && h * kmm >= 0.4) items.push({ k: 'text', p: M(p), h: h * kmm, rot: rot || 0, str, align: align || 'left', color: col }); };
 
-    for (const e of ents) {
-      const col = color(e);
+    const ordered = ents.filter((e) => e.t === 'HATCH').concat(ents.filter((e) => e.t !== 'HATCH'));
+    for (const e of ordered) {
+      const col = color(e), hex0 = ST.colorHex(data, e), pn0 = pens[hex0];
+      curW = pn0 && pn0.lw != null ? pn0.lw : ST.lwMm(data, e);
+      curDash = (e.t === 'DIM' || e.t === 'POINT' || e.t === 'SYM') ? null : ST.dashModel(data, ST.ltypeName(data, e)).map((v) => v * kmm);
       switch (e.t) {
         case 'LINE': poly([e.p1, e.p2], false, col); break;
         case 'CIRCLE': poly(arcPts(e.c, e.r, 0, Math.PI * 2, kmm), true, col); break;
@@ -104,6 +116,20 @@ const CadPlot = (() => {
           if (pts.length) poly(pts, e.closed && pts.length > 2, col);
           break;
         }
+        case 'HATCH': {
+          const pat = CH.PATTERNS[e.pat] || CH.PATTERNS.Lines, lay0 = ST.layerOf(data, e.layer);
+          const hw = pn0 && pn0.lw != null ? pn0.lw : (e.lw != null || (lay0 && lay0.lw >= 0)) ? ST.lwMm(data, e) : 0.13;
+          if (pat.solid) { items.push({ k: 'fillr', rings: CH.polysOf(e, 0.05 * (e.pk || 1)).map((r) => r.map(M)), color: col }); break; }
+          const segs = CH.segments(e).map(([a, b]) => [M(a), M(b)]);
+          if (segs.length) items.push({ k: 'segs', segs, color: col, w: hw });
+          break;
+        }
+        case 'SYM':
+          for (const sh of SY.shapes(e)) {
+            if (sh.fill) items.push({ k: 'fillr', rings: [sh.pts.map(M)], color: col });
+            else poly(sh.pts, sh.closed && sh.pts.length > 2, col);
+          }
+          break;
         case 'TEXT': txt(e.p, e.h, e.rot, e.text, 'left', col); break;
         case 'MTEXT': {
           const c = Math.cos(e.rot || 0), s = Math.sin(e.rot || 0);
@@ -151,16 +177,31 @@ const CadPlot = (() => {
   }
 
   // ---- renderers ----
-  function renderCanvas(p, canvas, pxPerMm) {
+  function renderCanvas(p, canvas, pxPerMm, images) {
     canvas.width = Math.round(p.sheet.w * pxPerMm); canvas.height = Math.round(p.sheet.h * pxPerMm);
     const c = canvas.getContext('2d'), H = p.sheet.h;
     c.fillStyle = '#ffffff'; c.fillRect(0, 0, canvas.width, canvas.height);
     c.lineJoin = 'round'; c.lineCap = 'round';
     const X = (v) => v * pxPerMm, Y = (v) => (H - v) * pxPerMm;
     for (const it of p.items) {
-      if (it.k === 'poly') {
-        c.strokeStyle = it.color; c.lineWidth = Math.max(1, it.w * pxPerMm); c.beginPath();
-        it.pts.forEach((q, i) => (i ? c.lineTo(X(q[0]), Y(q[1])) : c.moveTo(X(q[0]), Y(q[1])))); if (it.closed) c.closePath(); c.stroke();
+      if (it.k === 'img') {
+        const im = images && images[it.id]; if (!im) continue;
+        const iw = im.naturalWidth || im.width, ih = im.naturalHeight || im.height, [p0, p1, , p3] = it.pts;
+        const ux = p1[0] - p0[0], uy = p1[1] - p0[1], vx = p3[0] - p0[0], vy = p3[1] - p0[1];
+        c.save(); c.beginPath(); c.rect(X(p.area.x0), Y(p.area.y1), (p.area.x1 - p.area.x0) * pxPerMm, (p.area.y1 - p.area.y0) * pxPerMm); c.clip();
+        c.globalAlpha = it.opacity;
+        c.setTransform(ux / iw * pxPerMm, -uy / iw * pxPerMm, -vx / ih * pxPerMm, vy / ih * pxPerMm, X(p0[0] + vx), Y(p0[1] + vy));
+        c.drawImage(im, 0, 0); c.restore();
+      } else if (it.k === 'poly') {
+        c.strokeStyle = it.color; c.lineWidth = Math.max(1, it.w * pxPerMm); c.beginPath(); c.setLineDash(it.dash ? it.dash.map((v) => Math.max(0.6, v * pxPerMm)) : []);
+        it.pts.forEach((q, i) => (i ? c.lineTo(X(q[0]), Y(q[1])) : c.moveTo(X(q[0]), Y(q[1])))); if (it.closed) c.closePath(); c.stroke(); c.setLineDash([]);
+      } else if (it.k === 'segs') {
+        c.strokeStyle = it.color; c.lineWidth = Math.max(1, it.w * pxPerMm); c.setLineDash([]); c.beginPath();
+        for (const [a, b] of it.segs) { c.moveTo(X(a[0]), Y(a[1])); c.lineTo(X(b[0]), Y(b[1])); } c.stroke();
+      } else if (it.k === 'fillr') {
+        c.fillStyle = it.color; c.beginPath();
+        for (const r of it.rings) { r.forEach((q, i) => (i ? c.lineTo(X(q[0]), Y(q[1])) : c.moveTo(X(q[0]), Y(q[1])))); c.closePath(); }
+        c.fill('evenodd');
       } else if (it.k === 'fill') {
         c.fillStyle = it.color; c.beginPath(); it.pts.forEach((q, i) => (i ? c.lineTo(X(q[0]), Y(q[1])) : c.moveTo(X(q[0]), Y(q[1])))); c.closePath(); c.fill();
       } else {
@@ -172,16 +213,43 @@ const CadPlot = (() => {
     return canvas;
   }
   const hex = (s) => [parseInt(s.slice(1, 3), 16), parseInt(s.slice(3, 5), 16), parseInt(s.slice(5, 7), 16)];
-  function renderPdf(p, JsPDF) {
+  // Rotated, faded picture flattened into an axis-aligned PNG covering (picture box ∩ plot area), for PDF.
+  function bakeImage(p, it, im, ppm) {
+    const xs = it.pts.map((q) => q[0]), ys = it.pts.map((q) => q[1]);
+    const x0 = Math.max(Math.min(...xs), p.area.x0), x1 = Math.min(Math.max(...xs), p.area.x1), y0 = Math.max(Math.min(...ys), p.area.y0), y1 = Math.min(Math.max(...ys), p.area.y1);
+    if (x1 - x0 < 0.1 || y1 - y0 < 0.1) return null;
+    const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round((x1 - x0) * ppm)); cv.height = Math.max(1, Math.round((y1 - y0) * ppm));
+    const c = cv.getContext('2d'), iw = im.naturalWidth || im.width, ih = im.naturalHeight || im.height, [p0, p1, , p3] = it.pts;
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], vx = p3[0] - p0[0], vy = p3[1] - p0[1];
+    c.globalAlpha = it.opacity;
+    c.setTransform(ux / iw * ppm, -uy / iw * ppm, -vx / ih * ppm, vy / ih * ppm, (p0[0] + vx - x0) * ppm, (y1 - (p0[1] + vy)) * ppm);
+    c.drawImage(im, 0, 0);
+    return { url: cv.toDataURL('image/png'), x: x0, y: y1, w: x1 - x0, h: y1 - y0 };
+  }
+  function renderPdf(p, JsPDF, images) {
     const H = p.sheet.h;
     const doc = new JsPDF({ unit: 'mm', format: [p.sheet.w, p.sheet.h], orientation: p.sheet.w > p.sheet.h ? 'landscape' : 'portrait' });
     doc.setLineCap && doc.setLineCap('round'); doc.setLineJoin && doc.setLineJoin('round');
     for (const it of p.items) {
+      if (it.k === 'img') {
+        const im = images && images[it.id]; if (!im || typeof document === 'undefined') continue;
+        const b = bakeImage(p, it, im, 200 / 25.4); if (b) doc.addImage(b.url, 'PNG', b.x, H - b.y, b.w, b.h, undefined, 'FAST');
+        continue;
+      }
       if (it.k === 'poly') {
         const q = it.pts; if (q.length < 2) continue;
         doc.setDrawColor(...hex(it.color)); doc.setLineWidth(it.w);
+        if (doc.setLineDashPattern) doc.setLineDashPattern(it.dash ? it.dash.map((v) => Math.max(0.05, v)) : [], 0);
         const rel = []; for (let i = 1; i < q.length; i++) rel.push([q[i][0] - q[i - 1][0], -(q[i][1] - q[i - 1][1])]);
         doc.lines(rel, q[0][0], H - q[0][1], [1, 1], 'S', !!it.closed);
+      } else if (it.k === 'segs') {
+        doc.setDrawColor(...hex(it.color)); doc.setLineWidth(it.w);
+        if (doc.setLineDashPattern) doc.setLineDashPattern([], 0);
+        for (const [a, b] of it.segs) doc.line(a[0], H - a[1], b[0], H - b[1]);
+      } else if (it.k === 'fillr') {
+        doc.setFillColor(...hex(it.color)); doc.setDrawColor(...hex(it.color)); doc.setLineWidth(0.05);
+        if (doc.setLineDashPattern) doc.setLineDashPattern([], 0);
+        for (const q of CH.trapezoids(it.rings)) { const [a, b, c2, d] = q; doc.lines([[b[0] - a[0], -(b[1] - a[1])], [c2[0] - b[0], -(c2[1] - b[1])], [d[0] - c2[0], -(d[1] - c2[1])]], a[0], H - a[1], [1, 1], 'FD', true); }
       } else if (it.k === 'fill') {
         doc.setFillColor(...hex(it.color)); doc.triangle(it.pts[0][0], H - it.pts[0][1], it.pts[1][0], H - it.pts[1][1], it.pts[2][0], H - it.pts[2][1], 'F');
       } else {

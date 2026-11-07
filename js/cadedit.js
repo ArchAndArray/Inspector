@@ -49,6 +49,18 @@ const CadEdit = (() => {
       case 'LWPOLYLINE':
         n.v = e.v.map((q) => { const p = xf.fn([q[0], q[1]]); return [p[0], p[1], xf.flip ? -(q[2] || 0) : (q[2] || 0)]; });
         break;
+      case 'SYM': {
+        n.p = xf.fn(e.p); n.sz = e.sz * xf.k;
+        const o = xf.fn([e.p[0] + Math.cos(e.rot || 0), e.p[1] + Math.sin(e.rot || 0)]);
+        n.rot = Math.atan2(o[1] - n.p[1], o[0] - n.p[0]); break;
+      }
+      case 'HATCH': {
+        n.loops = e.loops.map((l) => l.map((q) => { const p = xf.fn([q[0], q[1]]); return [p[0], p[1], xf.flip ? -(q[2] || 0) : (q[2] || 0)]; }));
+        n.pk = (e.pk || 1) * xf.k;
+        const o = xf.fn([0, 0]), u = xf.fn([1, 0]); let a = Math.atan2(u[1] - o[1], u[0] - o[0]);
+        n.ang = xf.flip ? a - (e.ang || 0) : (e.ang || 0) + a;
+        break;
+      }
       case 'TEXT': case 'MTEXT': {
         n.p = xf.fn(e.p); n.h = e.h * xf.k; if (e.w) n.w = e.w * xf.k;
         const o = xf.fn([e.p[0] + Math.cos(e.rot || 0), e.p[1] + Math.sin(e.rot || 0)]);
@@ -86,7 +98,7 @@ const CadEdit = (() => {
         G.polySegments(e).forEach((s, k) => out.push({ pt: s.k === 's' ? G.mid(s.p1, s.p2) : G.arcMid(s), i: e.v.length + k, kind: 'mid', seg: k }));
         break;
       }
-      case 'TEXT': case 'MTEXT': out.push({ pt: e.p, i: 0, kind: 'end' }); break;
+      case 'TEXT': case 'MTEXT': case 'SYM': out.push({ pt: e.p, i: 0, kind: 'end' }); break;
       case 'DIM': { const f = D.frame(e); out.push({ pt: e.p1, i: 0, kind: 'end' }, { pt: e.p2, i: 1, kind: 'end' }, { pt: G.mid(f.A, f.B), i: 2, kind: 'mid' }); break; }
       default: break;
     }
@@ -124,7 +136,7 @@ const CadEdit = (() => {
         }
         break;
       }
-      case 'TEXT': case 'MTEXT': n.p = np; break;
+      case 'TEXT': case 'MTEXT': case 'SYM': n.p = np; break;
       case 'DIM': if (g.i === 0) n.p1 = np; else if (g.i === 1) n.p2 = np; else n.off = add(e.off, d); break;
       default: return null;
     }
@@ -153,7 +165,12 @@ const CadEdit = (() => {
         n.v = e.v.map((q) => { if (ins([q[0], q[1]])) { any = true; return [q[0] + d[0], q[1] + d[1], q[2] || 0]; } return [q[0], q[1], q[2] || 0]; });
         return any ? n : null;
       }
-      case 'TEXT': case 'MTEXT': return ins(e.p) ? { ...clone(e), p: mv(e.p) } : null;
+      case 'HATCH': {
+        let any = false; const n = clone(e);
+        n.loops = e.loops.map((l) => l.map((q) => { if (ins([q[0], q[1]])) { any = true; return [q[0] + d[0], q[1] + d[1], q[2] || 0]; } return [q[0], q[1], q[2] || 0]; }));
+        return any ? n : null;
+      }
+      case 'TEXT': case 'MTEXT': case 'SYM': return ins(e.p) ? { ...clone(e), p: mv(e.p) } : null;
       case 'DIM': {
         const a = ins(e.p1), b = ins(e.p2), c = ins(e.off); if (!a && !b && !c) return null;
         const n = clone(e); if (a) n.p1 = mv(e.p1); if (b) n.p2 = mv(e.p2); if (c) n.off = mv(e.off); return n;
@@ -539,6 +556,17 @@ const CadEdit = (() => {
       const tw = D.CW * g.text.h * g.text.str.length;
       out.push({ ...base, t: 'TEXT', p: [g.text.p[0] - Math.cos(g.text.rot) * tw / 2, g.text.p[1] - Math.sin(g.text.rot) * tw / 2], h: g.text.h, rot: g.text.rot, text: g.text.str });
       return out;
+    }
+    if (e.t === 'SYM') {
+      const SY = typeof CadSym !== 'undefined' ? CadSym : require('./cadsym.js');
+      const base = clone(e); ['name', 'sz', 'rot', 'seed', 'p', 'id'].forEach((k) => delete base[k]);
+      return SY.shapes(e).map((sh) => ({ ...base, t: 'LWPOLYLINE', closed: sh.closed && sh.pts.length > 2, v: sh.pts.map((q) => [q[0], q[1], 0]) }));
+    }
+    if (e.t === 'HATCH') {
+      const H = typeof CadHatch !== 'undefined' ? CadHatch : require('./cadhatch.js');
+      const base = clone(e); ['loops', 'pat', 'sc', 'ang', 'pk', 'id'].forEach((k) => delete base[k]);
+      const segs = H.segments(e); if (!segs.length) return null;
+      return segs.map(([p1, p2]) => ({ ...base, t: 'LINE', p1, p2 }));
     }
     if (e.t !== 'LWPOLYLINE') return null;
     const base = clone(e); delete base.v; delete base.closed; delete base.id;

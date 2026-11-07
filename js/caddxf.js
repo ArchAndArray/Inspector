@@ -11,6 +11,10 @@
 const CadDxf = (() => {
   'use strict';
   const DM = (typeof CadDim !== 'undefined') ? CadDim : require('./caddim.js');
+  const ST = (typeof CadStyle !== 'undefined') ? CadStyle : require('./cadstyle.js');
+  const LT_UP = (name) => String(name || 'Continuous').toUpperCase();
+  const ltFromDxf = (nm) => { const u = String(nm || '').trim().toUpperCase(); return Object.keys(ST.LINETYPES).find((k) => k.toUpperCase() === u) || null; };
+  const lwNearest = (v) => ST.LW_LIST.reduce((b, x) => (Math.abs(x - v) < Math.abs(b - v) ? x : b), ST.LW_LIST[0]);
   const n = (v) => { const s = (+v).toFixed(6); return s.indexOf('.') >= 0 ? s.replace(/0+$/, '').replace(/\.$/, '') : s; };
   const deg = (r) => r * 180 / Math.PI;
   const rad = (d) => d * Math.PI / 180;
@@ -24,7 +28,11 @@ const CadDxf = (() => {
     const out = [];
     const g = (code, val) => { out.push(String(code)); out.push(String(val)); };
     const layerOf = (e) => cleanName(e.layer);
-    const common = (type, e) => { g(0, type); g(8, layerOf(e)); if (e.color != null && e.color >= 1 && e.color <= 255) g(62, e.color); };
+    const common = (type, e) => {
+      g(0, type); g(8, layerOf(e));
+      if (e.lt && e.lt !== 'Continuous' && ST.LINETYPES[e.lt]) g(6, LT_UP(e.lt));
+      if (e.rgb) g(62, ST.nearestAci(e.rgb)); else if (e.color != null && e.color >= 1 && e.color <= 255) g(62, e.color);
+    };
     const pt = (x, y, i) => { g(10 + (i || 0), n(x)); g(20 + (i || 0), n(y)); g(30 + (i || 0), 0); };
     const text = (e, p, h, rot, str, center) => {
       common('TEXT', e); pt(p[0], p[1]); g(40, n(h)); g(1, cleanText(str)); if (rot) g(50, n(deg(rot)));
@@ -44,8 +52,13 @@ const CadDxf = (() => {
     g(9, '$EXTMIN'); pt(x0, y0); g(9, '$EXTMAX'); pt(x1, y1);
     g(0, 'ENDSEC');
     g(0, 'SECTION'); g(2, 'TABLES');
-    g(0, 'TABLE'); g(2, 'LTYPE'); g(70, 1);
-    g(0, 'LTYPE'); g(2, 'CONTINUOUS'); g(70, 0); g(3, 'Solid line'); g(72, 65); g(73, 0); g(40, 0);
+    const ltNames = Object.keys(ST.LINETYPES);
+    g(0, 'TABLE'); g(2, 'LTYPE'); g(70, ltNames.length);
+    for (const nm of ltNames) {
+      const pat = nm === 'Continuous' ? [] : ST.dashModel(data, nm);
+      g(0, 'LTYPE'); g(2, LT_UP(nm)); g(70, 0); g(3, ST.LT_NOTE[nm]); g(72, 65); g(73, pat.length); g(40, n(pat.reduce((a, b) => a + b, 0)));
+      pat.forEach((v, i) => g(49, i % 2 === 0 ? (v < 1e-6 ? 0 : n(v)) : n(-v)));
+    }
     g(0, 'ENDTAB');
     const layers = (data.layers && data.layers.length ? data.layers : [{ name: '0', color: 7 }]).slice();
     const seen = new Set(layers.map((l) => cleanName(l.name)));
@@ -54,7 +67,7 @@ const CadDxf = (() => {
     g(0, 'TABLE'); g(2, 'LAYER'); g(70, layers.length);
     for (const l of layers) {
       g(0, 'LAYER'); g(2, cleanName(l.name)); g(70, (l.frozen ? 1 : 0) | (l.locked ? 4 : 0));
-      g(62, (l.on === false ? -1 : 1) * ACI_LIMIT(l.color || 7)); g(6, 'CONTINUOUS');
+      g(62, (l.on === false ? -1 : 1) * (l.rgb ? ST.nearestAci(l.rgb) : ACI_LIMIT(l.color || 7))); g(6, ST.LINETYPES[l.ltype] ? LT_UP(l.ltype) : 'CONTINUOUS');
     }
     g(0, 'ENDTAB');
     g(0, 'TABLE'); g(2, 'STYLE'); g(70, 1);
@@ -74,6 +87,21 @@ const CadDxf = (() => {
           for (const v of e.v) { common('VERTEX', e); pt(v[0], v[1]); if (v[2]) g(42, n(v[2])); }
           g(0, 'SEQEND'); g(8, layerOf(e));
           break;
+        case 'SYM': {                                       // symbols are written as plain polylines (fills as SOLID)
+          const SY = (typeof CadSym !== 'undefined') ? CadSym : require('./cadsym.js');
+          for (const sh of SY.shapes(e)) {
+            if (sh.fill) { for (let i = 1; i + 1 < sh.pts.length; i++) { common('SOLID', e); pt(sh.pts[0][0], sh.pts[0][1]); pt(sh.pts[i][0], sh.pts[i][1], 1); pt(sh.pts[i + 1][0], sh.pts[i + 1][1], 2); pt(sh.pts[i + 1][0], sh.pts[i + 1][1], 3); } }
+            if (!sh.fill || sh.closed) { common('POLYLINE', e); g(66, 1); pt(0, 0); g(70, sh.closed ? 1 : 0); for (const q of sh.pts) { common('VERTEX', e); pt(q[0], q[1]); } g(0, 'SEQEND'); g(8, layerOf(e)); }
+          }
+          break;
+        }
+        case 'HATCH': {                                     // R12 has no HATCH: write the pattern lines or solid quads
+          const CH = (typeof CadHatch !== 'undefined') ? CadHatch : require('./cadhatch.js');
+          if ((CH.PATTERNS[e.pat] || {}).solid) {
+            for (const [a, b, c2, d] of CH.trapezoids(CH.polysOf(e, 0.05 * (e.pk || 1)))) { common('SOLID', e); pt(a[0], a[1]); pt(b[0], b[1], 1); pt(d[0], d[1], 2); pt(c2[0], c2[1], 3); }
+          } else for (const [a, b] of CH.segments(e)) { common('LINE', e); pt(a[0], a[1]); pt(b[0], b[1], 1); }
+          break;
+        }
         case 'TEXT': text(e, e.p, e.h, e.rot || 0, e.text); break;
         case 'MTEXT': {
           const c = Math.cos(e.rot || 0), s = Math.sin(e.rot || 0);
@@ -124,9 +152,18 @@ const CadDxf = (() => {
     return unescText(t.replace(/\u0001/g, '\\'));
   }
   const colorOf = (r) => { const c = num(r, 62, null); return c != null && c >= 1 && c <= 9 ? c : undefined; };
+  const rgbOf = (r) => { const v = num(r, 420, null); return v != null && v >= 0 && (v & 0xff000000) === 0 ? ST.rgbToHex((v >> 16) & 255, (v >> 8) & 255, v & 255) : undefined; };
+  // optional per-object style: line type, line weight (1/100 mm), true colour
+  const styleOf = (r) => {
+    const o = {}, lt = ltFromDxf(first(r, 6)), lw = num(r, 370, null), rgb = rgbOf(r);
+    if (lt && lt !== 'Continuous') o.lt = lt;
+    if (lw != null && lw >= 0) o.lw = lwNearest(lw);
+    if (rgb) o.rgb = rgb;
+    return o;
+  };
 
   function entFromRec(r, lw) {
-    const layer = (first(r, 8) || '0').trim() || '0', col = colorOf(r), base = { layer }; if (col) base.color = col;
+    const layer = (first(r, 8) || '0').trim() || '0', col = colorOf(r), base = { layer, ...styleOf(r) }; if (col) base.color = col;
     switch (r.type) {
       case 'LINE': return { ...base, t: 'LINE', p1: [num(r, 10, 0), num(r, 20, 0)], p2: [num(r, 11, 0), num(r, 21, 0)] };
       case 'CIRCLE': { const rr = num(r, 40, 0); return rr > 0 ? { ...base, t: 'CIRCLE', c: [num(r, 10, 0), num(r, 20, 0)], r: rr } : null; }
@@ -204,7 +241,9 @@ const CadDxf = (() => {
     for (const r of (sections.TABLES || [])) {
       if (r.type !== 'LAYER') continue;
       const nm = (first(r, 2) || '').trim(); if (!nm) continue;
-      const col = num(r, 62, 7), flags = num(r, 70, 0), L = { name: nm, color: ACI_FIX(Math.abs(col)), ltype: 'Continuous', lw: -3, on: col >= 0, frozen: !!(flags & 1), locked: !!(flags & 4), plot: true };
+      const col = num(r, 62, 7), flags = num(r, 70, 0), lwv = num(r, 370, -3), rgb = rgbOf(r);
+      const L = { name: nm, color: ACI_FIX(Math.abs(col)), ltype: ltFromDxf(first(r, 6)) || 'Continuous', lw: lwv >= 0 ? lwNearest(lwv) : -3, on: col >= 0, frozen: !!(flags & 1), locked: !!(flags & 4), plot: num(r, 290, 1) !== 0 };
+      if (rgb) L.rgb = rgb;
       const ex = layers.find((l) => l.name === nm); if (ex) Object.assign(ex, L, { name: nm }); else layers.push(L);
     }
     function ACI_FIX(c) { return c >= 1 && c <= 9 ? c : 7; }
@@ -226,7 +265,7 @@ const CadDxf = (() => {
           const fl = num(r, 70, 0), v = [];
           for (i++; i < list.length && list[i].type !== 'SEQEND'; i++) { if (list[i].type === 'VERTEX') v.push([num(list[i], 10, 0), num(list[i], 20, 0), num(list[i], 42, 0)]); }
           if (fl & (16 | 64)) { skip('POLYLINE (3D mesh)'); continue; }
-          if (v.length >= 2) e = { t: 'LWPOLYLINE', v, closed: !!(fl & 1), layer: (first(r, 8) || '0').trim() || '0', ...(colorOf(r) ? { color: colorOf(r) } : {}) };
+          if (v.length >= 2) e = { t: 'LWPOLYLINE', v, closed: !!(fl & 1), layer: (first(r, 8) || '0').trim() || '0', ...styleOf(r), ...(colorOf(r) ? { color: colorOf(r) } : {}) };
         } else if (r.type === 'INSERT') {
           const bn = (first(r, 2) || '').trim(), B = blocks[bn];
           const sx = num(r, 41, 1), sy = num(r, 42, sx);
