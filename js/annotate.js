@@ -124,7 +124,7 @@ async function openAnnotator(photoId, onDone) {
             <div class="isl-div"></div>
             <button class="tool-btn isl-btn" id="btn-shapes" title="Lines and shapes: line, curve, arrow, circle, box" aria-label="Lines and shapes">${IC.shapes}</button>
             <button class="tool-btn isl-btn" id="btn-num" title="Numbered marker: tap to drop 1, 2, 3 ..." aria-label="Numbered marker">${IC.num}</button>
-            <button class="tool-btn isl-btn" id="btn-text-tool" title="Text — tap for a text box, drag for a text box with an arrow (callout)" aria-label="Text or callout">${IC.text}</button>
+            <button class="tool-btn isl-btn" id="btn-text-tool" title="Text — tap to place a text box, then drag the blue dot (or tap the photo) to add an arrow" aria-label="Text or callout">${IC.text}</button>
             <div class="isl-div"></div>
             <button class="tool-btn isl-btn" id="btn-measure" title="Measure" aria-label="Measure">${IC.measure}</button>
             <button class="tool-btn isl-btn" id="btn-ruler" title="Ruler" aria-label="Ruler">${IC.ruler}</button>
@@ -192,7 +192,8 @@ async function openAnnotator(photoId, onDone) {
         <button class="tool-btn" id="btn-crop-cancel" title="Cancel crop">✕</button>
       </div>
       <div class="annotate-toolbar" id="adjust-toolbar" style="display:none; padding-top:0; padding-bottom:8px;">
-        <span style="color:#fff; font-size:13px; font-weight:600; flex:1;">Drag to reposition, then confirm</span>
+        <span id="adjust-hint" style="color:#fff; font-size:13px; font-weight:600; flex:1;">Drag to reposition, then confirm</span>
+        <button class="tool-btn" id="btn-adjust-text" title="Edit the text" style="display:none; font-weight:700;">Aa</button>
         <button class="tool-btn" id="btn-adjust-done" title="Confirm" style="background:var(--sev-1);">✓</button>
         <button class="tool-btn" id="btn-adjust-cancel" title="Discard">✕</button>
       </div>
@@ -221,9 +222,9 @@ async function openAnnotator(photoId, onDone) {
             <div class="crop-handle" data-corner="br" style="position:absolute; width:24px; height:24px; margin:-12px; border-radius:50%; background:#c81e1e; border:2.5px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.35); touch-action:none;"></div>
           </div>
           <div id="adjust-box-area" style="display:none; position:absolute; border:2px dashed #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.5); touch-action:none; z-index:11;"></div>
-          <div id="adjust-handle-1" class="adjust-handle" style="display:none; position:absolute; width:26px; height:26px; margin:-13px; border-radius:50%; background:#c81e1e; border:2.5px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.35); touch-action:none; z-index:12;"></div>
-          <div id="adjust-handle-2" class="adjust-handle" style="display:none; position:absolute; width:26px; height:26px; margin:-13px; border-radius:50%; background:#1e7dc8; border:2.5px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.35); touch-action:none; z-index:12;"></div>
-          <div id="adjust-handle-3" class="adjust-handle" style="display:none; position:absolute; width:24px; height:24px; margin:-12px; border-radius:50%; background:#e0a72e; border:2.5px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.35); touch-action:none; z-index:12;"></div>
+          <div id="adjust-handle-1" class="adjust-handle" style="display:none; position:absolute; width:44px; height:44px; margin:-22px; border-radius:50%; background:radial-gradient(circle, #c81e1e 0 10px, #fff 10px 13px, rgba(0,0,0,0.35) 13px 14px, transparent 14.5px); touch-action:none; z-index:12;"></div>
+          <div id="adjust-handle-2" class="adjust-handle" style="display:none; position:absolute; width:44px; height:44px; margin:-22px; border-radius:50%; background:radial-gradient(circle, #1e7dc8 0 10px, #fff 10px 13px, rgba(0,0,0,0.35) 13px 14px, transparent 14.5px); touch-action:none; z-index:12;"></div>
+          <div id="adjust-handle-3" class="adjust-handle" style="display:none; position:absolute; width:44px; height:44px; margin:-22px; border-radius:50%; background:radial-gradient(circle, #e0a72e 0 10px, #fff 10px 13px, rgba(0,0,0,0.35) 13px 14px, transparent 14.5px); touch-action:none; z-index:12;"></div>
         </div>
       </div>
       <div id="save-actions" style="display:none;">
@@ -1494,6 +1495,7 @@ async function openAnnotator(photoId, onDone) {
     view.querySelector('#ruler-toolbar').style.display = '';
     const adjustToolbar = view.querySelector('#adjust-toolbar');
     adjustToolbar.style.display = 'none';
+    adjustToolbar.style.height = '';
     adjustToolbar.style.paddingTop = '0';
     view.querySelector('#adjust-handle-1').style.display = 'none';
     view.querySelector('#adjust-handle-2').style.display = 'none';
@@ -1503,9 +1505,17 @@ async function openAnnotator(photoId, onDone) {
 
   function enterAdjustModeCommon() {
     deactivateOtherModes(null);
+    // Measure the main top bar BEFORE hiding it, so the adjust bar takes exactly
+    // the same height and the canvas doesn't jump when we swap back on confirm.
+    const topH = view.querySelector('#main-toolbar').offsetHeight;
     view.querySelector('#main-toolbar').style.display = 'none';
     view.querySelector('#ruler-toolbar').style.display = 'none';
     const adjustToolbar = view.querySelector('#adjust-toolbar');
+    adjustToolbar.style.boxSizing = 'border-box';
+    if (topH > 0) adjustToolbar.style.height = topH + 'px';
+    adjustToolbar.style.alignItems = 'center';
+    view.querySelector('#btn-adjust-text').style.display = 'none';
+    view.querySelector('#adjust-hint').textContent = 'Drag to reposition, then confirm';
     adjustToolbar.style.display = '';
     // Same fix as the calibration/crop toolbars: this row skips its own top padding
     // normally (it sits below the main toolbar, which already reserves that space), but
@@ -1527,6 +1537,8 @@ async function openAnnotator(photoId, onDone) {
     adjustTextAnchor = { x: boxAnchor.x, y: boxAnchor.y };
     adjustTextArrow = arrowTarget ? { x: arrowTarget.x, y: arrowTarget.y } : null;
     adjustTextResult = result;
+    view.querySelector('#btn-adjust-text').style.display = '';
+    view.querySelector('#adjust-hint').textContent = 'Drag the box to move · tap the photo to aim the arrow';
     redrawAdjustPreview();
   }
 
@@ -1636,10 +1648,26 @@ async function openAnnotator(photoId, onDone) {
       if (adjustDragTarget !== measureTarget || e.pointerId !== adjustDragPointerId) return;
       adjustDragTarget = null; adjustDragPointerId = null;
       hideMagnifier();
+      if (adjustMode === 'text' && adjustTextArrow && pointInTextBox(adjustTextArrow)) { adjustTextArrow = null; redrawAdjustPreview(); }
     }
     handle.addEventListener('pointerup', endDrag);
     handle.addEventListener('pointercancel', endDrag);
   }
+  function pointInTextBox(p) {
+    const b = adjustTextBoxRect;
+    return !!b && p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h;
+  }
+  function endCanvasLeaderDrag(e) {
+    if (adjustDragTarget !== 'canvasLeader' || e.pointerId !== adjustDragPointerId) return;
+    adjustDragTarget = null; adjustDragPointerId = null; hideMagnifier();
+  }
+  markCanvas.addEventListener('pointerup', endCanvasLeaderDrag);
+  markCanvas.addEventListener('pointercancel', endCanvasLeaderDrag);
+  view.querySelector('#btn-adjust-text').addEventListener('click', () => {
+    if (adjustMode !== 'text') return;
+    openTextEntrySheet((result) => { adjustTextResult = result; redrawAdjustPreview(); },
+      { text: adjustTextResult.text, bold: adjustTextResult.bold, underline: adjustTextResult.underline, fontSize: adjustTextResult.fontSize });
+  });
   wireAdjustHandle('#adjust-handle-1', 'p1');
   wireAdjustHandle('#adjust-handle-2', 'p2');
   wireAdjustHandle('#adjust-handle-3', 'p3');
@@ -2740,6 +2768,15 @@ async function openAnnotator(photoId, onDone) {
     }
     try { markCanvas.setPointerCapture(e.pointerId); } catch (err) { /* not critical */ }
     if (cropMode) { e.preventDefault(); return; } // crop handles/border have their own listeners with stopPropagation
+    if (adjustMode === 'text') {
+      // Tap or drag anywhere on the photo (outside the box) to aim the leader; drop it on the box to remove it.
+      adjustDragTarget = 'canvasLeader'; adjustDragPointerId = e.pointerId;
+      const p = canvasPoint(e);
+      adjustTextArrow = pointInTextBox(p) ? null : p;
+      showMagnifier(p, e.clientX, e.clientY);
+      redrawAdjustPreview();
+      e.preventDefault(); return;
+    }
     if (adjustMode) { e.preventDefault(); return; } // adjust handles/box-area have their own listeners with stopPropagation
     if (!selectMode && !textMode && !measureMode && !calibrating && !annotationLayerActive && (activeLayer().lock || !activeLayer().vis)) {
       toast(activeLayer().lock ? 'This layer is locked — unlock it in Layers, or pick another layer' : 'This layer is hidden — show it in Layers, or pick another layer');
@@ -2886,6 +2923,13 @@ async function openAnnotator(photoId, onDone) {
       }
     }
     if (cropMode) { e.preventDefault(); return; }
+    if (adjustMode === 'text' && adjustDragTarget === 'canvasLeader' && e.pointerId === adjustDragPointerId) {
+      const p = canvasPoint(e);
+      adjustTextArrow = pointInTextBox(p) ? null : p;
+      showMagnifier(p, e.clientX, e.clientY);
+      redrawAdjustPreview();
+      e.preventDefault(); return;
+    }
     if (adjustMode) { e.preventDefault(); return; }
     if (calibrating) {
       if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
