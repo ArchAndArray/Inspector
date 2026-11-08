@@ -110,7 +110,7 @@ async function openAnnotator(photoId, onDone) {
           <span id="zoom-hint">Two fingers to zoom · two-finger tap to undo</span>
         </div>
         <button class="atb2-chip" id="btn-layers" title="Layers and tracing paper" aria-label="Layers">${IC.layers}<span>Layers</span></button>
-        <button class="atb2-chip" id="btn-layer-toggle" title="Choose what you are editing: pen marks, or text and measurements">Pen layer</button>
+        <button class="atb2-chip" id="btn-layer-toggle" style="display:none;" title="Choose what you are editing: pen marks, or text and measurements">Pen layer</button>
         <button class="atb2-chip atb2-primary" id="btn-done" title="Save or discard">Done ${IC.down}</button>
       </div>
       <div id="ruler-toolbar" class="atb2-float">
@@ -153,7 +153,7 @@ async function openAnnotator(photoId, onDone) {
           <div class="strip-row" id="color-row-fixed">
             ${ANNOTATE_COLORS.map((c, i) => `<div class="color-dot ${i === 0 ? 'active' : ''}" data-color="${c}" style="background:${c};"></div>`).join('')}
           </div>
-          <div class="strip-row" id="color-row-custom" title="Hold an empty circle to save your own colour">
+          <div class="strip-row" id="color-row-custom" title="Tap a + circle to save your own colour; hold a saved one to change it">
             ${[0, 1, 2, 3, 4].map((i) => `<div class="color-dot color-dot-custom" data-custom-index="${i}" style="background:#e8e9ec; border:1.5px dashed #b8bcc4;"></div>`).join('')}
           </div>
           <div class="strip-row">
@@ -199,6 +199,7 @@ async function openAnnotator(photoId, onDone) {
       <div class="annotate-canvas-wrap" id="canvas-wrap">
         <div id="canvas-stack" style="position:relative;">
           <canvas id="photo-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%;"></canvas>
+          <canvas id="annotation-under-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%; position:absolute; top:0; left:0; pointer-events:none;"></canvas>
           <canvas id="mark-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%; position:absolute; top:0; left:0;"></canvas>
           <canvas id="annotation-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%; position:absolute; top:0; left:0;"></canvas>
           <canvas id="preview-canvas" width="${cw}" height="${ch}" style="display:block; width:100%; height:100%; position:absolute; top:0; left:0; pointer-events:none;"></canvas>
@@ -236,6 +237,8 @@ async function openAnnotator(photoId, onDone) {
   const photoCanvas = view.querySelector('#photo-canvas');
   const markCanvas = view.querySelector('#mark-canvas');
   const annotationCanvas = view.querySelector('#annotation-canvas');
+  const underCanvas = view.querySelector('#annotation-under-canvas'); // text / measurements / photos set to sit BEHIND the pen marks
+  const underCtx = underCanvas.getContext('2d');
   const previewCanvas = view.querySelector('#preview-canvas');
   const previewCtx = previewCanvas.getContext('2d');
   const rulerVisual = view.querySelector('#ruler-visual');
@@ -320,19 +323,20 @@ async function openAnnotator(photoId, onDone) {
   let adjustEditingObjectId = null; // set when adjust-mode is editing an existing object rather than placing a new one
 
   async function renderAnnotationLayer() {
-    annotationCtx.clearRect(0, 0, cw, ch);
+    annotationCtx.clearRect(0, 0, cw, ch); underCtx.clearRect(0, 0, cw, ch);
     for (const obj of annotationObjects) {
+      const tgt = obj.behind ? underCtx : annotationCtx;
       if (adjustEditingObjectId === obj.id) continue; // being actively edited — drawn on the preview layer instead, not here
       if (obj.kind === 'text') {
-        drawTextBoxOn(annotationCtx, obj.x, obj.y, obj.text, { bold: obj.bold, underline: obj.underline, fontSize: obj.fontSize });
+        drawTextBoxOn(tgt, obj.x, obj.y, obj.text, { bold: obj.bold, underline: obj.underline, fontSize: obj.fontSize });
         if (obj.leaderX != null) {
           const box = { centerX: obj.x + obj._w / 2, centerY: obj.y + obj._h / 2, w: obj._w, h: obj._h };
-          drawLeaderOn(annotationCtx, box, obj.leaderX, obj.leaderY, obj.color);
+          drawLeaderOn(tgt, box, obj.leaderX, obj.leaderY, obj.color);
         }
       } else if (obj.kind === 'measure') {
         const prevColor = currentColor;
         currentColor = obj.color;
-        drawMeasureArrowOn(annotationCtx, obj.x1, obj.y1, obj.x2, obj.y2);
+        drawMeasureArrowOn(tgt, obj.x1, obj.y1, obj.x2, obj.y2);
         currentColor = prevColor;
       } else if (obj.kind === 'image') {
         // Bitmap cached in-memory on the object itself after first load, so repositioning
@@ -343,7 +347,7 @@ async function openAnnotator(photoId, onDone) {
           if (!rec) continue; // referenced photo no longer exists — skip rather than error
           try { obj._bitmapCache = await loadBitmapCorrected(rec.originalBlob); } catch (err) { continue; }
         }
-        annotationCtx.drawImage(obj._bitmapCache, obj.x, obj.y, obj.w, obj.h);
+        tgt.drawImage(obj._bitmapCache, obj.x, obj.y, obj.w, obj.h);
       }
     }
   }
@@ -413,7 +417,6 @@ async function openAnnotator(photoId, onDone) {
         const normalized = await normalizeImageFile(files[0]);
         const rec = await DB.addPhoto({ kind: 'annotationImage', inspectionId: photo.inspectionId, originalBlob: normalized });
         const bitmap = await loadBitmapCorrected(normalized);
-        setAnnotationLayerActive(true);
         // Default size: a modest fraction of the canvas, centered, preserving the
         // inserted photo's own aspect ratio rather than distorting it to a fixed box.
         const naturalW = bitmap.width || bitmap.naturalWidth;
@@ -448,6 +451,11 @@ async function openAnnotator(photoId, onDone) {
           <div class="sheet-handle"></div>
           <h2>${label}</h2>
           <button class="btn btn-primary btn-block" id="btn-ao-edit">Edit</button>
+          <div style="display:flex; gap:10px; margin-top:10px;">
+            <button class="btn btn-secondary" id="btn-ao-front" style="flex:1;" title="Draw this on top of the other text, measurements and photos">Bring to front</button>
+            <button class="btn btn-secondary" id="btn-ao-back" style="flex:1;" title="Draw this underneath the other text, measurements and photos">Send to back</button>
+          </div>
+          <button class="btn btn-secondary btn-block" id="btn-ao-behind" style="margin-top:10px;" title="Normally text sits above every pen mark. Turn this on to put it underneath them instead.">${obj.behind ? 'Put above the pen marks' : 'Put behind the pen marks'}</button>
           <button class="btn btn-danger btn-block" id="btn-ao-delete" style="margin-top:10px;">Delete</button>
           <button class="btn btn-ghost btn-block" id="btn-ao-cancel" style="margin-top:10px;">Cancel</button>
         </div>
@@ -462,6 +470,15 @@ async function openAnnotator(photoId, onDone) {
       if (obj.kind === 'image' && obj.photoBlobId) DB.delete('photos', obj.photoBlobId).catch(() => {});
       renderAnnotationLayer();
     });
+    const reorder = (toFront) => {
+      sheet.remove();
+      annotationObjects = annotationObjects.filter((o) => o.id !== obj.id);
+      if (toFront) annotationObjects.push(obj); else annotationObjects.unshift(obj);
+      editedSinceOpen = true; renderAnnotationLayer();
+    };
+    sheet.querySelector('#btn-ao-behind').addEventListener('click', () => { sheet.remove(); obj.behind = !obj.behind; editedSinceOpen = true; renderAnnotationLayer(); });
+    sheet.querySelector('#btn-ao-front').addEventListener('click', () => reorder(true));
+    sheet.querySelector('#btn-ao-back').addEventListener('click', () => reorder(false));
     sheet.querySelector('#btn-ao-edit').addEventListener('click', () => {
       sheet.remove();
       startEditingAnnotationObject(obj);
@@ -659,6 +676,7 @@ async function openAnnotator(photoId, onDone) {
       const c = customColors[i];
       dot.style.background = c || '#e8e9ec';
       dot.style.border = c ? 'none' : '1.5px dashed #b8bcc4';
+      dot.textContent = c ? '' : '+'; dot.title = c ? 'Tap to use · hold to change' : 'Tap to add your own colour';
     });
   }
   renderCustomColorRow();
@@ -703,7 +721,11 @@ async function openAnnotator(photoId, onDone) {
   view.querySelectorAll('.color-dot-custom').forEach((dot) => {
     const i = Number(dot.dataset.customIndex);
     wireTapAndHold(dot,
-      () => selectColor(dot, customColors[i]),
+      () => {
+        if (customColors[i]) { selectColor(dot, customColors[i]); return; }
+        // an empty slot: tap to add a colour (no hidden long-press needed)
+        openColorEditSheet('#c81e1e', (newColor) => { customColors[i] = newColor; saveCustomColors(customColors); renderCustomColorRow(); selectColor(dot, newColor); });
+      },
       () => openColorEditSheet(customColors[i] || '#c81e1e', (newColor) => {
         customColors[i] = newColor;
         saveCustomColors(customColors);
@@ -1571,7 +1593,7 @@ async function openAnnotator(photoId, onDone) {
   // both the "place new" and "edit existing" paths converge, so they can't drift apart.
   function commitAnnotationObject(obj) {
     const idx = annotationObjects.findIndex((o) => o.id === obj.id);
-    if (idx >= 0) annotationObjects[idx] = obj;
+    if (idx >= 0) { if (obj.behind === undefined && annotationObjects[idx].behind) obj.behind = true; annotationObjects[idx] = obj; } // editing keeps its stacking choice
     else annotationObjects.push(obj);
     adjustEditingObjectId = null;
     adjustEditingObjectColor = null;
@@ -1988,7 +2010,6 @@ async function openAnnotator(photoId, onDone) {
     if (measureMode) {
       deactivateOtherModes('measure');
       e.currentTarget.classList.add('active');
-      setAnnotationLayerActive(true); // per an explicit decision: starting to place a Measure auto-switches to the Annotation layer
     } else {
       e.currentTarget.classList.remove('active');
     }
@@ -2185,9 +2206,26 @@ async function openAnnotator(photoId, onDone) {
     for (const h of Ink.handles(s, 38 * k)) { const d = Math.hypot(h.x - p.x, h.y - p.y); if (d <= bd) { bd = d; best = h.id; } }
     return best;
   }
+  // Is any of this stroke still showing inside the region once later eraser strokes on its layer are applied?
+  function strokeVisibleIn(st, rx0, ry0, rx1, ry1) {
+    const layer = layerOf(st); let i0 = hist.strokes.indexOf(st);
+    if (i0 < 0) i0 = hist.strokes.findIndex((q) => q.id === st.id);
+    const erasers = [];
+    for (let i = i0 + 1; i < hist.strokes.length; i++) { const q = hist.strokes[i]; if (q.k === 'erase' && layerOf(q) === layer) erasers.push(q); }
+    if (!erasers.length) return true;
+    const b = Ink.bbox(st), x0 = Math.max(rx0, b.x0), y0 = Math.max(ry0, b.y0), x1 = Math.min(rx1, b.x1), y1 = Math.min(ry1, b.y1);
+    if (x1 <= x0 || y1 <= y0) return false;
+    const w = x1 - x0, h = y1 - y0, sc = Math.min(1, 220 / Math.max(w, h)), sw = Math.max(1, Math.ceil(w * sc)), sh = Math.max(1, Math.ceil(h * sc));
+    const c = document.createElement('canvas'); c.width = sw; c.height = sh; const cx = c.getContext('2d');
+    cx.setTransform(sc, 0, 0, sc, -x0 * sc, -y0 * sc);
+    Ink.renderStroke(cx, st); for (const e of erasers) Ink.renderStroke(cx, e);
+    const d = cx.getImageData(0, 0, sw, sh).data;
+    for (let i = 3; i < d.length; i += 4) if (d[i] > 12) return true;
+    return false;
+  }
   function hitStroke(p) {
     const r = 12 * pxScale();
-    for (let i = hist.strokes.length - 1; i >= 0; i--) { const st = hist.strokes[i]; if (st.k !== 'erase' && layerOf(st).vis && !layerOf(st).lock && Ink.hit(st, p.x, p.y, r)) return st; }
+    for (let i = hist.strokes.length - 1; i >= 0; i--) { const st = hist.strokes[i]; if (st.k !== 'erase' && layerOf(st).vis && !layerOf(st).lock && Ink.hit(st, p.x, p.y, r) && strokeVisibleIn(st, p.x - r - st.w, p.y - r - st.w, p.x + r + st.w, p.y + r + st.w)) return st; }
     return null;
   }
   function syncSelectButton() { view.querySelector('#btn-select').classList.toggle('active', selectMode); }
@@ -2210,6 +2248,8 @@ async function openAnnotator(photoId, onDone) {
   function cancelSelDrag() { if (selDrag && selDrag.s0) selTemp(selDrag.s0); selDrag = null; renderMarks(); }
   function selPointerDown(p) {
     const hid = selId && hitHandle(p);
+    const aoHit = !hid && hitTestAnnotationObjects(p);
+    if (aoHit) { setSel([]); selDrag = null; updateSelBar(); drawSelection(); openAnnotationObjectEditor(aoHit); return; }
     if (hid) selDrag = { kind: 'h', id: hid, s0: selStroke(), sx: p.x, sy: p.y, moved: false };
     else {
       const st = hitStroke(p);
@@ -2242,7 +2282,7 @@ async function openAnnotator(photoId, onDone) {
     if (d.kind === 'box') {
       if (d.moved && selBox) {
         const x0 = Math.min(selBox.x0, selBox.x1), x1 = Math.max(selBox.x0, selBox.x1), y0 = Math.min(selBox.y0, selBox.y1), y1 = Math.max(selBox.y0, selBox.y1);
-        setSel(hist.strokes.filter((q) => { if (q.k === 'erase' || !layerOf(q).vis || layerOf(q).lock) return false; const b = Ink.bbox(q); return b.x1 >= x0 && b.x0 <= x1 && b.y1 >= y0 && b.y0 <= y1; }).map((q) => q.id));
+        setSel(hist.strokes.filter((q) => { if (q.k === 'erase' || !layerOf(q).vis || layerOf(q).lock) return false; const b = Ink.bbox(q); return b.x1 >= x0 && b.x0 <= x1 && b.y1 >= y0 && b.y0 <= y1 && strokeVisibleIn(q, x0, y0, x1, y1); }).map((q) => q.id));
       } else setSel([]);
       selBox = null; updateSelBar(); drawSelection(); return;
     }
@@ -2535,7 +2575,6 @@ async function openAnnotator(photoId, onDone) {
     if (textMode) {
       deactivateOtherModes('text');
       e.currentTarget.classList.add('active');
-      setAnnotationLayerActive(true); // per an explicit decision: starting to place Text auto-switches to the Annotation layer
     } else {
       e.currentTarget.classList.remove('active');
     }
@@ -2801,6 +2840,8 @@ async function openAnnotator(photoId, onDone) {
         touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
         if (touches.size >= 2) { textPressPoint = null; clearPreview(); updatePinch(); e.preventDefault(); return; }
       }
+      const aoHit = hitTestAnnotationObjects(canvasPoint(e));
+      if (aoHit && aoHit.kind === 'text') { textPressPoint = null; openAnnotationObjectEditor(aoHit); e.preventDefault(); return; }
       textPressPoint = canvasPoint(e);
       textPointerId = e.pointerId;
       showMagnifier(textPressPoint, e.clientX, e.clientY);
@@ -3241,6 +3282,7 @@ async function openAnnotator(photoId, onDone) {
       const mergeCtx = mergeCanvas.getContext('2d');
       if (bg.op < 1 || !bg.vis) { mergeCtx.fillStyle = '#ffffff'; mergeCtx.fillRect(0, 0, cw, ch); }
       if (bg.vis) { mergeCtx.globalAlpha = bg.op; mergeCtx.drawImage(photoCanvas, 0, 0); mergeCtx.globalAlpha = 1; }
+      mergeCtx.drawImage(underCanvas, 0, 0); // anything set to sit behind the pen marks
       mergeCtx.drawImage(markCanvas, 0, 0);
       mergeCtx.drawImage(annotationCanvas, 0, 0); // annotation layer always composites on top, per its "always on top" requirement
       mergeCanvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.92);

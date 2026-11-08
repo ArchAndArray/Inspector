@@ -654,3 +654,4 @@ button {
 #annotate-view .lp-name small { color: #aab2c0; font-weight: 500; font-size: 12px; }
 #annotate-view .lp-op { width: 84px; flex: none; }
 #annotate-view .sel-count { align-self: center; padding: 0 8px; color: #aab2c0; font: 600 14px system-ui, sans-serif; white-space: nowrap; }
+#annotate-view .color-dot-custom { display: flex; align-items: center; justify-content: center; color: #6b7280; font: 700 18px system-ui, sans-serif; line-height: 1; }
