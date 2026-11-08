@@ -522,6 +522,7 @@ const DB = {
     // that layer existing as structured data instead of pixels in the first place.
     existing.editableMarkBlob = null;
     existing.editableStrokes = null;
+    existing.editableMeta = null;
     if (annotationObjects) existing.annotationObjects = annotationObjects;
     return this.put('photos', existing);
   },
@@ -529,12 +530,13 @@ const DB = {
   // setAnnotatedBlob) but also keeps the raw, unflattened mark layer so a later visit to
   // the annotator can reload it and continue editing individual marks rather than starting
   // from an image with everything already baked in.
-  async saveEditableAnnotation(photoId, mergedBlob, markBlob, annotationObjects, strokesJson) {
+  async saveEditableAnnotation(photoId, mergedBlob, markBlob, annotationObjects, strokesJson, meta) {
     const existing = await this.get('photos', photoId);
     if (!existing) throw new Error('Photo not found');
     existing.annotatedBlob = mergedBlob;
     existing.editableMarkBlob = markBlob;
     existing.editableStrokes = strokesJson || null;
+    existing.editableMeta = meta || null; // layers + background fade (tracing paper)
     if (annotationObjects) existing.annotationObjects = annotationObjects;
     return this.put('photos', existing);
   },

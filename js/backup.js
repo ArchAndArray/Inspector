@@ -27,7 +27,9 @@ async function exportRawDataBackup() {
       payload.stores[name] = await Promise.all(all.map(async (p) => ({
         ...p,
         originalBlob: p.originalBlob ? { __blob: true, mimeType: p.originalBlob.type, dataUrl: await blobToDataURLBackup(p.originalBlob) } : null,
-        annotatedBlob: p.annotatedBlob ? { __blob: true, mimeType: p.annotatedBlob.type, dataUrl: await blobToDataURLBackup(p.annotatedBlob) } : null
+        annotatedBlob: p.annotatedBlob ? { __blob: true, mimeType: p.annotatedBlob.type, dataUrl: await blobToDataURLBackup(p.annotatedBlob) } : null,
+        // the "saved, keep editable" mark layer; without this a restored sketch lost its marks layer
+        editableMarkBlob: p.editableMarkBlob ? { __blob: true, mimeType: p.editableMarkBlob.type, dataUrl: await blobToDataURLBackup(p.editableMarkBlob) } : null
       })));
     } else if (name === 'cadAssets') {
       payload.stores[name] = await Promise.all(all.map(async (a) => ({
@@ -78,6 +80,12 @@ async function importRawDataBackup(file) {
         }
         if (clone.annotatedBlob && clone.annotatedBlob.__blob) {
           clone.annotatedBlob = await dataURLToBlobBackup(clone.annotatedBlob.dataUrl);
+        }
+        if (clone.editableMarkBlob && clone.editableMarkBlob.__blob) {
+          clone.editableMarkBlob = await dataURLToBlobBackup(clone.editableMarkBlob.dataUrl);
+        } else if (clone.editableMarkBlob && !(clone.editableMarkBlob instanceof Blob)) {
+          // an older backup stored it as an empty object: fall back to the flattened picture, and drop the stroke list too so marks are not drawn twice
+          clone.editableMarkBlob = null; clone.editableStrokes = null; clone.editableMeta = null;
         }
       }
       if (name === 'cadAssets' && clone.blob && clone.blob.__blob) clone.blob = await dataURLToBlobBackup(clone.blob.dataUrl);

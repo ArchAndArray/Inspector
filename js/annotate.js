@@ -92,6 +92,8 @@ async function openAnnotator(photoId, onDone) {
       more: mk('<path d="M5 12h.01 M12 12h.01 M19 12h.01" stroke-width="3.2"/>'), photo: mk('<path d="M4 7h11v11H4z M4 15l3-3 3 3 M19 3v6 M16 6h6"/>'),
       grid: mk('<path d="M4 4h16v16H4z M4 9.3h16 M4 14.7h16 M9.3 4v16 M14.7 4v16"/>'), sliders: mk('<path d="M4 7h10 M18 7h2 M4 17h2 M10 17h10 M14 5v4 M6 15v4"/>'),
       grip: mk('<path d="M8 7h.01 M16 7h.01 M8 12h.01 M16 12h.01 M8 17h.01 M16 17h.01" stroke-width="3"/>'),
+      arrow: mk('<path d="M5 19L18 6 M9 6h9v9"/>'), ellipse: mk('<ellipse cx="12" cy="12" rx="8.5" ry="6"/>'), rect: mk('<rect x="4" y="6" width="16" height="12" rx="1"/>'),
+      num: mk('<circle cx="12" cy="12" r="8.5"/><path d="M10.5 9.5L12.6 8v8"/>'), eye: mk('<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>'), eyeoff: mk('<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><path d="M4 4l16 16"/>'), lock: mk('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>'), unlock: mk('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7-2.6"/>'), up: mk('<path d="M6 15l6-6 6 6"/>'), trash: mk('<path d="M5 7h14 M9 7V4h6v3 M7 7l1 13h8l1-13"/>'), plus: mk('<path d="M12 5v14M5 12h14"/>'), pencil: mk('<path d="M4 20l1-4L16 5l3 3L8 19z"/>'), layers: mk('<path d="M12 3l9 5-9 5-9-5z M3 13l9 5 9-5"/>'), bucket: mk('<path d="M6 11l6-6 7 7-6 6a2 2 0 0 1-3 0z M5 12h14"/><path d="M20 15c1 1.6 1.6 2.6 1.6 3.4a1.6 1.6 0 0 1-3.2 0c0-.8.6-1.8 1.6-3.4z"/>'), select: mk('<path d="M6 3l12 8-5.5 1.5L9.5 18z"/>'), shapes: mk('<rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/><circle cx="15.5" cy="15.5" r="5"/>'),
       widths: mk('<path d="M4 6h16 M4 12h16 M4 18h16" stroke-width="1.5"/><path d="M4 12h16" stroke-width="3.5"/><path d="M4 18h16" stroke-width="5.5"/>')
     };
   })();
@@ -107,6 +109,7 @@ async function openAnnotator(photoId, onDone) {
           <span id="ruler-hint" style="display:none;">Two fingers: move &amp; rotate · pull the dot to resize</span>
           <span id="zoom-hint">Two fingers to zoom · two-finger tap to undo</span>
         </div>
+        <button class="atb2-chip" id="btn-layers" title="Layers and tracing paper" aria-label="Layers">${IC.layers}<span>Layers</span></button>
         <button class="atb2-chip" id="btn-layer-toggle" title="Choose what you are editing: pen marks, or text and measurements">Pen layer</button>
         <button class="atb2-chip atb2-primary" id="btn-done" title="Save or discard">Done ${IC.down}</button>
       </div>
@@ -116,10 +119,12 @@ async function openAnnotator(photoId, onDone) {
           <div class="isl-items" id="isl-items">
             <button class="tool-btn isl-btn" id="btn-pen-tool" title="Pen" aria-label="Pen">${IC.pen}</button>
             <button class="tool-btn isl-btn" id="btn-erase" title="Eraser" aria-label="Eraser">${IC.eraser}</button>
+            <button class="tool-btn isl-btn" id="btn-bucket" title="Fill: tap inside a closed outline to colour it in" aria-label="Fill area">${IC.bucket}</button>
+            <button class="tool-btn isl-btn" id="btn-select" title="Select: tap a drawing to move, resize, turn, copy or delete it. Drag on empty space to select several." aria-label="Select">${IC.select}</button>
             <div class="isl-div"></div>
-            <button class="tool-btn isl-btn" id="btn-straight-line" title="Straight line" aria-label="Straight line">${IC.line}</button>
-            <button class="tool-btn isl-btn" id="btn-arc" title="Curved line" aria-label="Curved line">${IC.arc}</button>
-            <button class="tool-btn isl-btn" id="btn-text-tool" title="Text" aria-label="Text">${IC.text}</button>
+            <button class="tool-btn isl-btn" id="btn-shapes" title="Lines and shapes: line, curve, arrow, circle, box" aria-label="Lines and shapes">${IC.shapes}</button>
+            <button class="tool-btn isl-btn" id="btn-num" title="Numbered marker: tap to drop 1, 2, 3 ..." aria-label="Numbered marker">${IC.num}</button>
+            <button class="tool-btn isl-btn" id="btn-text-tool" title="Text — tap for a text box, drag for a text box with an arrow (callout)" aria-label="Text or callout">${IC.text}</button>
             <div class="isl-div"></div>
             <button class="tool-btn isl-btn" id="btn-measure" title="Measure" aria-label="Measure">${IC.measure}</button>
             <button class="tool-btn isl-btn" id="btn-ruler" title="Ruler" aria-label="Ruler">${IC.ruler}</button>
@@ -130,8 +135,16 @@ async function openAnnotator(photoId, onDone) {
             <button class="tool-btn isl-btn" id="btn-more" title="More: photo, grid, calibrate, pen settings" aria-label="More">${IC.more}</button>
           </div>
         </div>
+        <div class="more-pop" id="shapes-pop" style="display:none;">
+          <button class="more-item" id="btn-straight-line">${IC.line}<span>Straight line</span></button>
+          <button class="more-item" id="btn-arc">${IC.arc}<span>Curved line</span></button>
+          <button class="more-item" id="btn-shape-arrow">${IC.arrow}<span>Arrow</span></button>
+          <button class="more-item" id="btn-shape-ellipse">${IC.ellipse}<span>Circle / oval</span></button>
+          <button class="more-item" id="btn-shape-rect">${IC.rect}<span>Box</span></button>
+        </div>
         <div class="more-pop" id="more-pop" style="display:none;">
           <button class="more-item" id="btn-insert-photo">${IC.photo}<span>Insert photo</span></button>
+          <button class="more-item" id="btn-snap">${IC.grid}<span>Snap: off</span></button>
           <button class="more-item" id="btn-grid">${IC.grid}<span>Grid</span></button>
           <button class="more-item" id="btn-calibrate">${IC.measure}<span>Calibrate scale</span></button>
           <button class="more-item" id="btn-pen-settings">${IC.sliders}<span>Pen settings</span></button>
@@ -152,11 +165,18 @@ async function openAnnotator(photoId, onDone) {
               <svg width="20" height="16" viewBox="0 0 24 16" xmlns="http://www.w3.org/2000/svg"><line x1="2" y1="8" x2="22" y2="8" stroke="currentColor" stroke-width="2.4" stroke-dasharray="5,3.5" stroke-linecap="round"/></svg>
             </button>
           </div>
+          <div class="strip-row" id="marker-row" style="display:none;">
+            <span class="strip-lab">Marker number</span>
+            <button class="tool-btn" id="mk-minus" aria-label="Previous number">−</button>
+            <span class="strip-num" id="mk-label">1</span>
+            <button class="tool-btn" id="mk-plus" aria-label="Next number">+</button>
+          </div>
           <div class="strip-row strip-types">
             <button class="tool-btn pen-type-btn active" data-pentype="pen" title="Pencil">Pencil</button>
             <button class="tool-btn pen-type-btn" data-pentype="airbrush" title="Airbrush">Air</button>
             <button class="tool-btn pen-type-btn" data-pentype="fountain" title="Fountain pen">Ink</button>
             <button class="tool-btn pen-type-btn" data-pentype="smoothing" title="Smoothing pen">Smooth</button>
+            <button class="tool-btn pen-type-btn" data-pentype="highlighter" title="Highlighter (see-through)">Highlight</button>
           </div>
         </div>
       </div>
@@ -233,19 +253,52 @@ async function openAnnotator(photoId, onDone) {
   const baseCtx = baseCanvas.getContext('2d');
   const hist = Ink.makeHistory(Ink.unpack(photo.editableStrokes));
   let editedSinceOpen = false, marksRenderedOnce = false;
+  let shapeMode = null, shapeStart = null, shapePointerId = null, markerOverride = null; // arrow | ellipse | rect | num
+  // Layers: every drawing belongs to one layer (stroke.ly). The photo / paper sits underneath and can be faded (tracing paper).
+  const meta0 = photo.editableMeta || {};
+  let layers = (Array.isArray(meta0.layers) && meta0.layers.length ? meta0.layers : [{ id: 'l1', name: 'Layer 1' }]).map((l) => ({ id: l.id, name: l.name || 'Layer', vis: l.vis !== false, lock: !!l.lock, op: l.op == null ? 1 : l.op }));
+  let activeLayerId = layers.some((l) => l.id === meta0.active) ? meta0.active : layers[layers.length - 1].id;
+  const bg = { vis: !(meta0.bg && meta0.bg.vis === false), op: meta0.bg && meta0.bg.op != null ? meta0.bg.op : 1 };
+  const layerOf = (s) => layers.find((l) => l.id === s.ly) || layers[0];
+  const activeLayer = () => layers.find((l) => l.id === activeLayerId) || layers[0];
+  const simpleLayers = () => layers.length === 1 && layers[0].vis && layers[0].op === 1;
+  let layerTmp = null;
+  let bucketMode = false, bucketStart = null, bucketPid = null, selIds = [], selBox = null;
+  let selectMode = false, selId = null, selDrag = null, selPointerId = null, selRaf = 0, snapOn = false; // Select tool + snapping
   function renderMarks() {
     if (marksRenderedOnce) editedSinceOpen = true; marksRenderedOnce = true;
     ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalCompositeOperation = 'source-over';
-    ctx.clearRect(0, 0, cw, ch); ctx.drawImage(baseCanvas, 0, 0); ctx.restore();
-    Ink.renderAll(ctx, hist.strokes);
+    ctx.clearRect(0, 0, cw, ch);
+    if (simpleLayers()) { ctx.drawImage(baseCanvas, 0, 0); ctx.restore(); Ink.renderAll(ctx, hist.strokes); }
+    else {
+      // each layer is drawn on its own, so the eraser only rubs out its own layer, then they are stacked bottom to top
+      if (!layerTmp || layerTmp.width !== cw || layerTmp.height !== ch) { layerTmp = document.createElement('canvas'); layerTmp.width = cw; layerTmp.height = ch; }
+      const tc = layerTmp.getContext('2d');
+      layers.forEach((l, i) => {
+        if (!l.vis) return;
+        tc.setTransform(1, 0, 0, 1, 0, 0); tc.globalAlpha = 1; tc.globalCompositeOperation = 'source-over'; tc.clearRect(0, 0, cw, ch);
+        if (i === 0) tc.drawImage(baseCanvas, 0, 0);
+        Ink.renderAll(tc, hist.strokes.filter((st) => layerOf(st) === l));
+        ctx.globalAlpha = l.op; ctx.drawImage(layerTmp, 0, 0);
+      });
+      ctx.globalAlpha = 1; ctx.restore();
+    }
     updateUndoButtons();
+    if (selectMode) refreshSelection();
   }
   function updateUndoButtons() {
     const u = view.querySelector('#btn-undo'), r = view.querySelector('#btn-redo');
     if (u) u.style.opacity = hist.strokes.length ? '1' : '0.45';
     if (r) r.style.opacity = hist.redoCount ? '1' : '0.45';
+    updateMarkerLabel();
   }
-  function addStroke(s) { hist.add(s); updateUndoButtons(); return s; }
+  function addStroke(s) {
+    if (!s.ly) s.ly = activeLayerId;
+    hist.add(s); updateUndoButtons();
+    // with several layers, what was just drawn live on top is re-stacked in its proper layer
+    if (!simpleLayers()) requestAnimationFrame(renderMarks);
+    return s;
+  }
   // ---- pen preferences (remembered on this iPad) ----
   const INK_PREFS_KEY = 'annotate.inkPrefs';
   const inkPrefs = Object.assign({ streamline: 0.3, curve: 'normal', finger: 'auto', twoTapUndo: true, holdStraighten: true }, (() => { try { return JSON.parse(localStorage.getItem(INK_PREFS_KEY) || '{}'); } catch (err) { return {}; } })());
@@ -504,7 +557,7 @@ async function openAnnotator(photoId, onDone) {
   let currentLineStyle = 'solid';
   function getLineDashArray() {
     if (currentLineStyle === 'solid') return [];
-    if (!arcMode && !straightLineMode) return [];
+    if (!arcMode && !straightLineMode && !(shapeMode && shapeMode !== 'num')) return [];
     const ref = Math.min(cw, ch);
     const unit = Math.max(8, ref * 0.012, currentWidth * 1.8);
     const patterns = {
@@ -526,7 +579,7 @@ async function openAnnotator(photoId, onDone) {
   // (pick a style, draw with the Pen, see no effect, wonder why).
   function updateLineStyleButtonVisibility() {
     const btn = view.querySelector('#btn-line-style');
-    btn.style.display = (arcMode || straightLineMode) ? '' : 'none';
+    btn.style.display = (arcMode || straightLineMode || (shapeMode && shapeMode !== 'num')) ? '' : 'none';
   }
 
   view.querySelector('#btn-line-style').addEventListener('click', () => {
@@ -832,6 +885,7 @@ async function openAnnotator(photoId, onDone) {
     updateRulerVisual();
     updateRulerHandle();
     if (gridState) updateGridVisual();
+    if (selectMode) refreshSelection();
     if (cropMode) { cropRect = { x: cw * 0.1, y: ch * 0.1, w: cw * 0.8, h: ch * 0.8 }; updateCropVisual(); }
   });
 
@@ -1259,6 +1313,12 @@ async function openAnnotator(photoId, onDone) {
       view.querySelector('#btn-straight-line').classList.remove('active');
       straightLineStart = null;
     }
+    if (shapeMode && except !== 'shape:' + shapeMode) {
+      shapeMode = null; shapeStart = null;
+      syncShapeButtons(); updateLineStyleButtonVisibility();
+    }
+    if (except !== 'select' && selectMode) exitSelect();
+    if (except !== 'bucket' && bucketMode) exitBucket();
     if (except !== 'text' && textMode) {
       textMode = false;
       view.querySelector('#btn-text-tool').classList.remove('active');
@@ -1993,6 +2053,340 @@ async function openAnnotator(photoId, onDone) {
     updateLineStyleButtonVisibility();
   });
 
+  // ---- Shape tools: arrow, circle/oval and box (drag), numbered marker (tap or drag to place) ----
+  function syncShapeButtons() {
+    const ids = { arrow: '#btn-shape-arrow', ellipse: '#btn-shape-ellipse', rect: '#btn-shape-rect', num: '#btn-num' };
+    for (const k in ids) view.querySelector(ids[k]).classList.toggle('active', shapeMode === k);
+    view.querySelector('#marker-row').style.display = shapeMode === 'num' ? '' : 'none';
+    updateMarkerLabel();
+  }
+  function nextMarkerNumber() {
+    if (markerOverride != null) return markerOverride;
+    let m = 0; for (const st of hist.strokes) if (st.k === 'num' && st.n > m) m = st.n;
+    return m + 1;
+  }
+  function updateMarkerLabel() { const l = view.querySelector('#mk-label'); if (l) l.textContent = String(nextMarkerNumber()); }
+  function setShapeMode(kind) {
+    const on = shapeMode !== kind;
+    if (on) deactivateOtherModes('shape:' + kind);
+    shapeMode = on ? kind : null;
+    if (on) {
+      if (eraseMode) { eraseMode = false; view.querySelector('#btn-erase').classList.remove('active'); }
+      if (annotationLayerActive) setAnnotationLayerActive(false);
+    }
+    touches.clear(); pinchState = null; shapeStart = null; clearPreview();
+    syncShapeButtons(); updateLineStyleButtonVisibility();
+  }
+  view.querySelector('#btn-shape-arrow').addEventListener('click', () => setShapeMode('arrow'));
+  view.querySelector('#btn-shape-ellipse').addEventListener('click', () => setShapeMode('ellipse'));
+  view.querySelector('#btn-shape-rect').addEventListener('click', () => setShapeMode('rect'));
+  view.querySelector('#btn-num').addEventListener('click', () => setShapeMode('num'));
+  view.querySelector('#mk-minus').addEventListener('click', () => { markerOverride = Math.max(1, nextMarkerNumber() - 1); updateMarkerLabel(); });
+  view.querySelector('#mk-plus').addEventListener('click', () => { markerOverride = nextMarkerNumber() + 1; updateMarkerLabel(); });
+  function makeShapeStroke(a, b) {
+    if (shapeMode === 'num') {
+      return Ink.newStroke('num', { c: currentColor, w: Math.max(currentWidth, Math.min(cw, ch) * 0.016), pts: [[b.x, b.y]], n: nextMarkerNumber() });
+    }
+    const st = Ink.newStroke(shapeMode, { c: currentColor, w: currentWidth, dash: getLineDashArray(), pts: [[a.x, a.y], [b.x, b.y]] });
+    if (shapeMode === 'arrow') st.hd = Math.max(currentWidth * 4 + 10, Math.min(cw, ch) * 0.035);
+    return st;
+  }
+
+
+  // ---- Snapping: with the grid showing, points land on grid crossings; with no grid, lines click to every 15 degrees ----
+  const SNAP_KEY = 'annotate.snap';
+  try { snapOn = localStorage.getItem(SNAP_KEY) === '1'; } catch (err) { /* ignore */ }
+  function snapPt(p, from) {
+    if (!snapOn) return p;
+    if (gridState) { const sp = GRID_SPACING[gridState]; return { x: Math.round(p.x / sp) * sp, y: Math.round(p.y / sp) * sp }; }
+    if (from) {
+      const dx = p.x - from.x, dy = p.y - from.y, len = Math.hypot(dx, dy);
+      if (len < 1) return p;
+      const ang = Math.atan2(dy, dx), st = Math.PI / 12, r = Math.round(ang / st) * st;
+      if (Math.abs(r - ang) <= 4 * Math.PI / 180) return { x: from.x + len * Math.cos(r), y: from.y + len * Math.sin(r) };
+    }
+    return p;
+  }
+  function syncSnapButton() {
+    const b = view.querySelector('#btn-snap'); if (!b) return;
+    b.querySelector('span').textContent = snapOn ? 'Snap: on' : 'Snap: off';
+    b.classList.toggle('active', snapOn);
+  }
+  view.querySelector('#btn-snap').addEventListener('click', () => {
+    snapOn = !snapOn; try { localStorage.setItem(SNAP_KEY, snapOn ? '1' : '0'); } catch (err) { /* ignore */ }
+    syncSnapButton();
+    const hint = view.querySelector('#zoom-hint'); if (hint) { hint.textContent = snapOn ? (gridState ? 'Snapping to the grid' : 'Snapping lines to 15°') : 'Snap off'; }
+  });
+  syncSnapButton();
+
+  // ---- Select tool: tap a drawing to pick it, drag to move it, drag a handle to resize / turn it. Every change can be undone. ----
+  const pxScale = () => cw / (markCanvas.getBoundingClientRect().width || cw);
+  const selStroke = () => (selId ? hist.strokes.find((q) => q.id === selId) || null : null);
+  const selStrokes = () => selIds.map((id) => hist.strokes.find((q) => q.id === id)).filter(Boolean);
+  function setSel(ids) { selIds = ids.slice(); selId = selIds.length === 1 ? selIds[0] : null; }
+  const selBar = document.createElement('div');
+  selBar.className = 'sel-bar'; selBar.style.display = 'none';
+  selBar.innerHTML = `
+    <button class="atb2-chip" data-sel="colour" title="Give it the pen colour"><span class="sel-dot"></span>Colour</button>
+    <span class="sel-count" style="display:none;"></span>
+    <button class="atb2-chip" data-sel="fill" title="Fill a box or circle with the pen colour">Fill</button>
+    <button class="atb2-chip" data-sel="copy" title="Make a copy">Copy</button>
+    <button class="atb2-chip" data-sel="tolayer" title="Move it onto the layer you are drawing on">To layer</button>
+    <button class="atb2-chip" data-sel="delete" title="Delete">Delete</button>
+    <button class="atb2-chip atb2-primary" data-sel="done" title="Finish">${IC.down.replace('M6 9l6 6 6-6', 'M5 12l5 5 9-10')}</button>`;
+  view.appendChild(selBar);
+  function updateSelBar() {
+    const list = selStrokes();
+    selBar.style.display = selectMode && list.length ? 'flex' : 'none';
+    if (!list.length) return;
+    const s = list[0];
+    const top = view.querySelector('#main-toolbar'); selBar.style.top = ((top ? top.offsetHeight : 56) + 10) + 'px';
+    const f = selBar.querySelector('[data-sel="fill"]'); f.style.display = (list.length === 1 && (s.k === 'rect' || s.k === 'ellipse')) ? '' : 'none'; f.classList.toggle('active', list.length === 1 && !!s.fill);
+    selBar.querySelector('[data-sel="tolayer"]').style.display = layers.length > 1 && list.some((q) => layerOf(q).id !== activeLayer().id) ? '' : 'none';
+    const c = selBar.querySelector('.sel-count'); c.style.display = list.length > 1 ? '' : 'none'; c.textContent = list.length + ' selected';
+    selBar.querySelector('.sel-dot').style.background = currentColor;
+  }
+  function drawSelection() {
+    clearPreview();
+    if (!selectMode) return;
+    const k = pxScale(), list = selStrokes();
+    if (selBox) {
+      previewCtx.save(); previewCtx.fillStyle = 'rgba(76,154,255,.12)'; previewCtx.strokeStyle = '#4c9aff'; previewCtx.lineWidth = 1.6 * k; previewCtx.setLineDash([6 * k, 5 * k]);
+      const x = Math.min(selBox.x0, selBox.x1), y = Math.min(selBox.y0, selBox.y1), w = Math.abs(selBox.x1 - selBox.x0), h = Math.abs(selBox.y1 - selBox.y0);
+      previewCtx.fillRect(x, y, w, h); previewCtx.strokeRect(x, y, w, h); previewCtx.restore();
+    }
+    if (list.length > 1) {
+      previewCtx.save(); previewCtx.lineWidth = 1.4 * k; previewCtx.strokeStyle = '#4c9aff';
+      let u = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+      previewCtx.setLineDash([3 * k, 4 * k]);
+      for (const q of list) { const b = Ink.bbox(q); previewCtx.strokeRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0); u = { x0: Math.min(u.x0, b.x0), y0: Math.min(u.y0, b.y0), x1: Math.max(u.x1, b.x1), y1: Math.max(u.y1, b.y1) }; }
+      previewCtx.setLineDash([7 * k, 5 * k]); previewCtx.lineWidth = 2 * k; previewCtx.strokeRect(u.x0 - 4 * k, u.y0 - 4 * k, u.x1 - u.x0 + 8 * k, u.y1 - u.y0 + 8 * k);
+      previewCtx.restore(); return;
+    }
+    const s = list[0]; if (!s) return;
+    previewCtx.save(); previewCtx.setLineDash([6 * k, 5 * k]); previewCtx.lineWidth = 1.6 * k; previewCtx.strokeStyle = '#4c9aff';
+    if (s.k === 'rect' || s.k === 'ellipse') { const c = Ink.boxCorners(s); previewCtx.beginPath(); previewCtx.moveTo(c[0][0], c[0][1]); for (let i = 1; i < 4; i++) previewCtx.lineTo(c[i][0], c[i][1]); previewCtx.closePath(); previewCtx.stroke(); }
+    else if (s.k !== 'line' && s.k !== 'arrow' && s.k !== 'arc') { const b = Ink.bbox(s); previewCtx.strokeRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0); }
+    previewCtx.setLineDash([]);
+    for (const h of Ink.handles(s, 38 * k)) {
+      previewCtx.beginPath(); previewCtx.arc(h.x, h.y, (h.id === 'rot' ? 9 : 8) * k, 0, Math.PI * 2);
+      previewCtx.fillStyle = h.id === 'rot' ? '#4c9aff' : '#ffffff'; previewCtx.fill(); previewCtx.lineWidth = 2.2 * k; previewCtx.strokeStyle = '#4c9aff'; previewCtx.stroke();
+    }
+    previewCtx.restore();
+  }
+  function refreshSelection() {
+    const keep = selIds.filter((id) => { const q = hist.strokes.find((x) => x.id === id); return q && layerOf(q).vis && !layerOf(q).lock; });
+    if (keep.length !== selIds.length) setSel(keep);
+    updateSelBar(); drawSelection();
+  }
+  function hitHandle(p) {
+    const s = selStroke(); if (!s) return null; const k = pxScale();
+    let best = null, bd = 24 * k;
+    for (const h of Ink.handles(s, 38 * k)) { const d = Math.hypot(h.x - p.x, h.y - p.y); if (d <= bd) { bd = d; best = h.id; } }
+    return best;
+  }
+  function hitStroke(p) {
+    const r = 12 * pxScale();
+    for (let i = hist.strokes.length - 1; i >= 0; i--) { const st = hist.strokes[i]; if (st.k !== 'erase' && layerOf(st).vis && !layerOf(st).lock && Ink.hit(st, p.x, p.y, r)) return st; }
+    return null;
+  }
+  function syncSelectButton() { view.querySelector('#btn-select').classList.toggle('active', selectMode); }
+  function setSelectMode(on) {
+    if (on === selectMode) return;
+    if (on) {
+      deactivateOtherModes('select');
+      if (eraseMode) { eraseMode = false; view.querySelector('#btn-erase').classList.remove('active'); }
+      if (annotationLayerActive) setAnnotationLayerActive(false);
+      selectMode = true;
+    } else { exitSelect(); }
+    touches.clear(); pinchState = null; syncSelectButton(); refreshSelection(); refreshPenActive();
+  }
+  function exitSelect() {
+    if (selDrag) cancelSelDrag();
+    selectMode = false; setSel([]); selBox = null; selDrag = null; selBar.style.display = 'none'; clearPreview(); syncSelectButton();
+  }
+  view.querySelector('#btn-select').addEventListener('click', () => setSelectMode(!selectMode));
+  function selTemp(s) { const i = hist.strokes.findIndex((q) => q.id === s.id); if (i >= 0) hist.strokes[i] = s; }
+  function cancelSelDrag() { if (selDrag && selDrag.s0) selTemp(selDrag.s0); selDrag = null; renderMarks(); }
+  function selPointerDown(p) {
+    const hid = selId && hitHandle(p);
+    if (hid) selDrag = { kind: 'h', id: hid, s0: selStroke(), sx: p.x, sy: p.y, moved: false };
+    else {
+      const st = hitStroke(p);
+      if (st) { if (!selIds.includes(st.id)) setSel([st.id]); selDrag = { kind: 'm', list: selStrokes(), sx: p.x, sy: p.y, moved: false }; }
+      else selDrag = { kind: 'box', sx: p.x, sy: p.y, moved: false };
+    }
+    updateSelBar(); drawSelection();
+  }
+  function selPointerMove(p) {
+    const d = selDrag; if (!d) return;
+    if (!d.moved && Math.hypot(p.x - d.sx, p.y - d.sy) < 4 * pxScale()) return;
+    d.moved = true;
+    if (d.kind === 'box') { selBox = { x0: d.sx, y0: d.sy, x1: p.x, y1: p.y }; drawSelection(); return; }
+    if (d.kind === 'm') {
+      let dx = p.x - d.sx, dy = p.y - d.sy;
+      if (snapOn && gridState) { const a = d.list[0].pts[0], q = snapPt({ x: a[0] + dx, y: a[1] + dy }); dx = q.x - a[0]; dy = q.y - a[1]; }
+      for (const s0 of d.list) selTemp(Ink.moveStroke(s0, dx, dy));
+    } else {
+      let q = p;
+      if (d.id === 'p0' || d.id === 'p1') q = snapPt(p, { x: d.s0.pts[d.id === 'p0' ? 1 : 0][0], y: d.s0.pts[d.id === 'p0' ? 1 : 0][1] });
+      else if (d.id !== 'rot') q = snapPt(p);
+      selTemp(Ink.dragHandle(d.s0, d.id, q.x, q.y, d.sx, d.sy, snapOn ? 15 : 0));
+    }
+    if (!selRaf) selRaf = requestAnimationFrame(() => { selRaf = 0; renderMarks(); });
+  }
+  function selPointerUp() {
+    const d = selDrag; selDrag = null; selPointerId = null;
+    if (selRaf) { cancelAnimationFrame(selRaf); selRaf = 0; }
+    if (!d) return;
+    if (d.kind === 'box') {
+      if (d.moved && selBox) {
+        const x0 = Math.min(selBox.x0, selBox.x1), x1 = Math.max(selBox.x0, selBox.x1), y0 = Math.min(selBox.y0, selBox.y1), y1 = Math.max(selBox.y0, selBox.y1);
+        setSel(hist.strokes.filter((q) => { if (q.k === 'erase' || !layerOf(q).vis || layerOf(q).lock) return false; const b = Ink.bbox(q); return b.x1 >= x0 && b.x0 <= x1 && b.y1 >= y0 && b.y0 <= y1; }).map((q) => q.id));
+      } else setSel([]);
+      selBox = null; updateSelBar(); drawSelection(); return;
+    }
+    if (d.moved) {
+      const olds = d.kind === 'm' ? d.list : [d.s0];
+      const edits = olds.map((a) => ({ t: 'set', a, b: hist.strokes.find((q) => q.id === a.id) })).filter((e) => e.b);
+      for (const a of olds) selTemp(a);
+      if (edits.length === 1) hist.set(edits[0].a, edits[0].b); else if (edits.length) hist.batch(edits);
+    }
+    renderMarks(); updateUndoButtons();
+  }
+  selBar.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-sel]'); if (!b) return;
+    const list = selStrokes(); if (!list.length) return;
+    const act = b.dataset.sel, s = list[0];
+    if (act === 'done') setSel([]);
+    else if (act === 'delete') { hist.batch(list.map((q) => ({ t: 'del', id: q.id }))); setSel([]); }
+    else if (act === 'colour') hist.batch(list.map((q) => ({ t: 'set', a: q, b: Object.assign({}, q, { c: currentColor, fill: q.fill ? currentColor : q.fill }) })));
+    else if (act === 'fill' && list.length === 1) hist.set(s, Object.assign({}, s, { fill: s.fill ? undefined : currentColor }));
+    else if (act === 'tolayer') hist.batch(list.map((q) => ({ t: 'set', a: q, b: Object.assign({}, q, { ly: activeLayer().id }) })));
+    else if (act === 'copy') {
+      const k = 28 * pxScale(); let n = nextMarkerNumber();
+      const copies = list.map((q) => { const c = Object.assign(Ink.moveStroke(q, k, k), { id: Ink.uid() }); if (c.k === 'num') c.n = n++; return c; });
+      hist.batch(copies.map((c) => ({ t: 'add', s: c }))); setSel(copies.map((c) => c.id));
+    }
+    renderMarks();
+  });
+  const onSelectKey = (e) => {
+    if (!view.isConnected) { document.removeEventListener('keydown', onSelectKey); return; }
+    if (!selectMode || !selIds.length) return;
+    if ((e.key === 'Backspace' || e.key === 'Delete') && !/^(INPUT|TEXTAREA)$/.test((e.target || {}).tagName || '')) { hist.batch(selStrokes().map((q) => ({ t: 'del', id: q.id }))); setSel([]); renderMarks(); e.preventDefault(); }
+  };
+  document.addEventListener('keydown', onSelectKey);
+
+
+  // ---- Fill (bucket): tap inside a closed outline and the whole area is coloured in ----
+  function syncBucketButton() { view.querySelector('#btn-bucket').classList.toggle('active', bucketMode); }
+  function exitBucket() { bucketMode = false; bucketStart = null; syncBucketButton(); }
+  view.querySelector('#btn-bucket').addEventListener('click', () => {
+    if (bucketMode) { exitBucket(); refreshPenActive(); return; }
+    deactivateOtherModes('bucket');
+    if (eraseMode) { eraseMode = false; view.querySelector('#btn-erase').classList.remove('active'); }
+    if (annotationLayerActive) setAnnotationLayerActive(false);
+    bucketMode = true; touches.clear(); pinchState = null; syncBucketButton(); refreshPenActive();
+    const hint = view.querySelector('#zoom-hint'); if (hint) hint.textContent = 'Tap inside a closed outline to fill it';
+  });
+  function doBucket(p) {
+    const scale = Math.min(1, 1400 / Math.max(cw, ch)), w = Math.max(1, Math.round(cw * scale)), h = Math.max(1, Math.round(ch * scale));
+    const t = document.createElement('canvas'); t.width = w; t.height = h; const tx = t.getContext('2d'); tx.drawImage(markCanvas, 0, 0, w, h);
+    const d = tx.getImageData(0, 0, w, h).data, line = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) line[i] = d[i * 4 + 3] > 24 ? 1 : 0;
+    const R = 2, mask = Ink.dilate(line, w, h, R);
+    let sx = Math.round(p.x * scale), sy = Math.round(p.y * scale);
+    if (sx >= 0 && sy >= 0 && sx < w && sy < h && mask[sy * w + sx]) {
+      // tapped on (or next to) a line: use the nearest free pixel
+      let found = null;
+      for (let r = 1; r <= 6 && !found; r++) for (let dy = -r; dy <= r && !found; dy++) for (let dx = -r; dx <= r; dx++) { const x = sx + dx, y = sy + dy; if (x >= 0 && y >= 0 && x < w && y < h && !mask[y * w + x]) { found = [x, y]; break; } }
+      if (!found) { toast('Tap inside the shape, away from the line'); return; }
+      sx = found[0]; sy = found[1];
+    }
+    const res = Ink.floodRects(mask, w, h, sx, sy, 1 / scale, R);
+    if (!res) { toast('Tap inside a closed outline'); return; }
+    if (res.edge && res.area > w * h * 0.5) { toast('That area is open — close the gap in the outline, then tap inside the shape'); return; }
+    const st = Ink.newStroke('flood', { c: currentColor, w: 1, pts: [[p.x, p.y]], rects: res.rects });
+    addStroke(st); renderMarks();
+  }
+
+  // ---- Layers panel + tracing paper ----
+  function layerMeta() { return { layers: layers.map((l) => ({ id: l.id, name: l.name, vis: l.vis, lock: l.lock, op: l.op })), active: activeLayerId, bg: { vis: bg.vis, op: bg.op } }; }
+  function applyBg() {
+    photoCanvas.style.opacity = bg.vis ? String(bg.op) : '0';
+    stackEl.style.background = (bg.op < 1 || !bg.vis) ? '#ffffff' : '';
+  }
+  applyBg();
+  const layersPanel = document.createElement('div');
+  layersPanel.className = 'layers-panel'; layersPanel.style.display = 'none';
+  view.appendChild(layersPanel);
+  const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  function layerChanged() { editedSinceOpen = true; renderMarks(); buildLayersPanel(); updateUndoButtons(); }
+  function buildLayersPanel() {
+    const n = (l) => hist.strokes.filter((st) => layerOf(st) === l).length;
+    let h = `<div class="lp-head"><b>Layers</b><button class="atb2-chip" data-lp="add">${IC.plus}<span>Add layer</span></button><button class="atb2-chip lp-x" data-lp="close" aria-label="Close">${IC.down}</button></div><div class="lp-list">`;
+    for (let i = layers.length - 1; i >= 0; i--) {
+      const l = layers[i];
+      h += `<div class="lp-row ${l.id === activeLayerId ? 'active' : ''}" data-id="${l.id}">
+        <button class="lp-ic" data-lp="vis" title="Show / hide">${l.vis ? IC.eye : IC.eyeoff}</button>
+        <button class="lp-ic" data-lp="lock" title="Lock / unlock">${l.lock ? IC.lock : IC.unlock}</button>
+        <button class="lp-name" data-lp="pick" title="Draw on this layer">${esc(l.name)}<small>${n(l)} drawing${n(l) === 1 ? '' : 's'}</small></button>
+        <input class="lp-op" type="range" min="10" max="100" value="${Math.round(l.op * 100)}" data-lp="op" title="Layer opacity" aria-label="Layer opacity">
+        <button class="lp-ic" data-lp="up" title="Move up" ${i === layers.length - 1 ? 'disabled' : ''}>${IC.up}</button>
+        <button class="lp-ic" data-lp="down" title="Move down" ${i === 0 ? 'disabled' : ''}>${IC.down}</button>
+        <button class="lp-ic" data-lp="rename" title="Rename">${IC.pencil}</button>
+        <button class="lp-ic" data-lp="del" title="Delete layer" ${layers.length === 1 ? 'disabled' : ''}>${IC.trash}</button>
+      </div>`;
+    }
+    h += `</div><div class="lp-row lp-bg">
+        <button class="lp-ic" data-lp="bgvis" title="Show / hide the photo">${bg.vis ? IC.eye : IC.eyeoff}</button>
+        <span class="lp-ic lp-spacer"></span>
+        <span class="lp-name">Photo / paper<small>${bg.op < 1 && bg.vis ? 'tracing paper: faded to ' + Math.round(bg.op * 100) + '%' : 'full strength'}</small></span>
+        <input class="lp-op" type="range" min="5" max="100" value="${Math.round(bg.op * 100)}" data-lp="bgop" title="Photo opacity" aria-label="Photo opacity">
+        <button class="atb2-chip ${bg.op < 1 ? 'active' : ''}" data-lp="trace" title="Fade the photo so your lines stand out, like tracing paper">Trace</button>
+      </div>`;
+    layersPanel.innerHTML = h;
+    const ct = view.querySelector('#btn-layers span'); if (ct) ct.textContent = layers.length > 1 ? 'Layers · ' + layers.length : 'Layers';
+    view.querySelector('#btn-layers').classList.toggle('active', layersPanel.style.display !== 'none');
+  }
+  function openLayersPanel(on) {
+    if (on) { const top = view.querySelector('#main-toolbar'); layersPanel.style.top = ((top ? top.offsetHeight : 56) + 10) + 'px'; }
+    layersPanel.style.display = on ? 'flex' : 'none'; buildLayersPanel();
+  }
+  view.querySelector('#btn-layers').addEventListener('click', () => openLayersPanel(layersPanel.style.display === 'none'));
+  layersPanel.addEventListener('input', (e) => {
+    const t = e.target, act = t.dataset && t.dataset.lp; if (!act) return;
+    if (act === 'op') { const l = layers.find((q) => q.id === t.closest('.lp-row').dataset.id); l.op = t.value / 100; editedSinceOpen = true; renderMarks(); }
+    else if (act === 'bgop') { bg.op = t.value / 100; editedSinceOpen = true; applyBg(); const sm = layersPanel.querySelector('.lp-bg small'); if (sm) sm.textContent = bg.op < 1 ? 'tracing paper: faded to ' + Math.round(bg.op * 100) + '%' : 'full strength'; layersPanel.querySelector('[data-lp=trace]').classList.toggle('active', bg.op < 1); }
+  });
+  layersPanel.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-lp]'); if (!b || b.tagName === 'INPUT') return;
+    const act = b.dataset.lp, row = b.closest('.lp-row'), i = row && row.dataset.id ? layers.findIndex((q) => q.id === row.dataset.id) : -1, l = layers[i];
+    if (act === 'close') return openLayersPanel(false);
+    if (act === 'add') {
+      let k = layers.length + 1; while (layers.some((q) => q.name === 'Layer ' + k)) k++;
+      const nl = { id: 'l' + Date.now().toString(36) + layers.length, name: 'Layer ' + k, vis: true, lock: false, op: 1 };
+      layers.splice(layers.findIndex((q) => q.id === activeLayerId) + 1, 0, nl); activeLayerId = nl.id; return layerChanged();
+    }
+    if (act === 'trace') { bg.op = bg.op < 1 ? 1 : 0.3; bg.vis = true; applyBg(); editedSinceOpen = true; return buildLayersPanel(); }
+    if (act === 'bgvis') { bg.vis = !bg.vis; applyBg(); editedSinceOpen = true; return buildLayersPanel(); }
+    if (!l) return;
+    if (act === 'pick') { activeLayerId = l.id; return buildLayersPanel(); }
+    if (act === 'vis') { l.vis = !l.vis; return layerChanged(); }
+    if (act === 'lock') { l.lock = !l.lock; return layerChanged(); }
+    if (act === 'up' && i < layers.length - 1) { [layers[i], layers[i + 1]] = [layers[i + 1], layers[i]]; return layerChanged(); }
+    if (act === 'down' && i > 0) { [layers[i], layers[i - 1]] = [layers[i - 1], layers[i]]; return layerChanged(); }
+    if (act === 'rename') { const nm = window.prompt('Layer name', l.name); if (nm && nm.trim()) { l.name = nm.trim().slice(0, 30); buildLayersPanel(); editedSinceOpen = true; } return; }
+    if (act === 'del' && layers.length > 1) {
+      const mine = hist.strokes.filter((st) => layerOf(st) === l);
+      if (mine.length && !window.confirm('Delete "' + l.name + '" and its ' + mine.length + ' drawing' + (mine.length === 1 ? '' : 's') + '? Undo brings the drawings back onto the bottom layer.')) return;
+      if (mine.length) hist.batch(mine.map((st) => ({ t: 'del', id: st.id })));
+      layers.splice(i, 1); if (activeLayerId === l.id) activeLayerId = layers[Math.min(i, layers.length - 1)].id;
+      return layerChanged();
+    }
+  });
+  buildLayersPanel();
+
   // ---- Text tool: tap to drop a white multi-line text box (bold/underline/size
   // adjustable); dragging instead of tapping places an optional single-headed leader arrow
   // pointing back at the drag's start point. ----
@@ -2192,9 +2586,16 @@ async function openAnnotator(photoId, onDone) {
       if (navigator.vibrate) { try { navigator.vibrate(8); } catch (err) { /* ignore */ } }
     }, HOLD_STRAIGHTEN_MS);
   }
+  function snapshotBackdrop() {
+    if (!holdBackdrop) holdBackdrop = document.createElement('canvas');
+    holdBackdrop.width = cw; holdBackdrop.height = ch; holdBackdrop.getContext('2d').drawImage(markCanvas, 0, 0);
+  }
+  function restoreBackdrop() {
+    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalCompositeOperation = 'source-over'; ctx.clearRect(0, 0, cw, ch); ctx.drawImage(holdBackdrop, 0, 0); ctx.restore();
+  }
   function currentStrokeKind() {
     if (eraseMode) return 'erase';
-    return currentPenType === 'airbrush' ? 'air' : currentPenType === 'fountain' ? 'nib' : currentPenType === 'smoothing' ? 'smooth' : 'pen';
+    return currentPenType === 'airbrush' ? 'air' : currentPenType === 'fountain' ? 'nib' : currentPenType === 'smoothing' ? 'smooth' : currentPenType === 'highlighter' ? 'hl' : 'pen';
   }
 
   function startStroke(e) {
@@ -2210,7 +2611,8 @@ async function openAnnotator(photoId, onDone) {
     liveStroke.pts = drawFilter.begin(p.x, p.y, e.pressure, e.timeStamp).slice();
     lastRawPt = p;
     liveState = Ink.liveStart(liveStroke);
-    Ink.liveDot(ctx, liveState);
+    if (kind === 'hl') { snapshotBackdrop(); Ink.renderStroke(ctx, liveStroke); }
+    else Ink.liveDot(ctx, liveState);
     strokeStartPoint = { x: p.x, y: p.y };
     resetHoldStraightenTimer();
   }
@@ -2232,7 +2634,8 @@ async function openAnnotator(photoId, onDone) {
       Ink.renderStroke(ctx, liveStroke);
       return;
     }
-    Ink.liveAdvance(ctx, liveState);
+    if (liveStroke.k === 'hl') { restoreBackdrop(); Ink.renderStroke(ctx, liveStroke); }
+    else Ink.liveAdvance(ctx, liveState);
     resetHoldStraightenTimer();
   }
   // Pen lifted: catch the stabiliser up, draw the last piece and keep the stroke in the history.
@@ -2242,7 +2645,8 @@ async function openAnnotator(photoId, onDone) {
       if (!heldLine) {
         const p = projectOntoRuler(canvasPoint(e));
         for (const q of drawFilter.end(p.x, p.y)) liveStroke.pts.push(q);
-        Ink.liveFinish(ctx, liveState);
+        if (liveStroke.k === 'hl') { restoreBackdrop(); Ink.renderStroke(ctx, liveStroke); }
+        else Ink.liveFinish(ctx, liveState);
       }
       addStroke(liveStroke);
     }
@@ -2298,6 +2702,10 @@ async function openAnnotator(photoId, onDone) {
     try { markCanvas.setPointerCapture(e.pointerId); } catch (err) { /* not critical */ }
     if (cropMode) { e.preventDefault(); return; } // crop handles/border have their own listeners with stopPropagation
     if (adjustMode) { e.preventDefault(); return; } // adjust handles/box-area have their own listeners with stopPropagation
+    if (!selectMode && !textMode && !measureMode && !calibrating && !annotationLayerActive && (activeLayer().lock || !activeLayer().vis)) {
+      toast(activeLayer().lock ? 'This layer is locked — unlock it in Layers, or pick another layer' : 'This layer is hidden — show it in Layers, or pick another layer');
+      e.preventDefault(); return;
+    }
     if (calibrating) {
       if (e.pointerType === 'touch') {
         const p = canvasPoint(e);
@@ -2338,13 +2746,49 @@ async function openAnnotator(photoId, onDone) {
       return;
     }
 
+    if (bucketMode) {
+      if (e.pointerType === 'touch') {
+        const p = canvasPoint(e);
+        touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
+        if (touches.size >= 2) { bucketStart = null; updatePinch(); e.preventDefault(); return; }
+      }
+      bucketStart = canvasPoint(e); bucketPid = e.pointerId;
+      e.preventDefault();
+      return;
+    }
+    if (selectMode) {
+      if (e.pointerType === 'touch') {
+        const p = canvasPoint(e);
+        touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
+        if (touches.size >= 2) { if (selDrag) cancelSelDrag(); selPointerId = null; updatePinch(); e.preventDefault(); return; }
+      }
+      selPointerId = e.pointerId;
+      selPointerDown(canvasPoint(e));
+      e.preventDefault();
+      return;
+    }
+
+    if (shapeMode) {
+      if (e.pointerType === 'touch') {
+        const p = canvasPoint(e);
+        touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
+        if (touches.size >= 2) { shapeStart = null; clearPreview(); updatePinch(); e.preventDefault(); return; }
+      }
+      shapeStart = snapPt(canvasPoint(e));
+      shapePointerId = e.pointerId;
+      clearPreview(); Ink.renderStroke(previewCtx, makeShapeStroke(shapeStart, shapeStart));
+      showMagnifier(shapeStart, e.clientX, e.clientY);
+      e.preventDefault();
+      return;
+    }
+
     if (straightLineMode) {
       if (e.pointerType === 'touch') {
         const p = canvasPoint(e);
         touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
         if (touches.size >= 2) { straightLineStart = null; clearPreview(); updatePinch(); e.preventDefault(); return; }
       }
-      straightLineStart = canvasPoint(e);
+      straightLineStart = snapPt(canvasPoint(e));
       straightLinePointerId = e.pointerId;
       showMagnifier(straightLineStart, e.clientX, e.clientY);
       e.preventDefault();
@@ -2458,6 +2902,41 @@ async function openAnnotator(photoId, onDone) {
       return;
     }
 
+    if (bucketMode) {
+      if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
+        const p = canvasPoint(e);
+        touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
+        if (touches.size >= 2) { updatePinch(); e.preventDefault(); return; }
+      }
+      e.preventDefault();
+      return;
+    }
+    if (selectMode) {
+      if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
+        const p = canvasPoint(e);
+        touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
+        if (touches.size >= 2) { updatePinch(); e.preventDefault(); return; }
+      }
+      if (selDrag && e.pointerId === selPointerId) selPointerMove(canvasPoint(e));
+      e.preventDefault();
+      return;
+    }
+
+    if (shapeMode) {
+      if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
+        const p = canvasPoint(e);
+        touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p.x, y: p.y });
+        if (touches.size >= 2) { updatePinch(); e.preventDefault(); return; }
+      }
+      if (shapeStart && e.pointerId === shapePointerId) {
+        const p = snapPt(canvasPoint(e), shapeStart);
+        clearPreview(); Ink.renderStroke(previewCtx, makeShapeStroke(shapeStart, p));
+        showMagnifier(p, e.clientX, e.clientY);
+      }
+      e.preventDefault();
+      return;
+    }
+
     if (straightLineMode) {
       if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
         const p = canvasPoint(e);
@@ -2465,7 +2944,7 @@ async function openAnnotator(photoId, onDone) {
         if (touches.size >= 2) { updatePinch(); e.preventDefault(); return; }
       }
       if (straightLineStart && e.pointerId === straightLinePointerId) {
-        const p = canvasPoint(e);
+        const p = snapPt(canvasPoint(e), straightLineStart);
         clearPreview();
         // Shows the actual line style live while dragging, since this tool commits
         // directly on release with no adjust step — reusing the same draw function the
@@ -2543,8 +3022,26 @@ async function openAnnotator(photoId, onDone) {
       arcStart = null;
       arcPointerId = null;
     }
+    if (bucketMode && bucketStart && e.pointerId === bucketPid) {
+      const p = canvasPoint(e), st0 = bucketStart; bucketStart = null; bucketPid = null;
+      if (e.type !== 'pointercancel' && Math.hypot(p.x - st0.x, p.y - st0.y) < 10 * pxScale()) doBucket(st0);
+    }
+    if (selectMode && e.pointerId === selPointerId) {
+      if (e.type === 'pointercancel') cancelSelDrag(); else selPointerUp();
+      selPointerId = null;
+    }
+    if (shapeMode && shapeStart && e.pointerId === shapePointerId) {
+      const p = snapPt(canvasPoint(e), shapeStart);
+      clearPreview(); hideMagnifier();
+      if (shapeMode === 'num' || Math.hypot(p.x - shapeStart.x, p.y - shapeStart.y) >= 4) {
+        const st = addStroke(makeShapeStroke(shapeStart, p));
+        Ink.renderStroke(ctx, st);
+        if (shapeMode === 'num') { markerOverride = null; updateMarkerLabel(); }
+      }
+      shapeStart = null; shapePointerId = null;
+    }
     if (straightLineMode && straightLineStart && e.pointerId === straightLinePointerId) {
-      const p = canvasPoint(e);
+      const p = snapPt(canvasPoint(e), straightLineStart);
       clearPreview();
       hideMagnifier();
       if (Math.hypot(p.x - straightLineStart.x, p.y - straightLineStart.y) >= 4) {
@@ -2615,7 +3112,9 @@ async function openAnnotator(photoId, onDone) {
   view.querySelector('#btn-cancel').addEventListener('click', () => { if (hasEdits()) openDoneSheet(); else discardAndClose(); });
 
   const islandEl = view.querySelector('#tool-island'), gripEl = view.querySelector('#isl-grip');
-  const stripEl = view.querySelector('#pen-strip'), morePop = view.querySelector('#more-pop');
+  const stripEl = view.querySelector('#pen-strip'), morePop = view.querySelector('#more-pop'), shapesPop = view.querySelector('#shapes-pop');
+  const pops = [morePop, shapesPop];
+  const closePops = () => pops.forEach((q) => { q.style.display = 'none'; });
   const ISL_KEY = 'annotate.island';
   const isl = Object.assign({ edge: 'left', pos: 0.35, collapsed: false }, (() => { try { return JSON.parse(localStorage.getItem(ISL_KEY) || '{}'); } catch (err) { return {}; } })());
   if (!['left', 'right', 'top', 'bottom'].includes(isl.edge)) isl.edge = 'left';
@@ -2642,18 +3141,18 @@ async function openAnnotator(photoId, onDone) {
       if (isl.edge === 'top') islandEl.style.top = top0 + 'px'; else islandEl.style.bottom = bottomPad + 'px';
     }
     stripEl.style.bottom = (isl.edge === 'bottom' ? bottomPad + islandEl.offsetHeight + 12 : bottomPad) + 'px';
-    if (morePop.style.display !== 'none') layoutMore();
+    pops.forEach((q) => { if (q.style.display !== 'none') layoutPop(q); });
   }
-  function layoutMore() {
+  function layoutPop(pop) {
     const W = view.clientWidth, H = view.clientHeight, top0 = topLimit();
-    const r = islandEl.getBoundingClientRect(), pw = morePop.offsetWidth, ph = morePop.offsetHeight;
+    const r = islandEl.getBoundingClientRect(), pw = pop.offsetWidth, ph = pop.offsetHeight;
     let l, t;
     if (isl.edge === 'left') { l = r.right + 8; t = r.bottom - ph; }
     else if (isl.edge === 'right') { l = r.left - pw - 8; t = r.bottom - ph; }
     else if (isl.edge === 'top') { l = r.right - pw; t = r.bottom + 8; }
     else { l = r.right - pw; t = r.top - ph - 8; }
-    morePop.style.left = Math.max(8, Math.min(W - pw - 8, l)) + 'px';
-    morePop.style.top = Math.max(top0, Math.min(H - ph - 8, t)) + 'px';
+    pop.style.left = Math.max(8, Math.min(W - pw - 8, l)) + 'px';
+    pop.style.top = Math.max(top0, Math.min(H - ph - 8, t)) + 'px';
   }
   function onIslandResize() { if (!view.isConnected) { window.removeEventListener('resize', onIslandResize); return; } layoutIsland(); }
   window.addEventListener('resize', onIslandResize);
@@ -2669,7 +3168,7 @@ async function openAnnotator(photoId, onDone) {
   });
   gripEl.addEventListener('pointermove', (e) => {
     if (!islDrag || e.pointerId !== islDrag.id) return;
-    if (!islDrag.moved && Math.hypot(e.clientX - islDrag.x0, e.clientY - islDrag.y0) > 8) { islDrag.moved = true; morePop.style.display = 'none'; }
+    if (!islDrag.moved && Math.hypot(e.clientX - islDrag.x0, e.clientY - islDrag.y0) > 8) { islDrag.moved = true; closePops(); }
     if (!islDrag.moved) return;
     islandEl.style.right = islandEl.style.bottom = '';
     islandEl.style.left = (e.clientX - islDrag.ox) + 'px';
@@ -2698,20 +3197,22 @@ async function openAnnotator(photoId, onDone) {
   gripEl.addEventListener('pointerup', endIslDrag);
   gripEl.addEventListener('pointercancel', endIslDrag);
 
-  view.querySelector('#btn-more').addEventListener('click', () => {
-    const open = morePop.style.display !== 'none';
-    morePop.style.display = open ? 'none' : 'flex';
-    if (!open) layoutMore();
-  });
-  morePop.addEventListener('click', () => { morePop.style.display = 'none'; });
+  function togglePop(pop) {
+    const open = pop.style.display !== 'none';
+    closePops();
+    if (!open) { pop.style.display = 'flex'; layoutPop(pop); }
+  }
+  view.querySelector('#btn-more').addEventListener('click', () => togglePop(morePop));
+  view.querySelector('#btn-shapes').addEventListener('click', () => togglePop(shapesPop));
+  pops.forEach((q) => q.addEventListener('click', () => closePops()));
   view.addEventListener('pointerdown', (e) => {
-    if (morePop.style.display === 'none') return;
-    if (morePop.contains(e.target) || e.target.closest('#btn-more')) return;
-    morePop.style.display = 'none';
+    if (pops.every((q) => q.style.display === 'none')) return;
+    if (pops.some((q) => q.contains(e.target)) || e.target.closest('#btn-more') || e.target.closest('#btn-shapes')) return;
+    closePops();
   }, true);
 
   // Pen button: leave any other tool and go back to freehand drawing
-  const penToolBtn = view.querySelector('#btn-pen-tool');
+  const penToolBtn = view.querySelector('#btn-pen-tool'), shapesBtn = view.querySelector('#btn-shapes');
   penToolBtn.addEventListener('click', () => {
     deactivateOtherModes(null);
     if (eraseMode) { eraseMode = false; view.querySelector('#btn-erase').classList.remove('active'); }
@@ -2719,10 +3220,12 @@ async function openAnnotator(photoId, onDone) {
     refreshPenActive();
   });
   function refreshPenActive() {
-    const on = !(eraseMode || measureMode || arcMode || straightLineMode || textMode);
+    const on = !(eraseMode || measureMode || arcMode || straightLineMode || textMode || shapeMode || selectMode || bucketMode);
     if (penToolBtn.classList.contains('active') !== on) penToolBtn.classList.toggle('active', on);
+    const sh = !!(arcMode || straightLineMode || (shapeMode && shapeMode !== 'num'));
+    if (shapesBtn.classList.contains('active') !== sh) shapesBtn.classList.toggle('active', sh);
   }
-  new MutationObserver(refreshPenActive).observe(islandEl, { subtree: true, attributes: true, attributeFilter: ['class'] });
+  new MutationObserver(refreshPenActive).observe(view.querySelector('#ruler-toolbar'), { subtree: true, attributes: true, attributeFilter: ['class'] });
   refreshPenActive();
 
   async function buildMergedBlob() {
@@ -2736,7 +3239,8 @@ async function openAnnotator(photoId, onDone) {
       mergeCanvas.width = cw;
       mergeCanvas.height = ch;
       const mergeCtx = mergeCanvas.getContext('2d');
-      mergeCtx.drawImage(photoCanvas, 0, 0);
+      if (bg.op < 1 || !bg.vis) { mergeCtx.fillStyle = '#ffffff'; mergeCtx.fillRect(0, 0, cw, ch); }
+      if (bg.vis) { mergeCtx.globalAlpha = bg.op; mergeCtx.drawImage(photoCanvas, 0, 0); mergeCtx.globalAlpha = 1; }
       mergeCtx.drawImage(markCanvas, 0, 0);
       mergeCtx.drawImage(annotationCanvas, 0, 0); // annotation layer always composites on top, per its "always on top" requirement
       mergeCanvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.92);
@@ -2752,7 +3256,7 @@ async function openAnnotator(photoId, onDone) {
     baseCanvas.toBlob(async (markBlob) => {
       if (!markBlob) { toast('Could not prepare the image to save — nothing was lost, please try again'); return; }
       try {
-        await DB.saveEditableAnnotation(photoId, mergedBlob, markBlob, annotationObjects, Ink.pack(hist.strokes));
+        await DB.saveEditableAnnotation(photoId, mergedBlob, markBlob, annotationObjects, Ink.pack(hist.strokes), layerMeta());
       } catch (err) {
         console.error('Save failed', err);
         toast('Save failed — your edits are still here, please try again');
