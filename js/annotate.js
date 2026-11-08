@@ -80,89 +80,83 @@ async function openAnnotator(photoId, onDone) {
 
   let calibration = photo.calibration || null; // {pixelsPerUnit, unit}
 
+  const IC = (() => {
+    const mk = (d, extra) => `<svg class="ic2" viewBox="0 0 24 24" aria-hidden="true"${extra || ''}>${d}</svg>`;
+    return {
+      back: mk('<path d="M15 5l-7 7 7 7"/>'), down: mk('<path d="M6 9l6 6 6-6"/>'),
+      undo: mk('<path d="M9 14L4 9l5-5 M4 9h10a6 6 0 0 1 0 12h-3"/>'), redo: mk('<path d="M15 14l5-5-5-5 M20 9H10a6 6 0 0 0 0 12h3"/>'),
+      pen: mk('<path d="M4 20l1-4L16 5l3 3L8 19z M14 7l3 3"/>'), eraser: mk('<path d="M5 15l8-9 6 6-6 7H9z M9 21h11"/>'),
+      line: mk('<path d="M5 19L19 5"/>'), arc: mk('<path d="M4 18C6 8 18 8 20 18"/>'), text: mk('<path d="M5 6V4h14v2 M12 4v16 M9 20h6"/>'),
+      measure: mk('<path d="M3 8v8 M21 8v8 M3 12h18 M6 10l-3 2 3 2 M18 10l3 2-3 2"/>'), ruler: mk('<path d="M3 15L15 3l6 6L9 21z M7 13l2 2 M10 10l2 2 M13 7l2 2"/>'),
+      crop: mk('<path d="M6 2v16h16 M2 6h16v16"/>'), rotate: mk('<path d="M20 11a8 8 0 1 0-2 6 M20 4v7h-7"/>'),
+      more: mk('<path d="M5 12h.01 M12 12h.01 M19 12h.01" stroke-width="3.2"/>'), photo: mk('<path d="M4 7h11v11H4z M4 15l3-3 3 3 M19 3v6 M16 6h6"/>'),
+      grid: mk('<path d="M4 4h16v16H4z M4 9.3h16 M4 14.7h16 M9.3 4v16 M14.7 4v16"/>'), sliders: mk('<path d="M4 7h10 M18 7h2 M4 17h2 M10 17h10 M14 5v4 M6 15v4"/>'),
+      grip: mk('<path d="M8 7h.01 M16 7h.01 M8 12h.01 M16 12h.01 M8 17h.01 M16 17h.01" stroke-width="3"/>'),
+      widths: mk('<path d="M4 6h16 M4 12h16 M4 18h16" stroke-width="1.5"/><path d="M4 12h16" stroke-width="3.5"/><path d="M4 18h16" stroke-width="5.5"/>')
+    };
+  })();
+
   const view = el(`
     <div class="fullscreen" id="annotate-view">
-      <div class="annotate-toolbar" id="main-toolbar">
-        <div class="atb-row">
-          <div class="atb-left">
-            <button class="tool-btn tool-btn-text" id="btn-undo" title="Undo (or tap with two fingers)">Undo</button>
-            <button class="tool-btn tool-btn-text" id="btn-redo" title="Redo">Redo</button>
-            <button class="tool-btn tool-btn-text" id="btn-rotate" title="Rotate">Rotate</button>
-            <button class="tool-btn tool-btn-text" id="btn-crop" title="Crop">Crop</button>
-            <button class="tool-btn tool-btn-text" id="btn-calibrate" title="Calibrate">Calibrate</button>
-            <button class="tool-btn tool-btn-text" id="btn-grid" title="Grid">Grid</button>
-            <button class="tool-btn tool-btn-text" id="btn-layer-toggle" title="Switch between the Drawing and Annotation layers">Layer: Drawing</button>
-            <button class="tool-btn tool-btn-text" id="btn-insert-photo" title="Insert a photo, positioned against this one">Insert Photo</button>
-            <button class="tool-btn tool-btn-text" id="btn-pen-settings" title="Pen settings: smoothing, pressure, finger use">Pen…</button>
+      <div class="annotate-toolbar atb2-top" id="main-toolbar">
+        <button class="atb2-btn" id="btn-cancel" title="Back" aria-label="Back">${IC.back}</button>
+        <button class="atb2-btn" id="btn-undo" title="Undo (or tap with two fingers)" aria-label="Undo">${IC.undo}</button>
+        <button class="atb2-btn" id="btn-redo" title="Redo" aria-label="Redo">${IC.redo}</button>
+        <div class="atb2-status">
+          <span id="ruler-angle-readout" style="display:none; font-weight:700; color:#fff; margin-right:8px;">0°</span>
+          <span id="ruler-hint" style="display:none;">Two fingers: move &amp; rotate · pull the dot to resize</span>
+          <span id="zoom-hint">Two fingers to zoom · two-finger tap to undo</span>
+        </div>
+        <button class="atb2-chip" id="btn-layer-toggle" title="Choose what you are editing: pen marks, or text and measurements">Pen layer</button>
+        <button class="atb2-chip atb2-primary" id="btn-done" title="Save or discard">Done ${IC.down}</button>
+      </div>
+      <div id="ruler-toolbar" class="atb2-float">
+        <div class="tool-island" id="tool-island">
+          <button class="isl-grip" id="isl-grip" title="Drag to move the tools · tap to collapse" aria-label="Move or collapse the tools">${IC.grip}</button>
+          <div class="isl-items" id="isl-items">
+            <button class="tool-btn isl-btn" id="btn-pen-tool" title="Pen" aria-label="Pen">${IC.pen}</button>
+            <button class="tool-btn isl-btn" id="btn-erase" title="Eraser" aria-label="Eraser">${IC.eraser}</button>
+            <div class="isl-div"></div>
+            <button class="tool-btn isl-btn" id="btn-straight-line" title="Straight line" aria-label="Straight line">${IC.line}</button>
+            <button class="tool-btn isl-btn" id="btn-arc" title="Curved line" aria-label="Curved line">${IC.arc}</button>
+            <button class="tool-btn isl-btn" id="btn-text-tool" title="Text" aria-label="Text">${IC.text}</button>
+            <div class="isl-div"></div>
+            <button class="tool-btn isl-btn" id="btn-measure" title="Measure" aria-label="Measure">${IC.measure}</button>
+            <button class="tool-btn isl-btn" id="btn-ruler" title="Ruler" aria-label="Ruler">${IC.ruler}</button>
+            <button class="tool-btn isl-btn isl-snap" id="btn-ruler-snap" title="Snap / Free rotation" style="display:none;">Snap</button>
+            <div class="isl-div"></div>
+            <button class="tool-btn isl-btn" id="btn-crop" title="Crop" aria-label="Crop">${IC.crop}</button>
+            <button class="tool-btn isl-btn" id="btn-rotate" title="Rotate" aria-label="Rotate">${IC.rotate}</button>
+            <button class="tool-btn isl-btn" id="btn-more" title="More: photo, grid, calibrate, pen settings" aria-label="More">${IC.more}</button>
           </div>
-          <div class="atb-mid" id="color-row-fixed">
+        </div>
+        <div class="more-pop" id="more-pop" style="display:none;">
+          <button class="more-item" id="btn-insert-photo">${IC.photo}<span>Insert photo</span></button>
+          <button class="more-item" id="btn-grid">${IC.grid}<span>Grid</span></button>
+          <button class="more-item" id="btn-calibrate">${IC.measure}<span>Calibrate scale</span></button>
+          <button class="more-item" id="btn-pen-settings">${IC.sliders}<span>Pen settings</span></button>
+        </div>
+        <div class="pen-strip" id="pen-strip">
+          <div class="strip-row" id="color-row-fixed">
             ${ANNOTATE_COLORS.map((c, i) => `<div class="color-dot ${i === 0 ? 'active' : ''}" data-color="${c}" style="background:${c};"></div>`).join('')}
           </div>
-          <div class="atb-right">
-            <button class="tool-btn" id="btn-line-style" title="Line style — tap to choose" style="display:none;">
-              <svg width="20" height="16" viewBox="0 0 24 16" xmlns="http://www.w3.org/2000/svg">
-                <line x1="2" y1="8" x2="22" y2="8" stroke="currentColor" stroke-width="2.4" stroke-dasharray="5,3.5" stroke-linecap="round"/>
-              </svg>
-            </button>
+          <div class="strip-row" id="color-row-custom" title="Hold an empty circle to save your own colour">
+            ${[0, 1, 2, 3, 4].map((i) => `<div class="color-dot color-dot-custom" data-custom-index="${i}" style="background:#e8e9ec; border:1.5px dashed #b8bcc4;"></div>`).join('')}
+          </div>
+          <div class="strip-row">
             <button class="tool-btn" id="w-thin" title="Thin">•</button>
             <button class="tool-btn active" id="w-medium" title="Medium">●</button>
             <button class="tool-btn" id="w-thick" title="Thick">⬤</button>
-            <button class="tool-btn" id="w-custom" title="Custom width — tap to use, hold to change">
-              <svg width="18" height="18" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                <rect x="3" y="5" width="18" height="1.5" fill="currentColor"/>
-                <rect x="3" y="11" width="18" height="3.5" fill="currentColor"/>
-                <rect x="3" y="17.5" width="18" height="5.5" fill="currentColor"/>
-              </svg>
-            </button>
-            <button class="tool-btn" id="btn-erase" title="Eraser">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <rect x="3" y="12" width="14" height="8" rx="1.2" transform="rotate(-32 3 12)" fill="currentColor"/>
-                <path d="M9.5 5.5 L19 15 L15 19 L5.5 9.5 Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
-              </svg>
+            <button class="tool-btn" id="w-custom" title="Custom width — tap to use, hold to change">${IC.widths}</button>
+            <button class="tool-btn" id="btn-line-style" title="Line style — tap to choose" style="display:none;">
+              <svg width="20" height="16" viewBox="0 0 24 16" xmlns="http://www.w3.org/2000/svg"><line x1="2" y1="8" x2="22" y2="8" stroke="currentColor" stroke-width="2.4" stroke-dasharray="5,3.5" stroke-linecap="round"/></svg>
             </button>
           </div>
-        </div>
-      </div>
-      <div class="annotate-toolbar" id="ruler-toolbar" style="padding-top:0; padding-bottom:8px;">
-        <div class="atb-row">
-          <div class="atb-left">
-            <button class="tool-btn" id="btn-ruler" title="Ruler">📏</button>
-            <button class="tool-btn" id="btn-ruler-snap" title="Snap / Free rotation" style="display:none; width:auto; padding:0 12px; font-size:12px; font-weight:700;">Snap</button>
-            <button class="tool-btn" id="btn-measure" title="Measure">
-              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <line x1="3" y1="12" x2="21" y2="12" stroke="currentColor" stroke-width="2"/>
-                <path d="M3 12 L8 8 M3 12 L8 16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-                <path d="M21 12 L16 8 M21 12 L16 16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </button>
-            <button class="tool-btn" id="btn-text-tool" title="Text">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <rect x="2" y="4" width="20" height="16" rx="2" stroke="currentColor" stroke-width="1.6" fill="none"/>
-                <path d="M7 9h10M7 13h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-              </svg>
-            </button>
-            <button class="tool-btn" id="btn-arc" title="Curved line">
-              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M4 18 Q12 4 20 18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>
-              </svg>
-            </button>
-            <button class="tool-btn" id="btn-straight-line" title="Straight line">
-              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <line x1="4" y1="20" x2="20" y2="4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-              </svg>
-            </button>
-            <button class="tool-btn pen-type-btn active" data-pentype="pen" title="Pen">✏️</button>
-            <button class="tool-btn pen-type-btn" data-pentype="airbrush" title="Airbrush">💨</button>
-            <button class="tool-btn pen-type-btn" data-pentype="fountain" title="Fountain pen">🖋️</button>
-            <button class="tool-btn pen-type-btn" data-pentype="smoothing" title="Smoothing pen">〰️</button>
-          </div>
-          <div class="atb-mid" id="color-row-custom">
-            ${[0, 1, 2, 3, 4].map((i) => `<div class="color-dot color-dot-custom" data-custom-index="${i}" style="background:#e8e9ec; border:1.5px dashed #b8bcc4;"></div>`).join('')}
-          </div>
-          <div class="atb-right">
-            <span class="muted" id="ruler-angle-readout" style="display:none; font-size:13px; font-weight:700; color:#fff;">0°</span>
-            <span class="muted" id="ruler-hint" style="display:none; font-size:11.5px; color:#b8bcc4;">Two fingers: move &amp; rotate · pull the dot to resize</span>
-            <span class="muted" id="zoom-hint" style="font-size:11.5px; color:#b8bcc4;">Pinch to zoom</span>
+          <div class="strip-row strip-types">
+            <button class="tool-btn pen-type-btn active" data-pentype="pen" title="Pencil">Pencil</button>
+            <button class="tool-btn pen-type-btn" data-pentype="airbrush" title="Airbrush">Air</button>
+            <button class="tool-btn pen-type-btn" data-pentype="fountain" title="Fountain pen">Ink</button>
+            <button class="tool-btn pen-type-btn" data-pentype="smoothing" title="Smoothing pen">Smooth</button>
           </div>
         </div>
       </div>
@@ -211,11 +205,9 @@ async function openAnnotator(photoId, onDone) {
           <div id="adjust-handle-3" class="adjust-handle" style="display:none; position:absolute; width:24px; height:24px; margin:-12px; border-radius:50%; background:#e0a72e; border:2.5px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,0.35); touch-action:none; z-index:12;"></div>
         </div>
       </div>
-      <div class="annotate-toolbar">
-        <button class="btn btn-ghost" id="btn-cancel">Cancel</button>
-        <div class="spacer"></div>
-        <button class="btn btn-secondary" id="btn-save-editable" title="Saves your progress but keeps every mark individually editable if you come back to it" style="border-color:oklch(0.91 0.004 90); color:oklch(0.22 0.012 260);">Save (editable)</button>
-        <button class="btn btn-primary" id="btn-save" style="margin-left:8px; background:oklch(0.56 0.19 27);" title="Permanently merges the marks into the image">Flatten &amp; save</button>
+      <div id="save-actions" style="display:none;">
+        <button id="btn-save-editable" type="button">Save (editable)</button>
+        <button id="btn-save" type="button">Flatten &amp; save</button>
       </div>
     </div>
   `);
@@ -240,7 +232,9 @@ async function openAnnotator(photoId, onDone) {
   baseCanvas.width = cw; baseCanvas.height = ch;
   const baseCtx = baseCanvas.getContext('2d');
   const hist = Ink.makeHistory(Ink.unpack(photo.editableStrokes));
+  let editedSinceOpen = false, marksRenderedOnce = false;
   function renderMarks() {
+    if (marksRenderedOnce) editedSinceOpen = true; marksRenderedOnce = true;
     ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalCompositeOperation = 'source-over';
     ctx.clearRect(0, 0, cw, ch); ctx.drawImage(baseCanvas, 0, 0); ctx.restore();
     Ink.renderAll(ctx, hist.strokes);
@@ -349,7 +343,7 @@ async function openAnnotator(photoId, onDone) {
   function setAnnotationLayerActive(active) {
     annotationLayerActive = active;
     annotationCanvas.style.pointerEvents = active ? 'auto' : 'none';
-    view.querySelector('#btn-layer-toggle').textContent = active ? 'Layer: Annotation' : 'Layer: Drawing';
+    view.querySelector('#btn-layer-toggle').textContent = active ? 'Text layer' : 'Pen layer';
     view.querySelector('#btn-layer-toggle').classList.toggle('active', active);
   }
   setAnnotationLayerActive(false); // drawing layer is the default, matching every prior behavior
@@ -2582,11 +2576,154 @@ async function openAnnotator(photoId, onDone) {
     if (magnifierEl) { magnifierEl.remove(); magnifierEl = null; magnifierCanvas = null; magnifierCtx = null; }
   }
 
-  view.querySelector('#btn-cancel').addEventListener('click', () => {
+  function discardAndClose() {
     window.removeEventListener('resize', fitCanvas);
+    window.removeEventListener('resize', onIslandResize);
     removeMagnifierEl();
     view.remove();
+  }
+
+  // ---- Layout v2: Back / Done menu, floating tool island, More menu ----
+  const initialStrokeCount = hist.strokes.length, initialObjCount = annotationObjects.length;
+  const hasEdits = () => editedSinceOpen || hist.redoCount > 0 || hist.strokes.length !== initialStrokeCount || annotationObjects.length !== initialObjCount;
+  function openDoneSheet() {
+    const sheet = el(`
+      <div class="sheet-backdrop">
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <h2>Finish sketch</h2>
+          <button class="btn btn-primary btn-block" data-act="editable">Save and keep editable</button>
+          <div class="muted" style="margin:6px 0 14px; font-size:13px;">Your marks stay separate, so you can come back and change or undo them.</div>
+          <button class="btn btn-secondary btn-block" data-act="flatten">Flatten into the photo</button>
+          <div class="muted" style="margin:6px 0 14px; font-size:13px;">The marks become part of the picture permanently.</div>
+          <button class="btn btn-ghost btn-block" data-act="discard" style="color:var(--red);">Discard changes and close</button>
+          <button class="btn btn-ghost btn-block" data-act="keep">Keep editing</button>
+        </div>
+      </div>`);
+    presentOverlay(sheet);
+    sheet.addEventListener('click', (e) => {
+      const act = e.target.closest('[data-act]') && e.target.closest('[data-act]').dataset.act;
+      if (e.target === sheet) { sheet.remove(); return; }
+      if (!act) return;
+      sheet.remove();
+      if (act === 'editable') view.querySelector('#btn-save-editable').click();
+      else if (act === 'flatten') view.querySelector('#btn-save').click();
+      else if (act === 'discard') discardAndClose();
+    });
+  }
+  view.querySelector('#btn-done').addEventListener('click', openDoneSheet);
+  view.querySelector('#btn-cancel').addEventListener('click', () => { if (hasEdits()) openDoneSheet(); else discardAndClose(); });
+
+  const islandEl = view.querySelector('#tool-island'), gripEl = view.querySelector('#isl-grip');
+  const stripEl = view.querySelector('#pen-strip'), morePop = view.querySelector('#more-pop');
+  const ISL_KEY = 'annotate.island';
+  const isl = Object.assign({ edge: 'left', pos: 0.35, collapsed: false }, (() => { try { return JSON.parse(localStorage.getItem(ISL_KEY) || '{}'); } catch (err) { return {}; } })());
+  if (!['left', 'right', 'top', 'bottom'].includes(isl.edge)) isl.edge = 'left';
+  const saveIsl = () => { try { localStorage.setItem(ISL_KEY, JSON.stringify(isl)); } catch (err) { /* ignore */ } };
+  const safeBottomPx = () => { const pr = document.createElement('div'); pr.style.cssText = 'position:absolute;left:0;bottom:0;width:1px;height:env(safe-area-inset-bottom,0px);visibility:hidden;'; view.appendChild(pr); const h = pr.offsetHeight; pr.remove(); return h; };
+  const topLimit = () => view.querySelector('#main-toolbar').offsetHeight + 8;
+  function layoutIsland() {
+    if (!view.isConnected) return;
+    const W = view.clientWidth, H = view.clientHeight;
+    const vertical = isl.edge === 'left' || isl.edge === 'right';
+    const top0 = topLimit(), bottomPad = 14 + safeBottomPx();
+    islandEl.classList.toggle('h', !vertical);
+    islandEl.classList.toggle('collapsed', !!isl.collapsed);
+    islandEl.style.left = islandEl.style.right = islandEl.style.top = islandEl.style.bottom = '';
+    islandEl.style.maxHeight = vertical ? Math.max(120, H - top0 - bottomPad) + 'px' : '';
+    islandEl.style.maxWidth = vertical ? '' : Math.max(120, W - 24) + 'px';
+    if (vertical) {
+      const h = islandEl.offsetHeight;
+      islandEl.style.top = Math.round(top0 + Math.max(0, H - top0 - bottomPad - h) * isl.pos) + 'px';
+      islandEl.style[isl.edge] = '12px';
+    } else {
+      const w = islandEl.offsetWidth;
+      islandEl.style.left = Math.round(12 + Math.max(0, W - 24 - w) * isl.pos) + 'px';
+      if (isl.edge === 'top') islandEl.style.top = top0 + 'px'; else islandEl.style.bottom = bottomPad + 'px';
+    }
+    stripEl.style.bottom = (isl.edge === 'bottom' ? bottomPad + islandEl.offsetHeight + 12 : bottomPad) + 'px';
+    if (morePop.style.display !== 'none') layoutMore();
+  }
+  function layoutMore() {
+    const W = view.clientWidth, H = view.clientHeight, top0 = topLimit();
+    const r = islandEl.getBoundingClientRect(), pw = morePop.offsetWidth, ph = morePop.offsetHeight;
+    let l, t;
+    if (isl.edge === 'left') { l = r.right + 8; t = r.bottom - ph; }
+    else if (isl.edge === 'right') { l = r.left - pw - 8; t = r.bottom - ph; }
+    else if (isl.edge === 'top') { l = r.right - pw; t = r.bottom + 8; }
+    else { l = r.right - pw; t = r.top - ph - 8; }
+    morePop.style.left = Math.max(8, Math.min(W - pw - 8, l)) + 'px';
+    morePop.style.top = Math.max(top0, Math.min(H - ph - 8, t)) + 'px';
+  }
+  function onIslandResize() { if (!view.isConnected) { window.removeEventListener('resize', onIslandResize); return; } layoutIsland(); }
+  window.addEventListener('resize', onIslandResize);
+  layoutIsland();
+  requestAnimationFrame(layoutIsland);
+
+  let islDrag = null;
+  gripEl.addEventListener('pointerdown', (e) => {
+    const r = islandEl.getBoundingClientRect();
+    islDrag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, ox: e.clientX - r.left, oy: e.clientY - r.top, moved: false };
+    try { gripEl.setPointerCapture(e.pointerId); } catch (err) { /* not critical */ }
+    e.preventDefault(); e.stopPropagation();
   });
+  gripEl.addEventListener('pointermove', (e) => {
+    if (!islDrag || e.pointerId !== islDrag.id) return;
+    if (!islDrag.moved && Math.hypot(e.clientX - islDrag.x0, e.clientY - islDrag.y0) > 8) { islDrag.moved = true; morePop.style.display = 'none'; }
+    if (!islDrag.moved) return;
+    islandEl.style.right = islandEl.style.bottom = '';
+    islandEl.style.left = (e.clientX - islDrag.ox) + 'px';
+    islandEl.style.top = (e.clientY - islDrag.oy) + 'px';
+    e.preventDefault();
+  });
+  function endIslDrag(e) {
+    if (!islDrag || e.pointerId !== islDrag.id) return;
+    const d = islDrag; islDrag = null;
+    try { gripEl.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
+    if (e.type === 'pointercancel') { layoutIsland(); return; }
+    if (!d.moved) { isl.collapsed = !isl.collapsed; saveIsl(); layoutIsland(); return; }
+    const W = view.clientWidth, H = view.clientHeight, top0 = topLimit(), bottomPad = 14 + safeBottomPx();
+    const r = islandEl.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const dist = { left: cx, right: W - cx, top: cy - top0, bottom: H - cy };
+    isl.edge = Object.keys(dist).sort((a, b) => dist[a] - dist[b])[0];
+    const vertical = isl.edge === 'left' || isl.edge === 'right';
+    islandEl.classList.toggle('h', !vertical);
+    islandEl.style.maxHeight = ''; islandEl.style.maxWidth = '';
+    const nw = islandEl.offsetWidth, nh = islandEl.offsetHeight;
+    isl.pos = vertical
+      ? Math.max(0, Math.min(1, (cy - nh / 2 - top0) / Math.max(1, H - top0 - bottomPad - nh)))
+      : Math.max(0, Math.min(1, (cx - nw / 2 - 12) / Math.max(1, W - 24 - nw)));
+    saveIsl(); layoutIsland();
+  }
+  gripEl.addEventListener('pointerup', endIslDrag);
+  gripEl.addEventListener('pointercancel', endIslDrag);
+
+  view.querySelector('#btn-more').addEventListener('click', () => {
+    const open = morePop.style.display !== 'none';
+    morePop.style.display = open ? 'none' : 'flex';
+    if (!open) layoutMore();
+  });
+  morePop.addEventListener('click', () => { morePop.style.display = 'none'; });
+  view.addEventListener('pointerdown', (e) => {
+    if (morePop.style.display === 'none') return;
+    if (morePop.contains(e.target) || e.target.closest('#btn-more')) return;
+    morePop.style.display = 'none';
+  }, true);
+
+  // Pen button: leave any other tool and go back to freehand drawing
+  const penToolBtn = view.querySelector('#btn-pen-tool');
+  penToolBtn.addEventListener('click', () => {
+    deactivateOtherModes(null);
+    if (eraseMode) { eraseMode = false; view.querySelector('#btn-erase').classList.remove('active'); }
+    if (annotationLayerActive) setAnnotationLayerActive(false);
+    refreshPenActive();
+  });
+  function refreshPenActive() {
+    const on = !(eraseMode || measureMode || arcMode || straightLineMode || textMode);
+    if (penToolBtn.classList.contains('active') !== on) penToolBtn.classList.toggle('active', on);
+  }
+  new MutationObserver(refreshPenActive).observe(islandEl, { subtree: true, attributes: true, attributeFilter: ['class'] });
+  refreshPenActive();
 
   async function buildMergedBlob() {
     // Explicitly waits for a fresh render rather than trusting the annotation canvas is
