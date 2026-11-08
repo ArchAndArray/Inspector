@@ -85,13 +85,15 @@ async function openAnnotator(photoId, onDone) {
       <div class="annotate-toolbar" id="main-toolbar">
         <div class="atb-row">
           <div class="atb-left">
-            <button class="tool-btn tool-btn-text" id="btn-undo" title="Undo">Undo</button>
+            <button class="tool-btn tool-btn-text" id="btn-undo" title="Undo (or tap with two fingers)">Undo</button>
+            <button class="tool-btn tool-btn-text" id="btn-redo" title="Redo">Redo</button>
             <button class="tool-btn tool-btn-text" id="btn-rotate" title="Rotate">Rotate</button>
             <button class="tool-btn tool-btn-text" id="btn-crop" title="Crop">Crop</button>
             <button class="tool-btn tool-btn-text" id="btn-calibrate" title="Calibrate">Calibrate</button>
             <button class="tool-btn tool-btn-text" id="btn-grid" title="Grid">Grid</button>
             <button class="tool-btn tool-btn-text" id="btn-layer-toggle" title="Switch between the Drawing and Annotation layers">Layer: Drawing</button>
             <button class="tool-btn tool-btn-text" id="btn-insert-photo" title="Insert a photo, positioned against this one">Insert Photo</button>
+            <button class="tool-btn tool-btn-text" id="btn-pen-settings" title="Pen settings: smoothing, pressure, finger use">Pen…</button>
           </div>
           <div class="atb-mid" id="color-row-fixed">
             ${ANNOTATE_COLORS.map((c, i) => `<div class="color-dot ${i === 0 ? 'active' : ''}" data-color="${c}" style="background:${c};"></div>`).join('')}
@@ -232,6 +234,28 @@ async function openAnnotator(photoId, onDone) {
   annotationCanvas.style.touchAction = 'none';
   const photoCtx = photoCanvas.getContext('2d');
   const ctx = markCanvas.getContext('2d');
+  // The mark layer is now: a base picture (marks saved by older versions, and nothing else) plus a list of editable strokes
+  // drawn on top of it. markCanvas always shows the two together, so everything that reads it (magnifier, save) still works.
+  const baseCanvas = document.createElement('canvas');
+  baseCanvas.width = cw; baseCanvas.height = ch;
+  const baseCtx = baseCanvas.getContext('2d');
+  const hist = Ink.makeHistory(Ink.unpack(photo.editableStrokes));
+  function renderMarks() {
+    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalCompositeOperation = 'source-over';
+    ctx.clearRect(0, 0, cw, ch); ctx.drawImage(baseCanvas, 0, 0); ctx.restore();
+    Ink.renderAll(ctx, hist.strokes);
+    updateUndoButtons();
+  }
+  function updateUndoButtons() {
+    const u = view.querySelector('#btn-undo'), r = view.querySelector('#btn-redo');
+    if (u) u.style.opacity = hist.strokes.length ? '1' : '0.45';
+    if (r) r.style.opacity = hist.redoCount ? '1' : '0.45';
+  }
+  function addStroke(s) { hist.add(s); updateUndoButtons(); return s; }
+  // ---- pen preferences (remembered on this iPad) ----
+  const INK_PREFS_KEY = 'annotate.inkPrefs';
+  const inkPrefs = Object.assign({ streamline: 0.3, curve: 'normal', finger: 'auto', twoTapUndo: true, holdStraighten: true }, (() => { try { return JSON.parse(localStorage.getItem(INK_PREFS_KEY) || '{}'); } catch (err) { return {}; } })());
+  const saveInkPrefs = () => { try { localStorage.setItem(INK_PREFS_KEY, JSON.stringify(inkPrefs)); } catch (err) { /* ignore */ } };
   const annotationCtx = annotationCanvas.getContext('2d');
 
   // ============================================================================
@@ -422,7 +446,7 @@ async function openAnnotator(photoId, onDone) {
   if (hasEditableMark) {
     try {
       const markImg = await loadBitmapCorrected(photo.editableMarkBlob);
-      ctx.drawImage(markImg, 0, 0, cw, ch);
+      baseCtx.drawImage(markImg, 0, 0, cw, ch);
       if (markImg.close) markImg.close();
     } catch (err) {
       // If the previously-saved mark layer can't be loaded for any reason, fail visibly
@@ -432,6 +456,7 @@ async function openAnnotator(photoId, onDone) {
       toast('Could not reload your previous marks — starting from the flattened image instead');
     }
   }
+  renderMarks();
   renderAnnotationLayer(); // paints any previously-saved Text/Measure objects immediately on open — without this, the data loads correctly but nothing appears until the next edit
 
   // ---- View transform (pinch-zoom / pan) ----
@@ -456,11 +481,6 @@ async function openAnnotator(photoId, onDone) {
   fitCanvas();
   window.addEventListener('resize', fitCanvas);
 
-  let undoStack = [];
-  function pushUndo() {
-    undoStack.push(ctx.getImageData(0, 0, cw, ch));
-    if (undoStack.length > 20) undoStack.shift();
-  }
 
   let currentColor = ANNOTATE_COLORS[0];
   let currentWidth = ANNOTATE_WIDTHS.medium;
@@ -544,6 +564,31 @@ async function openAnnotator(photoId, onDone) {
         sheet.remove();
       });
     });
+  });
+
+  view.querySelector('#btn-pen-settings').addEventListener('click', () => {
+    const seg = (name, opts) => `<div class="pen-seg" data-k="${name}" style="display:flex; gap:6px; margin:6px 0 14px;">${opts.map(([v, l]) => `<button class="btn btn-secondary" data-v="${v}" style="flex:1;${String(inkPrefs[name]) === String(v) ? 'border-color:var(--ink); background:#f0f0f2; font-weight:600;' : ''}">${l}</button>`).join('')}</div>`;
+    const sheet = el(`
+      <div class="sheet-backdrop">
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <h2>Pen settings</h2>
+          <div>Smoothing (stabiliser)</div>${seg('streamline', [[0, 'Off'], [0.3, 'Light'], [0.6, 'Medium'], [0.85, 'Strong']])}
+          <div>Pencil pressure</div>${seg('curve', [['soft', 'Soft'], ['normal', 'Normal'], ['firm', 'Firm']])}
+          <div>Finger drawing</div>${seg('finger', [['auto', 'Auto (off once Pencil seen)'], ['on', 'Always on'], ['off', 'Off']])}
+          <div>Two-finger tap = undo</div>${seg('twoTapUndo', [[true, 'On'], [false, 'Off']])}
+          <div>Hold still to straighten a line</div>${seg('holdStraighten', [[true, 'On'], [false, 'Off']])}
+          <button class="btn btn-primary btn-block" id="btn-pen-done">Done</button>
+        </div>
+      </div>`);
+    presentOverlay(sheet);
+    sheet.querySelectorAll('.pen-seg').forEach((g) => g.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+      const raw = b.dataset.v; const k = g.dataset.k;
+      inkPrefs[k] = (raw === 'true') ? true : (raw === 'false') ? false : (k === 'streamline' ? parseFloat(raw) : raw);
+      saveInkPrefs();
+      g.querySelectorAll('button').forEach((x) => { const on = x === b; x.style.borderColor = on ? 'var(--ink)' : ''; x.style.background = on ? '#f0f0f2' : ''; x.style.fontWeight = on ? '600' : ''; });
+    })));
+    sheet.querySelector('#btn-pen-done').addEventListener('click', () => sheet.remove());
   });
 
   // ---- Persistent custom colors (5 user-saveable slots, survive across sessions) ----
@@ -754,10 +799,10 @@ async function openAnnotator(photoId, onDone) {
     e.currentTarget.classList.toggle('active', eraseMode);
   });
 
-  view.querySelector('#btn-undo').addEventListener('click', () => {
-    if (!undoStack.length) return;
-    ctx.putImageData(undoStack.pop(), 0, 0);
-  });
+  function undoStroke() { if (drawing) return; if (hist.undo()) renderMarks(); }
+  function redoStroke() { if (drawing) return; if (hist.redo()) renderMarks(); }
+  view.querySelector('#btn-undo').addEventListener('click', undoStroke);
+  view.querySelector('#btn-redo').addEventListener('click', redoStroke);
 
   // ---- Rotate (bakes 90° rotation into both layers' actual pixels) ----
   view.querySelector('#btn-rotate').addEventListener('click', () => {
@@ -774,17 +819,19 @@ async function openAnnotator(photoId, onDone) {
     const rmCtx = rotatedMark.getContext('2d');
     rmCtx.translate(newCw / 2, newCh / 2);
     rmCtx.rotate(Math.PI / 2);
-    rmCtx.drawImage(markCanvas, -cw / 2, -ch / 2);
+    rmCtx.drawImage(baseCanvas, -cw / 2, -ch / 2);
+    const oldCh = ch;
+    hist.mapAll((st) => Ink.rotate90cw([st], oldCh)[0]);
 
     cw = newCw; ch = newCh;
+    baseCanvas.width = cw; baseCanvas.height = ch;
     photoCanvas.width = cw; photoCanvas.height = ch;
     markCanvas.width = cw; markCanvas.height = ch;
     previewCanvas.width = cw; previewCanvas.height = ch;
     view.querySelector('#cal-line-svg').setAttribute('viewBox', `0 0 ${cw} ${ch}`);
     photoCtx.drawImage(rotatedPhoto, 0, 0);
-    ctx.drawImage(rotatedMark, 0, 0);
-
-    undoStack = [];
+    baseCtx.drawImage(rotatedMark, 0, 0);
+    renderMarks();
     ruler.cx = cw / 2; ruler.cy = ch / 2;
     resetViewTransform();
     fitCanvas();
@@ -967,17 +1014,19 @@ async function openAnnotator(photoId, onDone) {
 
     const croppedMark = document.createElement('canvas');
     croppedMark.width = newCw; croppedMark.height = newCh;
-    croppedMark.getContext('2d').drawImage(markCanvas, x, y, w, h, 0, 0, newCw, newCh);
+    croppedMark.getContext('2d').drawImage(baseCanvas, x, y, w, h, 0, 0, newCw, newCh);
+    const cropK = newCw / w;
+    hist.mapAll((st) => Ink.cropStrokes([st], x, y, cropK)[0]);
 
     cw = newCw; ch = newCh;
+    baseCanvas.width = cw; baseCanvas.height = ch;
     photoCanvas.width = cw; photoCanvas.height = ch;
     markCanvas.width = cw; markCanvas.height = ch;
     previewCanvas.width = cw; previewCanvas.height = ch;
     view.querySelector('#cal-line-svg').setAttribute('viewBox', `0 0 ${cw} ${ch}`);
     photoCtx.drawImage(croppedPhoto, 0, 0);
-    ctx.drawImage(croppedMark, 0, 0);
-
-    undoStack = [];
+    baseCtx.drawImage(croppedMark, 0, 0);
+    renderMarks();
     ruler.cx = cw / 2; ruler.cy = ch / 2;
     resetViewTransform();
     fitCanvas();
@@ -1437,8 +1486,9 @@ async function openAnnotator(photoId, onDone) {
         });
       }
     } else if (adjustMode === 'arc') {
-      pushUndo();
-      drawArcOn(ctx, adjustP1, adjustP2, adjustArcMid);
+      const ctl = computeQuadraticControl(adjustP1, adjustP2, adjustArcMid);
+      const arcStroke = addStroke(Ink.newStroke('arc', { c: currentColor, w: currentWidth, dash: getLineDashArray(), pts: [[adjustP1.x, adjustP1.y], [adjustP2.x, adjustP2.y]], ctl: [ctl.x, ctl.y] }));
+      Ink.renderStroke(ctx, arcStroke);
     } else if (adjustMode === 'text') {
       // Measured once on a scratch context purely to get the box's final w/h for storage
       // (needed for hit-testing later) — the real render happens via renderAnnotationLayer.
@@ -1875,8 +1925,8 @@ async function openAnnotator(photoId, onDone) {
 
   function finalizeMeasureArrow(x1, y1, x2, y2) {
     if (Math.hypot(x2 - x1, y2 - y1) < 4) return;
-    pushUndo();
-    drawMeasureArrowOn(ctx, x1, y1, x2, y2);
+    drawMeasureArrowOn(baseCtx, x1, y1, x2, y2);
+    renderMarks();
   }
 
   view.querySelector('#btn-measure').addEventListener('click', (e) => {
@@ -2118,182 +2168,140 @@ async function openAnnotator(photoId, onDone) {
     return true; // mouse, for desktop testing
   }
 
-  // ---- Pen type rendering ----
-  function hexToRgb(hex) {
-    const m = /^#([0-9a-f]{6})$/i.exec(hex);
-    if (!m) return [28, 31, 38];
-    const n = parseInt(m[1], 16);
-    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-  }
-
-  function drawAirbrushSegment(fromX, fromY, toX, toY, width) {
-    const dist = Math.hypot(toX - fromX, toY - fromY);
-    const steps = Math.max(1, Math.round(dist / 3));
-    const rgb = hexToRgb(currentColor);
-    const radius = Math.max(4, width);
-    for (let i = 0; i <= steps; i++) {
-      const t = steps === 0 ? 0 : i / steps;
-      const cx = fromX + (toX - fromX) * t + (Math.random() - 0.5) * radius * 0.6;
-      const cy = fromY + (toY - fromY) * t + (Math.random() - 0.5) * radius * 0.6;
-      const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
-      grad.addColorStop(0, `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0.22)`);
-      grad.addColorStop(1, `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0)`);
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
+  // ---- Pen drawing: strokes go through the Ink engine (stabiliser, pressure curve, deterministic redraw) ----
   function fountainWidthsForCurrent() {
     const customActive = view.querySelector('#w-custom').classList.contains('active');
     if (customActive) return { avg: fountainAvgWidth, max: fountainMaxWidth };
     return { avg: currentWidth, max: currentWidth * 2.5 };
   }
 
-  function drawFountainSegment(fromX, fromY, toX, toY) {
-    const { avg, max } = fountainWidthsForCurrent();
-    const nibAngle = Math.PI / 4; // fixed 45° nib, classic calligraphy variation
-    const angle = Math.atan2(toY - fromY, toX - fromX);
-    const w = avg + (max - avg) * Math.abs(Math.sin(angle - nibAngle));
-    ctx.strokeStyle = currentColor;
-    ctx.lineWidth = w;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    applyLineStyle();
-    ctx.lineDashOffset = -strokeDashDistance;
-    ctx.beginPath();
-    ctx.moveTo(fromX, fromY);
-    ctx.lineTo(toX, toY);
-    ctx.stroke();
-    strokeDashDistance += Math.hypot(toX - fromX, toY - fromY);
-    resetLineStyle();
-  }
-
-  let smoothPoints = [];
-  function drawSmoothingSegment(p, width) {
-    smoothPoints.push(p);
-    if (smoothPoints.length > 3) smoothPoints.shift();
-    if (smoothPoints.length < 3) return;
-    const [p0, p1, p2] = smoothPoints;
-    const midA = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
-    const midB = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
-    // Previously relied on whatever strokeStyle/lineWidth the canvas context happened to
-    // still be set to from an unrelated prior operation, rather than the currently
-    // selected color/width — set explicitly here instead.
-    ctx.strokeStyle = currentColor;
-    ctx.lineWidth = width;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    applyLineStyle();
-    ctx.lineDashOffset = -strokeDashDistance;
-    ctx.beginPath();
-    ctx.moveTo(midA.x, midA.y);
-    ctx.quadraticCurveTo(p1.x, p1.y, midB.x, midB.y);
-    ctx.stroke();
-    strokeDashDistance += Math.hypot(midB.x - midA.x, midB.y - midA.y);
-    resetLineStyle();
-  }
-
-  // ---- Hold-to-straighten: holding the pen still for ~1s while drawing redraws the whole
-  // stroke as a single straight line from where it started to the held point. ----
   let strokeStartPoint = null;
-  let preStrokeSnapshot = null;
   let holdStraightenTimer = null;
-  const HOLD_STRAIGHTEN_MS = 1000;
-
-  // A freehand stroke is built from many short segments (one per coalesced pointer event,
-  // often just a few pixels each) rather than one continuous path — without this, a dash
-  // pattern set fresh on each tiny segment always restarts at its "on" phase and never
-  // reaches the "gap" before the segment ends, so the whole stroke renders solid regardless
-  // of the selected style. Tracking cumulative distance and offsetting the dash phase by it
-  // makes the pattern continue seamlessly across segments instead.
-  let strokeDashDistance = 0;
+  const HOLD_STRAIGHTEN_MS = 700;
+  let liveStroke = null, liveState = null, drawFilter = null, heldLine = false, holdBackdrop = null, lastRawPt = null;
 
   function clearHoldStraightenTimer() {
     if (holdStraightenTimer) { clearTimeout(holdStraightenTimer); holdStraightenTimer = null; }
   }
+  // Hold the pen still and the stroke becomes a straight line (snapping to 0/45/90 degrees when close); keep moving to swing the end.
   function resetHoldStraightenTimer() {
     clearHoldStraightenTimer();
-    if (eraseMode || !strokeStartPoint) return;
+    if (eraseMode || !liveStroke || !inkPrefs.holdStraighten || heldLine || liveStroke.pts.length < 3) return;
     holdStraightenTimer = setTimeout(() => {
-      if (!drawing || !strokeStartPoint || !preStrokeSnapshot) return;
-      ctx.putImageData(preStrokeSnapshot, 0, 0);
-      drawStrokeSegment(strokeStartPoint.x, strokeStartPoint.y, lastX, lastY, 0.6);
-      smoothPoints = [strokeStartPoint, { x: lastX, y: lastY }];
+      if (!drawing || !liveStroke || liveStroke.pts.length < 3) return;
+      Object.assign(liveStroke, Ink.straighten(liveStroke, 3));
+      renderMarks();
+      if (!holdBackdrop) holdBackdrop = document.createElement('canvas');
+      holdBackdrop.width = cw; holdBackdrop.height = ch; holdBackdrop.getContext('2d').drawImage(markCanvas, 0, 0);
+      Ink.renderStroke(ctx, liveStroke);
+      heldLine = true;
+      if (navigator.vibrate) { try { navigator.vibrate(8); } catch (err) { /* ignore */ } }
     }, HOLD_STRAIGHTEN_MS);
   }
-
-  // Draws one segment using whichever pen type is currently active — shared by normal
-  // drawing and by the hold-to-straighten redraw above.
-  function drawStrokeSegment(fromX, fromY, toX, toY, pressure) {
-    const w = currentWidth * (0.5 + pressure);
-    if (currentPenType === 'airbrush') { drawAirbrushSegment(fromX, fromY, toX, toY, w); return; }
-    if (currentPenType === 'fountain') { drawFountainSegment(fromX, fromY, toX, toY); return; }
-    if (currentPenType === 'smoothing') { drawSmoothingSegment({ x: toX, y: toY }, w); return; }
-    ctx.strokeStyle = currentColor;
-    ctx.lineWidth = w;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    applyLineStyle();
-    ctx.lineDashOffset = -strokeDashDistance;
-    ctx.beginPath();
-    ctx.moveTo(fromX, fromY);
-    ctx.lineTo(toX, toY);
-    ctx.stroke();
-    strokeDashDistance += Math.hypot(toX - fromX, toY - fromY);
-    resetLineStyle();
+  function currentStrokeKind() {
+    if (eraseMode) return 'erase';
+    return currentPenType === 'airbrush' ? 'air' : currentPenType === 'fountain' ? 'nib' : currentPenType === 'smoothing' ? 'smooth' : 'pen';
   }
 
   function startStroke(e) {
     try { markCanvas.setPointerCapture(e.pointerId); } catch (err) {}
-    preStrokeSnapshot = ctx.getImageData(0, 0, cw, ch);
-    pushUndo();
     drawing = true;
     drawingPointerId = e.pointerId;
+    drawingPointerType = e.pointerType;
+    heldLine = false;
     const p = projectOntoRuler(canvasPoint(e));
-    lastX = p.x; lastY = p.y;
+    const kind = currentStrokeKind();
+    drawFilter = Ink.makeFilter({ streamline: kind === 'smooth' ? Math.max(inkPrefs.streamline, 0.6) : (kind === 'erase' ? 0.1 : inkPrefs.streamline), curve: inkPrefs.curve, hasPressure: e.pointerType === 'pen' });
+    liveStroke = Ink.newStroke(kind, { c: currentColor, w: currentWidth, nib: kind === 'nib' ? fountainWidthsForCurrent() : undefined });
+    liveStroke.pts = drawFilter.begin(p.x, p.y, e.pressure, e.timeStamp).slice();
+    lastRawPt = p;
+    liveState = Ink.liveStart(liveStroke);
+    Ink.liveDot(ctx, liveState);
     strokeStartPoint = { x: p.x, y: p.y };
-    strokeDashDistance = 0;
-    smoothPoints = [p];
-    const pressure = e.pressure && e.pressure > 0 ? e.pressure : 0.5;
-    const w = eraseMode ? currentWidth * 3 : currentWidth * (0.5 + pressure);
-    ctx.globalCompositeOperation = eraseMode ? 'destination-out' : 'source-over';
-    ctx.fillStyle = currentColor;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, w / 2, 0, Math.PI * 2);
-    ctx.fill();
     resetHoldStraightenTimer();
   }
 
   function continueStroke(e) {
+    if (!liveStroke) return;
     const events = (typeof e.getCoalescedEvents === 'function' && e.getCoalescedEvents().length) ? e.getCoalescedEvents() : [e];
     for (const ev of events) {
       const p = projectOntoRuler(canvasPoint(ev));
-      const pressure = ev.pressure && ev.pressure > 0 ? ev.pressure : 0.5;
-      ctx.globalCompositeOperation = eraseMode ? 'destination-out' : 'source-over';
-      if (eraseMode) {
-        const w = currentWidth * 3;
-        ctx.strokeStyle = currentColor;
-        ctx.lineWidth = w;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.setLineDash([]); // erasing should always be a complete stroke, never dashed, regardless of the selected line style
-        ctx.beginPath();
-        ctx.moveTo(lastX, lastY);
-        ctx.lineTo(p.x, p.y);
-        ctx.stroke();
-      } else {
-        drawStrokeSegment(lastX, lastY, p.x, p.y, pressure);
-      }
-      lastX = p.x; lastY = p.y;
+      lastRawPt = p;
+      if (heldLine) continue;
+      for (const q of drawFilter.add(p.x, p.y, ev.pressure, ev.timeStamp)) liveStroke.pts.push(q);
     }
+    if (heldLine) {
+      // swing the held line's end point with the pen
+      const a = liveStroke.pts[0], b = Ink.straighten({ ...liveStroke, pts: [a, [lastRawPt.x, lastRawPt.y]] }, 3).pts[1];
+      liveStroke.pts = [[a[0], a[1]], b];
+      ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalCompositeOperation = 'source-over'; ctx.clearRect(0, 0, cw, ch); ctx.drawImage(holdBackdrop, 0, 0); ctx.restore();
+      Ink.renderStroke(ctx, liveStroke);
+      return;
+    }
+    Ink.liveAdvance(ctx, liveState);
     resetHoldStraightenTimer();
+  }
+  // Pen lifted: catch the stabiliser up, draw the last piece and keep the stroke in the history.
+  function finishStroke(e) {
+    clearHoldStraightenTimer();
+    if (liveStroke) {
+      if (!heldLine) {
+        const p = projectOntoRuler(canvasPoint(e));
+        for (const q of drawFilter.end(p.x, p.y)) liveStroke.pts.push(q);
+        Ink.liveFinish(ctx, liveState);
+      }
+      addStroke(liveStroke);
+    }
+    liveStroke = null; liveState = null; drawFilter = null; heldLine = false; holdBackdrop = null; strokeStartPoint = null;
   }
 
   const touches = new Map(); // pointerId -> {cx, cy, x, y}
 
+  // ---- Palm rejection ----
+  // Without this a resting palm (a touch) landing during a Pencil stroke took over the stroke or the
+  // tool's start point, so the pen drew only part of a line or nothing. Rules:
+  //  1. While the Pencil is down, and for a moment after it lifts, touches are ignored.
+  //  2. Once a Pencil has been seen (remembered on this iPad), a single finger no longer draws or places
+  //     tools; two fingers still pinch and pan. With no Pencil the finger behaves as before.
+  //  3. A touch stroke that started just before the Pencil arrived is undone.
+  const PALM_GRACE_MS = 350;
+  const penDownIds = new Set(), ignoredTouches = new Set();
+  let lastPenTime = 0, drawingPointerType = '';
+  let penSeen = false;
+  try { penSeen = localStorage.getItem('annotate.penSeen') === '1'; } catch (err) { /* ignore */ }
+  function notePen() {
+    lastPenTime = performance.now();
+    if (!penSeen) { penSeen = true; try { localStorage.setItem('annotate.penSeen', '1'); } catch (err) { /* ignore */ } }
+  }
+  function cancelTouchInteractions() {
+    if (drawing && drawingPointerType === 'touch') {
+      // a finger stroke that began just before the Pencil arrived: throw it away
+      clearHoldStraightenTimer();
+      liveStroke = null; liveState = null; drawFilter = null; heldLine = false; holdBackdrop = null;
+      drawing = false; drawingPointerId = null; strokeStartPoint = null;
+      renderMarks();
+    }
+    touches.clear(); tapStart.clear(); pinchState = null;
+  }
+  const tapStart = new Map();
+  // Finger drawing: 'auto' = off once a Pencil has been seen on this iPad; 'on' / 'off' set it by hand (Pen… sheet)
+  const fingerBlocked = () => inkPrefs.finger === 'off' || (inkPrefs.finger === 'auto' && penSeen);
+  const palmBlocked = () => penDownIds.size > 0 || performance.now() - lastPenTime < PALM_GRACE_MS;
+
   markCanvas.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'pen') { penDownIds.add(e.pointerId); notePen(); cancelTouchInteractions(); }
+    else if (e.pointerType === 'touch') {
+      if (palmBlocked()) { ignoredTouches.add(e.pointerId); e.preventDefault(); return; }
+      tapStart.set(e.pointerId, { cx: e.clientX, cy: e.clientY, t: performance.now() });
+      if (fingerBlocked() && !cropMode && !adjustMode) {
+        // Pencil user: one finger does nothing, two fingers pinch and pan
+        const p0 = canvasPoint(e);
+        touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p0.x, y: p0.y });
+        if (touches.size >= 2) { measureStart = arcStart = straightLineStart = textPressPoint = null; clearPreview(); hideMagnifier(); if (rulerEnabled) updateRulerFromTouches(); else updatePinch(); }
+        e.preventDefault(); return;
+      }
+    }
+    try { markCanvas.setPointerCapture(e.pointerId); } catch (err) { /* not critical */ }
     if (cropMode) { e.preventDefault(); return; } // crop handles/border have their own listeners with stopPropagation
     if (adjustMode) { e.preventDefault(); return; } // adjust handles/box-area have their own listeners with stopPropagation
     if (calibrating) {
@@ -2370,7 +2378,7 @@ async function openAnnotator(photoId, onDone) {
         if (rulerEnabled) {
           updateRulerFromTouches();
         } else {
-          if (drawing) { drawing = false; drawingPointerId = null; }
+          if (drawing) { clearHoldStraightenTimer(); liveStroke = null; liveState = null; drawFilter = null; heldLine = false; drawing = false; drawingPointerId = null; renderMarks(); }
           updatePinch();
         }
         e.preventDefault();
@@ -2386,6 +2394,18 @@ async function openAnnotator(photoId, onDone) {
   });
 
   markCanvas.addEventListener('pointermove', (e) => {
+    if (e.pointerType === 'pen') notePen();
+    if (e.pointerType === 'touch' && !cropMode && !adjustMode) {
+      if (ignoredTouches.has(e.pointerId) || palmBlocked()) { e.preventDefault(); return; }
+      if (fingerBlocked()) {
+        if (touches.has(e.pointerId)) {
+          const p0 = canvasPoint(e);
+          touches.set(e.pointerId, { cx: e.clientX, cy: e.clientY, x: p0.x, y: p0.y });
+          if (touches.size >= 2) { if (rulerEnabled) updateRulerFromTouches(); else updatePinch(); }
+        }
+        e.preventDefault(); return;
+      }
+    }
     if (cropMode) { e.preventDefault(); return; }
     if (adjustMode) { e.preventDefault(); return; }
     if (calibrating) {
@@ -2496,8 +2516,18 @@ async function openAnnotator(photoId, onDone) {
   });
 
   function endStroke(e) {
+    if (e.pointerType === 'pen') { penDownIds.delete(e.pointerId); lastPenTime = performance.now(); }
+    if (e.pointerType === 'touch' && ignoredTouches.has(e.pointerId)) { if (e.type === 'pointerleave' || e.type === 'pointercancel') ignoredTouches.delete(e.pointerId); return; }
+    if (e.type === 'pointerleave' && e.pointerType !== 'mouse' && markCanvas.hasPointerCapture && markCanvas.hasPointerCapture(e.pointerId)) return; // captured: the matching pointerup finishes it
     hideMagnifier();
     if (e.pointerType === 'touch') {
+      if (e.type === 'pointerup' && inkPrefs.twoTapUndo && tapStart.size === 2 && tapStart.has(e.pointerId) && !cropMode && !adjustMode && !calibrating) {
+        const now = performance.now(), arr = [...tapStart.values()];
+        const quick = arr.every((t) => now - t.t < 350);
+        const still = [...touches.entries()].every(([id, t]) => { const s0 = tapStart.get(id); return !s0 || Math.hypot(t.cx - s0.cx, t.cy - s0.cy) < 14; });
+        if (quick && still) { if (drawing) { clearHoldStraightenTimer(); liveStroke = null; liveState = null; drawFilter = null; drawing = false; drawingPointerId = null; renderMarks(); } undoStroke(); }
+      }
+      tapStart.delete(e.pointerId);
       touches.delete(e.pointerId);
       if (touches.size < 2) pinchState = null;
     }
@@ -2524,8 +2554,8 @@ async function openAnnotator(photoId, onDone) {
       clearPreview();
       hideMagnifier();
       if (Math.hypot(p.x - straightLineStart.x, p.y - straightLineStart.y) >= 4) {
-        pushUndo();
-        drawStraightLineOn(ctx, straightLineStart.x, straightLineStart.y, p.x, p.y);
+        const lineStroke = addStroke(Ink.newStroke('line', { c: currentColor, w: currentWidth, dash: getLineDashArray(), pts: [[straightLineStart.x, straightLineStart.y], [p.x, p.y]] }));
+        Ink.renderStroke(ctx, lineStroke);
       }
       straightLineStart = null;
       straightLinePointerId = null;
@@ -2538,11 +2568,10 @@ async function openAnnotator(photoId, onDone) {
       textPointerId = null;
     }
     if (e.pointerId !== drawingPointerId) return;
+    if (e.type === 'pointercancel') { clearHoldStraightenTimer(); liveStroke = null; liveState = null; drawFilter = null; heldLine = false; renderMarks(); }
+    else finishStroke(e);
     drawing = false;
     drawingPointerId = null;
-    clearHoldStraightenTimer();
-    strokeStartPoint = null;
-    preStrokeSnapshot = null;
     try { markCanvas.releasePointerCapture(e.pointerId); } catch (err) {}
   }
   markCanvas.addEventListener('pointerup', endStroke);
@@ -2583,10 +2612,10 @@ async function openAnnotator(photoId, onDone) {
     if (!mergedBlob) { toast('Could not prepare the image to save — nothing was lost, please try again'); return; }
     // PNG specifically, not JPEG — this layer needs to keep its transparency (including
     // areas removed with the eraser) intact for when it's reloaded and edited further.
-    markCanvas.toBlob(async (markBlob) => {
+    baseCanvas.toBlob(async (markBlob) => {
       if (!markBlob) { toast('Could not prepare the image to save — nothing was lost, please try again'); return; }
       try {
-        await DB.saveEditableAnnotation(photoId, mergedBlob, markBlob, annotationObjects);
+        await DB.saveEditableAnnotation(photoId, mergedBlob, markBlob, annotationObjects, Ink.pack(hist.strokes));
       } catch (err) {
         console.error('Save failed', err);
         toast('Save failed — your edits are still here, please try again');

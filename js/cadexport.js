@@ -15,7 +15,7 @@ function cadOpenExportSheet(doc, onChanged) {
       <div class="sheet-handle"></div>
       <h2>Export drawing</h2>
       <div class="field"><label>Format</label>
-        <select id="ex-format"><option value="pdf">PDF (vector, with title block)</option><option value="png">PNG image (with title block)</option><option value="dxf">DXF (for AutoCAD / BricsCAD)</option></select></div>
+        <select id="ex-format"><option value="pdf">PDF (vector, with title block)</option><option value="png">PNG image (with title block)</option><option value="dxf2000">DXF, AutoCAD 2000 (hatches, MTEXT, layouts)</option><option value="dxf2018">DXF, AutoCAD 2018 (newest)</option><option value="dxf">DXF, R12 basic (opens everywhere)</option></select></div>
       <div id="ex-sheetopts">
         <div style="display:flex; gap:10px;">
           <div class="field" style="flex:1"><label>Sheet</label><select id="ex-size"><option>A4</option><option>A3</option></select></div>
@@ -39,7 +39,7 @@ function cadOpenExportSheet(doc, onChanged) {
           <div class="field" style="flex:1"><label>Checked by</label><input type="text" id="tb-checked" value="${esc(tb0.checkedBy)}"></div>
         </div>
       </div>
-      <p id="ex-dxfnote" class="muted" style="display:none; font-size:13px">DXF is written as AutoCAD R12 ASCII, the most widely readable version. Layers, lines, circles, arcs, polylines, points and text are kept. Dimensions are exported as plain lines and text, and multi-line text as one line per row.</p>
+      <div id="ex-dxfnote" style="display:none"><label class="cad-mode" id="ex-lays-row" style="margin-bottom:8px"><input type="checkbox" id="ex-lays" checked> Include layouts (sheets and viewports)</label><p class="muted" id="ex-dxftext" style="font-size:13px"></p></div>
       <div style="position:sticky; bottom:0; background:#fff; padding-top:8px;">
         <button class="btn btn-primary btn-block" id="ex-save">Save file</button>
         <button class="btn btn-secondary btn-block" id="ex-insert" style="margin-top:8px;">Insert into a report…</button>
@@ -55,8 +55,12 @@ function cadOpenExportSheet(doc, onChanged) {
   const optsNow = () => { const s = $('#ex-scale').value; return { underlayIds: ulIds(), underlays: true, format: $('#ex-format').value, size: $('#ex-size').value, landscape: $('#ex-orient').value === 'l', scale: s === 'fit' || s === 'plot' ? s : parseFloat(s), mono: $('#ex-mono').checked }; };
   const planNow = () => CadPlot.plan(d, { ...optsNow(), tb: tbNow() });
   function refresh() {
-    const o = optsNow(), isDxf = o.format === 'dxf';
+    const o = optsNow(), isDxf = /^dxf/.test(o.format);
     $('#ex-sheetopts').style.display = isDxf ? 'none' : ''; $('#ex-dxfnote').style.display = isDxf ? '' : 'none';
+    $('#ex-lays-row').style.display = o.format === 'dxf' ? 'none' : '';
+    $('#ex-dxftext').textContent = o.format === 'dxf'
+      ? 'AutoCAD R12 ASCII, the most widely readable version. Layers, lines, circles, arcs, polylines, points and text are kept. Hatches become lines, symbols become polylines, dimensions become lines and text, and multi-line text becomes one line per row. Layouts and viewports are not included.'
+      : (o.format === 'dxf2018' ? 'AutoCAD 2018 DXF. ' : 'AutoCAD 2000 DXF. ') + 'Real polylines, multi-line text and hatches (solid and line patterns), symbols as blocks, layouts with viewports at their scales, and the sheet frame and title block. Dimensions are still lines and text, and pictures are not included. If AutoCAD will not open the file, try the other version or R12.';
     $('#ex-insert').style.display = o.format === 'png' ? '' : 'none';
     if (isDxf) return;
     const p = planNow(), warn = $('#ex-warn');
@@ -72,6 +76,10 @@ function cadOpenExportSheet(doc, onChanged) {
   async function makeBlob() {
     const o = optsNow(), base = cadSafeFile(tbNow().title || d.name);
     if (o.format === 'dxf') return { blob: new Blob([CadDxf.write(d)], { type: 'application/dxf' }), name: base + '.dxf' };
+    if (o.format === 'dxf2000' || o.format === 'dxf2018') {
+      const v = o.format === 'dxf2018' ? 'R2018' : 'R2000', txt = CadDxfX.write(d, { version: v, layouts: $('#ex-lays').checked });
+      return { blob: new Blob([txt], { type: 'application/dxf' }), name: base + (v === 'R2018' ? ' (AutoCAD 2018)' : ' (AutoCAD 2000)') + '.dxf' };
+    }
     const p = planNow();
     if (o.format === 'png') {
       const c = document.createElement('canvas'); CadPlot.renderCanvas(p, c, 200 / 25.4, images);

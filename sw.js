@@ -1,5 +1,5 @@
 // sw.js - offline-first caching for the Site Inspection PWA
-const CACHE_NAME = 'site-inspection-v93';
+const CACHE_NAME = 'site-inspection-v96';
 
 const APP_SHELL = [
   './',
@@ -19,6 +19,7 @@ const APP_SHELL = [
   './js/cadcmd.js',
   './js/caddxf.js',
   './js/cadplot.js',
+  './js/caddxfx.js',
   './js/cadexport.js',
   './js/cad.js',
   './js/monitoring.js',
@@ -26,6 +27,7 @@ const APP_SHELL = [
   './js/geo.js',
   './js/backup.js',
   './js/app.js',
+  './js/ink.js',
   './js/annotate.js',
   './js/signature.js',
   './js/pdf.js',
