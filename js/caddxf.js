@@ -24,6 +24,21 @@ const CadDxf = (() => {
   const ACI_LIMIT = (c) => (c >= 1 && c <= 255 ? c : 7);
 
   // ---------------- writer ----------------
+  // A plotted sheet (items in sheet mm) as a flat DXF: everything on layer SHEET, true size on paper. Pictures are left out.
+  function writePlan(plan) {
+    const ents = [], C = (hex) => (/^#[0-9a-f]{6}$/i.test(hex || '') ? hex : '#000000');
+    for (const it of plan.items) {
+      if (it.k === 'poly') ents.push({ t: 'LWPOLYLINE', layer: 'SHEET', rgb: C(it.color), v: it.pts.map((p) => [p[0], p[1], 0]), closed: !!it.closed });
+      else if (it.k === 'segs') for (const [a, b] of it.segs) ents.push({ t: 'LINE', layer: 'SHEET', rgb: C(it.color), p1: a, p2: b });
+      else if (it.k === 'fill') ents.push({ t: 'HATCH', layer: 'SHEET', rgb: C(it.color), pat: 'Solid', pk: 1, loops: [it.pts.map((p) => [p[0], p[1], 0])] });
+      else if (it.k === 'fillr') ents.push({ t: 'HATCH', layer: 'SHEET', rgb: C(it.color), pat: 'Solid', pk: 1, loops: it.rings.map((r) => r.map((p) => [p[0], p[1], 0])) });
+      else if (it.k === 'text') {
+        const w = it.align === 'center' ? DM.CW * it.h * String(it.str).length / 2 : 0;
+        ents.push({ t: 'TEXT', layer: 'SHEET', rgb: C(it.color), p: [it.p[0] - Math.cos(it.rot || 0) * w, it.p[1] - Math.sin(it.rot || 0) * w], h: it.h, rot: it.rot || 0, text: it.str });
+      }
+    }
+    return write({ units: 'mm', plotScale: 1, entities: ents, layers: [{ name: 'SHEET', color: 7, ltype: 'Continuous', lw: -3, on: true, frozen: false, locked: false, plot: true }] });
+  }
   function write(data) {
     const out = [];
     const g = (code, val) => { out.push(String(code)); out.push(String(val)); };
@@ -294,7 +309,7 @@ const CadDxf = (() => {
     return { entities, layers, units, nextId, skipped };
   }
 
-  return { write, read };
+  return { write, writePlan, read };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = CadDxf;

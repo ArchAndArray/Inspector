@@ -16,6 +16,7 @@ const CadCmd = (() => {
   const X = (typeof CadEdit !== 'undefined') ? CadEdit : require('./cadedit.js');
   const DM = (typeof CadDim !== 'undefined') ? CadDim : require('./caddim.js');
   const SYM = typeof CadSym !== 'undefined' ? CadSym : require('./cadsym.js');
+  const VPM = typeof CadVp !== 'undefined' ? CadVp : require('./cadvp.js');
   const CH = typeof CadHatch !== 'undefined' ? CadHatch : require('./cadhatch.js');
 
   // ---------- document ----------
@@ -31,8 +32,63 @@ const CadCmd = (() => {
       this.onChange = null;
       const boxes = [];
       this.assoc = new Set(); this.dirty = new Set();
+      this.space = null; this.spaces = {};                 // null = model; otherwise a layout id (paper space)
+      if (!Array.isArray(this.d.layouts)) this.d.layouts = [];
       for (const e of this.entities) { this.byId.set(e.id, e); boxes.push([e.id, G.bbox(e)]); if (e.t === 'HATCH' && e.src) this.assoc.add(e.id); }
       this.index.bulk(boxes);
+    }
+    // ---- spaces: model and paper layouts. The active space's objects live in this.entities / byId / index. ----
+    inPaper() { return this.space != null; }
+    // Units and plot scale that annotation is sized with in the active space (paper is always millimetres at 1:1).
+    ann() { return this.space != null ? { units: 'mm', plotScale: 1 } : { units: this.d.units, plotScale: this.d.plotScale }; }
+    layout(id) { return this.d.layouts.find((l) => l.id === id) || null; }
+    _buildSpace(ents) {
+      const byId = new Map(), boxes = [], assoc = new Set();
+      for (const e of ents) { byId.set(e.id, e); boxes.push([e.id, G.bbox(e)]); if (e.t === 'HATCH' && e.src) assoc.add(e.id); }
+      const index = new G.CadIndex(); index.bulk(boxes);
+      return { entities: ents, byId, index, undo: [], redo: [], assoc, dirty: new Set() };
+    }
+    enterSpace(id) {
+      id = id || null;
+      if (this.group) this.endGroup();
+      if (id === this.space) return;
+      if (id && !this.layout(id)) return;
+      const key = this.space || 'model';
+      this.spaces[key] = { entities: this.entities, byId: this.byId, index: this.index, undo: this.undoStack, redo: this.redoStack, assoc: this.assoc, dirty: this.dirty };
+      const nk = id || 'model';
+      let st = this.spaces[nk];
+      if (!st) { const lay = this.layout(id); if (!lay.entities) lay.entities = []; st = this._buildSpace(lay.entities); }
+      this.entities = st.entities; this.byId = st.byId; this.index = st.index; this.undoStack = st.undo; this.redoStack = st.redo; this.assoc = st.assoc; this.dirty = st.dirty;
+      this.space = id; this.version++;
+    }
+    // Model objects, whichever space is active.
+    modelState() { return this.space == null ? { entities: this.entities, byId: this.byId, index: this.index } : (this.spaces.model || { entities: this.d.entities, byId: new Map(), index: new G.CadIndex() }); }
+    modelEntities() { return this.modelState().entities; }
+    modelQuery(a, b, c2, d2) {
+      const st = this.modelState(), out = [];
+      for (const id of st.index.search(a, b, c2, d2)) { const e = st.byId.get(id); if (e) out.push(e); }
+      return out;
+    }
+    modelExtents() { let box = null; for (const e of this.modelEntities()) box = G.unionBox(box, G.bbox(e)); return box; }
+    addLayout(opts) {
+      const o = opts || {};
+      let n = this.d.layouts.length + 1, name = o.name; if (!name) { do { name = 'Layout ' + n++; } while (this.d.layouts.some((l) => l.name === name)); }
+      const lay = { id: 'L' + Date.now().toString(36) + Math.floor(Math.random() * 1000), name, size: o.size || 'A3', landscape: o.landscape !== false, tb: o.tb || {}, entities: [], view: null };
+      this.d.layouts.push(lay); this._touch(); return lay;
+    }
+    deleteLayout(id) {
+      const i = this.d.layouts.findIndex((l) => l.id === id); if (i < 0) return false;
+      if (this.space === id) this.enterSpace(null);
+      this.d.layouts.splice(i, 1); delete this.spaces[id]; this._touch(); return true;
+    }
+    patchLayout(id, patch) { const l = this.layout(id); if (!l) return; Object.assign(l, patch); this._touch(); }
+    // Linked titles: text made from a template follows its viewport's scale.
+    _syncTitles(vpId) {
+      const vp = this.byId.get(vpId); if (!vp) return;
+      const V = typeof CadVp !== 'undefined' ? CadVp : require('./cadvp.js');
+      for (const e of this.entities.slice()) {
+        if ((e.t === 'TEXT' || e.t === 'MTEXT') && e.vp === vpId && e.tpl) { const t = V.fillTpl(e.tpl, vp); if (t !== e.text) this._replace0(e.id, { ...e, text: t }); }
+      }
     }
     static blank(opts) {
       const o = opts || {};
@@ -106,6 +162,7 @@ const CadCmd = (() => {
         const moved = JSON.stringify(prev.loops) !== JSON.stringify(next.loops);
         if (moved) { next = { ...next }; delete next.src; delete next.det; }
       }
+      if (prev.t === 'VPORT') { let r; this.transact(() => { r = this._replace0(id, next); this._syncTitles(id); }); return r; }
       if (prev.t !== 'HATCH' && this.assoc.size) { let r; this.transact(() => { r = this._replace0(id, next); this._markAssoc(id); }); return r; }
       return this._replace0(id, next);
     }
@@ -220,6 +277,7 @@ const CadCmd = (() => {
         // Inside a hatch counts as nearly background: lines and text under the finger win, but the hatch is still tappable.
         if (e.t === 'HATCH' && d > 0 && CH.inside(CH.polysOf(e, 0.05 * (e.pk || 1)), pt)) d = tol * 0.98;
         if (e.t === 'SYM' && d > 0 && G.dist(e.p, pt) <= (e.sz || 0) / 2) d = tol * 0.98;
+        if (e.t === 'VPORT' && d > 0 && VPM.inside(e, pt)) d = tol * 0.98;
         if (d <= bd) { bd = d; best = e; }
       }
       return best;
@@ -254,7 +312,7 @@ const CadCmd = (() => {
     M: 'MOVE', CO: 'COPY', CP: 'COPY', RO: 'ROTATE', SC: 'SCALE', MI: 'MIRROR', O: 'OFFSET', TR: 'TRIM', EX: 'EXTEND',
     F: 'FILLET', CHA: 'CHAMFER', S: 'STRETCH', X: 'EXPLODE', DEL: 'ERASE', DELETE: 'ERASE',
     T: 'MTEXT', MT: 'MTEXT', DT: 'TEXT', ED: 'TEXTEDIT', DDEDIT: 'TEXTEDIT', DLI: 'DIMLINEAR', DIMLIN: 'DIMLINEAR', DAL: 'DIMALIGNED', DIMALI: 'DIMALIGNED',
-    DCO: 'DIMCONTINUE', DI: 'DIST', AA: 'AREA', LA: 'LAYER', PR: 'PROPERTIES', UL: 'UNDERLAY', CAL: 'CALIBRATE', UM: 'UMOVE', UR: 'UROTATE', PROPS: 'PROPERTIES', CH: 'PROPERTIES', H: 'HATCH', BH: 'HATCH', HA: 'HATCH', SY: 'SYMBOL', SYM: 'SYMBOL', STENCIL: 'SYMBOL' };
+    DCO: 'DIMCONTINUE', DI: 'DIST', AA: 'AREA', LA: 'LAYER', PR: 'PROPERTIES', UL: 'UNDERLAY', CAL: 'CALIBRATE', UM: 'UMOVE', UR: 'UROTATE', PROPS: 'PROPERTIES', CH: 'PROPERTIES', H: 'HATCH', BH: 'HATCH', HA: 'HATCH', SY: 'SYMBOL', SYM: 'SYMBOL', STENCIL: 'SYMBOL', SEC: 'SECTION', SM: 'SECTION', VP: 'VPORT', MV: 'VPORT', VPAN: 'VPPAN', VPT: 'VPTITLE' };
   const opt = (name, short) => ({ name, short: short || name[0] });
   const bulge3 = (p1, p2, p3) => {
     const a = G.arcThrough3(p1, p2, p3); if (!a) return null;
@@ -265,11 +323,11 @@ const CadCmd = (() => {
   const same = (a, b) => G.dist(a, b) < 1e-9;
   // Annotation sizes are set in millimetres on paper; model size = paper size x plot scale, converted to drawing units.
   function annoStyle(doc) {
-    const d = doc.d, f = ({ mm: 1, m: 0.001, in: 1 / 25.4 })[d.units] || 1, k = (d.plotScale || 50) * f, ds = d.dimStyle || {};
+    const d = { ...doc.d, ...doc.ann() }, f = ({ mm: 1, m: 0.001, in: 1 / 25.4 })[d.units] || 1, k = (d.plotScale || 50) * f, ds = doc.d.dimStyle || {};
     return { th: (d.textH || 2.5) * k, ar: (ds.arrow || 2.5) * k, eo: (ds.extOff || 1) * k, ee: (ds.extExt || 1.25) * k, gap: (ds.gap || 0.6) * k, dec: ds.decimals == null ? (d.units === 'mm' ? 0 : d.units === 'm' ? 3 : 2) : ds.decimals };
   }
-  const fmtLen = (doc, v) => { const u = doc.d.units; return u === 'mm' ? G.fmtNum(v, 2) + ' mm (= ' + G.fmtNum(v / 1000, 3) + ' m)' : u === 'm' ? G.fmtNum(v, 4) + ' m' : G.fmtNum(v, 3) + ' in (= ' + G.fmtNum(v / 12, 3) + ' ft)'; };
-  const fmtArea = (doc, a) => { const u = doc.d.units; return u === 'mm' ? G.fmtNum(a / 1e6, 3) + ' m\u00b2 (' + G.fmtNum(a, 1) + ' mm\u00b2)' : u === 'm' ? G.fmtNum(a, 4) + ' m\u00b2' : G.fmtNum(a, 2) + ' in\u00b2 (= ' + G.fmtNum(a / 144, 3) + ' ft\u00b2)'; };
+  const fmtLen = (doc, v) => { const u = doc.ann().units; return u === 'mm' ? G.fmtNum(v, 2) + ' mm (= ' + G.fmtNum(v / 1000, 3) + ' m)' : u === 'm' ? G.fmtNum(v, 4) + ' m' : G.fmtNum(v, 3) + ' in (= ' + G.fmtNum(v / 12, 3) + ' ft)'; };
+  const fmtArea = (doc, a) => { const u = doc.ann().units; return u === 'mm' ? G.fmtNum(a / 1e6, 3) + ' m\u00b2 (' + G.fmtNum(a, 1) + ' mm\u00b2)' : u === 'm' ? G.fmtNum(a, 4) + ' m\u00b2' : G.fmtNum(a, 2) + ' in\u00b2 (= ' + G.fmtNum(a / 144, 3) + ' ft\u00b2)'; };
   const rectPoly = (a, b) => ({ t: 'LWPOLYLINE', closed: true, v: [[a[0], a[1], 0], [b[0], a[1], 0], [b[0], b[1], 0], [a[0], b[1], 0]] });
   const withoutId = (e) => { const n = { ...e }; delete n.id; return n; };
   const polySegAt = (e, pt) => { let best = 0, bd = Infinity; G.polySegments(e).forEach((s, k) => { const d = G.nearestOnPrim(s, pt).d; if (d < bd) { bd = d; best = k; } }); return best; };
@@ -810,7 +868,7 @@ const CadCmd = (() => {
     // Tap inside a closed shape (lines, arcs, circles, polylines meeting up) to fill it; Object picks closed polylines or circles.
     *HATCH(c) {
       const eng = c.engine; eng.hatch = eng.hatch || { pat: 'Lines', sc: 1, ang: 0 };
-      const h = eng.hatch, pk = (c.doc.d.plotScale || 50) * (({ mm: 1, m: 0.001, in: 1 / 25.4 })[c.doc.d.units] || 1);
+      const h = eng.hatch, pk = (c.doc.ann().plotScale || 50) * (({ mm: 1, m: 0.001, in: 1 / 25.4 })[c.doc.ann().units] || 1);
       const mk = (loops, src) => { const e = { t: 'HATCH', loops, pat: h.pat, sc: h.sc, ang: G.rad(h.ang), pk, seed: (Math.random() * 4294967295) >>> 0 }; if (src) e.src = { ...src, fresh: true }; return e; };
       const boundaryEnts = () => c.doc.entities.filter((e) => e.t !== 'HATCH' && (e.t === 'LINE' || e.t === 'ARC' || e.t === 'CIRCLE' || e.t === 'LWPOLYLINE') && c.doc.isVisible(e));
       c.log('Hatch: ' + CH.PATTERNS[h.pat].label + ', scale ' + G.fmtNum(h.sc, 3) + ', angle ' + G.fmtNum(h.ang, 2) + '.');
@@ -845,11 +903,111 @@ const CadCmd = (() => {
       if (n) c.log(n + ' hatch' + (n > 1 ? 'es' : '') + ' created.');
     },
 
+
+    // ----- layouts and viewports (paper space) -----
+    *VPORT(c) {
+      if (!c.doc.inPaper()) { c.warn('Viewports go on a layout. Open a layout tab first.'); return; }
+      const eng = c.engine, d = c.doc.d, um = VPM.UNIT_MM[d.units] || 1;
+      const mb = c.doc.modelExtents(), mv = d.modelView;
+      const mk = (loops) => ({ t: 'VPORT', loops, cx: mv ? mv.cx : mb ? (mb.minX + mb.maxX) / 2 : 0, cy: mv ? mv.cy : mb ? (mb.minY + mb.maxY) / 2 : 0, sc: eng.vpScale || d.plotScale || 50, um, lock: false, bd: true, fz: [] });
+      const done = (loops, e0) => { let e = mk(loops); if (mb && !eng.vpScale) e = VPM.fit(e, mb); c.add(e); c.log('Viewport 1:' + e.sc + ' added. Select it and use Properties to set the scale, lock it or hide layers.'); };
+      let r = yield c.point('Specify first corner of the viewport, or', { options: [opt('Polygon', 'P'), opt('Circle', 'C'), opt('Object', 'O')] });
+      if (r.kind === 'option' && r.name === 'Circle') {
+        const ctr = yield c.point('Specify the centre of the circular viewport:'); if (ctr.kind !== 'point') return;
+        const rr = yield c.number('Specify radius', { base: ctr.pt, preview: (pt) => [{ t: 'CIRCLE', c: ctr.pt, r: Math.max(G.dist(ctr.pt, pt), 1e-6) }] }); if (rr.kind !== 'number' || !(rr.value > 0)) return;
+        done([VPM.circleLoop(ctr.pt, rr.value)]); return;
+      }
+      if (r.kind === 'option' && r.name === 'Polygon') {
+        const pts = [];
+        for (;;) {
+          const q = yield c.point(pts.length < 3 ? 'Specify next corner of the viewport:' : 'Specify next corner, or', { base: pts[pts.length - 1], options: pts.length >= 3 ? [opt('Close', 'C')] : [], preview: (pt) => (pts.length ? [{ t: 'LWPOLYLINE', v: pts.concat([pt]).map((p) => [p[0], p[1], 0]), closed: false }] : []) });
+          if (q.kind === 'option' || q.kind === 'enter') break; if (q.kind !== 'point') return; pts.push(q.pt);
+        }
+        if (pts.length < 3) { c.warn('A polygon viewport needs at least three corners.'); return; }
+        done([pts.map((p) => [p[0], p[1], 0])]); return;
+      }
+      if (r.kind === 'option' && r.name === 'Object') {
+        const sel = yield c.select('Select a closed polyline or circle to turn into a viewport:'); if (sel.kind !== 'select' || !sel.ids.length) return;
+        const { loops } = CH.loopsFromObjects(sel.ids.map((id) => c.doc.byId.get(id)).filter(Boolean));
+        if (!loops.length) { c.warn('Select a closed polyline or circle.'); return; }
+        done(loops.slice(0, 1)); return;
+      }
+      if (r.kind !== 'point') return;
+      const a = r.pt;
+      const b = yield c.point('Specify opposite corner:', { base: a, preview: (pt) => [rectPoly(a, pt)] }); if (b.kind !== 'point') return;
+      if (Math.abs(a[0] - b.pt[0]) < 1e-6 || Math.abs(a[1] - b.pt[1]) < 1e-6) { c.warn('The viewport has no size.'); return; }
+      done([VPM.rectLoop(a, b.pt)]);
+    },
+
+    // Slide the model inside a viewport (pick a point, then where it should go).
+    *VPPAN(c) {
+      if (!c.doc.inPaper()) { c.warn('Open a layout first.'); return; }
+      const sel = yield c.select('Select the viewport to pan:', { single: true }); if (sel.kind !== 'select' || !sel.ids.length) return;
+      const e = c.doc.byId.get(sel.ids[0]); if (!e || e.t !== 'VPORT') { c.warn('Select a viewport.'); return; }
+      if (e.lock) { c.warn('That viewport is locked. Unlock it in Properties.'); return; }
+      const a = yield c.point('Specify base point:'); if (a.kind !== 'point') return;
+      const b = yield c.point('Specify second point:', { base: a.pt, preview: (pt) => [{ t: 'LINE', p1: a.pt, p2: pt }] }); if (b.kind !== 'point') return;
+      const s = VPM.factor(e);
+      c.replace(e.id, { ...e, cx: e.cx - (b.pt[0] - a.pt[0]) / s, cy: e.cy - (b.pt[1] - a.pt[1]) / s });
+    },
+
+    // Title text under a viewport that follows its scale: {scale} becomes 1:50 and updates when the scale changes.
+    *VPTITLE(c) {
+      if (!c.doc.inPaper()) { c.warn('Open a layout first.'); return; }
+      const sel = yield c.select('Select the viewport this title belongs to:', { single: true }); if (sel.kind !== 'select' || !sel.ids.length) return;
+      const vp = c.doc.byId.get(sel.ids[0]); if (!vp || vp.t !== 'VPORT') { c.warn('Select a viewport.'); return; }
+      const bb = VPM.box(vp), at = yield c.point('Specify where the title goes (top left):', {}); if (at.kind !== 'point') return;
+      const t = yield c.text('Title text. {scale} follows the viewport scale', { multiline: true, current: 'SECTION A-A\nSCALE {scale}' }); if (t.kind !== 'text' || !t.value.trim()) return;
+      const tpl = t.value.trim(), h = (c.doc.d.textH || 2.5) * 1.4;
+      c.add({ t: 'MTEXT', p: at.pt, h, rot: 0, w: 0, text: VPM.fillTpl(tpl, vp), tpl, vp: vp.id });
+    },
+
+    // ----- section marks -----
+    // UK bridge style: a stub of the cut line at each end, ending in a solid right-angled flag that points the way you look,
+    // with the section letter beside the line on the viewing side. Both ends are drawn together and the letter advances.
+    *SECTION(c) {
+      const eng = c.engine; eng.sec = eng.sec || { letter: 'A', line: false };
+      const s = eng.sec, d = c.doc.ann(), k = (d.plotScale || 50) * (({ mm: 1, m: 0.001, in: 1 / 25.4 })[d.units] || 1);
+      const lh = 3.5 * k, Tw = 8 * k, Th = 4 * k, L = 11 * k;
+      const build = (p1, p2, side) => {
+        const u = G.sub(p2, p1), l = G.len(u); if (l < 1e-9) return [];
+        const uu = [u[0] / l, u[1] / l]; let n = [-uu[1], uu[0]]; if (G.cross(uu, G.sub(side, p1)) < 0) n = [-n[0], -n[1]];
+        const out = [];
+        if (s.line) out.push({ t: 'LINE', p1, p2, lt: 'Center' });
+        for (const [p, o] of [[p1, [-uu[0], -uu[1]]], [p2, uu]]) {
+          const q = [p[0] + o[0] * L, p[1] + o[1] * L], a = [q[0] + n[0] * Tw, q[1] + n[1] * Tw], b = [q[0] - o[0] * Th, q[1] - o[1] * Th];
+          out.push({ t: 'LINE', p1: p, p2: q, lw: 35 });
+          out.push({ t: 'HATCH', loops: [[[q[0], q[1], 0], [a[0], a[1], 0], [b[0], b[1], 0]]], pat: 'Solid', sc: 1, ang: 0, pk: k });
+          const cx = q[0] + n[0] * Tw * 0.55 - o[0] * (Th + 0.9 * lh), cy = q[1] + n[1] * Tw * 0.55 - o[1] * (Th + 0.9 * lh);
+          out.push({ t: 'TEXT', p: [cx - DM.CW * lh / 2, cy - lh / 2], h: lh, rot: 0, text: s.letter });
+        }
+        return out;
+      };
+      c.log('Section ' + s.letter + '-' + s.letter + (s.line ? ', with chain line.' : ', end marks only.'));
+      let p1;
+      for (;;) {
+        const r = yield c.point('Specify first end of the section line, or', { options: [opt('Letter', 'L'), opt('Line', 'N')] });
+        if (r.kind === 'option') {
+          if (r.name === 'Letter') { const t = yield c.text('Section letter', { current: s.letter }); if (t.kind === 'text' && t.value.trim()) s.letter = t.value.trim().slice(0, 3).toUpperCase(); }
+          else { s.line = !s.line; c.log(s.line ? 'Chain line on.' : 'Chain line off.'); }
+          continue;
+        }
+        if (r.kind !== 'point') return; p1 = r.pt; break;
+      }
+      const p2r = yield c.point('Specify second end of the section line:', { base: p1, preview: (pt) => [{ t: 'LINE', p1, p2: pt }] }); if (p2r.kind !== 'point') return;
+      const p2 = p2r.pt; if (G.dist(p1, p2) < 1e-9) { c.warn('The two ends are the same point.'); return; }
+      const sd = yield c.point('Pick the side you are looking towards:', { preview: (pt) => build(p1, p2, pt) }); if (sd.kind !== 'point') return;
+      if (Math.abs(G.cross(G.sub(p2, p1), G.sub(sd.pt, p1))) < 1e-9) { c.warn('Pick a point to one side of the line.'); return; }
+      c.doc.transact(() => { for (const e of build(p1, p2, sd.pt)) c.add(e); });
+      const nx = (ch) => { const a = ch.charCodeAt(ch.length - 1); if (ch.length === 1 && a >= 65 && a < 90) { let b = a + 1; while (b === 73 || b === 79) b++; return String.fromCharCode(b); } return ch; };
+      c.log('Section ' + s.letter + '-' + s.letter + ' placed.'); s.letter = nx(s.letter);
+    },
+
     // ----- stencils (slice 1f) -----
     // Place stone, tree and other symbols. Options: Symbol, Size (in the drawing's metres/units), Rotate.
     *SYMBOL(c) {
       const eng = c.engine; eng.sym = eng.sym || { name: 'Tree', rot: 0, size: null };
-      const s = eng.sym, d = c.doc.d, U = ({ mm: 1000, m: 1, in: 39.37007874 })[d.units] || 1000;
+      const s = eng.sym, d = c.doc.ann(), U = ({ mm: 1000, m: 1, in: 39.37007874 })[d.units] || 1000;
       const size = () => s.size || SYM.defaultSize(s.name, d);
       const mk = (pt) => ({ t: 'SYM', p: pt, name: s.name, sz: size(), rot: G.rad(s.rot), seed: 1 + Math.floor(Math.random() * 2147483000) });
       let seed = mk([0, 0]).seed, n = 0;

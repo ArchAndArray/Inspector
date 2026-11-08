@@ -30,12 +30,14 @@ const CAD_TOOLS = [
   { cmd: 'FILLET', label: 'Fillet' }, { cmd: 'CHAMFER', label: 'Chamfer' }, { cmd: 'STRETCH', label: 'Stretch' }, { cmd: 'EXPLODE', label: 'Explode' },
   { cmd: 'ERASE', label: 'Erase' },
   { group: 'Annotate' },
-  { cmd: 'TEXT', label: 'Text' }, { cmd: 'MTEXT', label: 'Multi text' }, { cmd: 'TEXTEDIT', label: 'Edit text' },
+  { cmd: 'TEXT', label: 'Text' }, { cmd: 'MTEXT', label: 'Multi text' }, { cmd: 'TEXTEDIT', label: 'Edit text' }, { cmd: 'SECTION', label: 'Section mark' },
   { cmd: 'DIMLINEAR', label: 'Dim linear' }, { cmd: 'DIMALIGNED', label: 'Dim aligned' }, { cmd: 'DIMCONTINUE', label: 'Dim continue' },
   { group: 'Measure' },
   { cmd: 'DIST', label: 'Distance' }, { cmd: 'AREA', label: 'Area' },
   { group: 'Setup' },
   { cmd: 'LAYER', label: 'Layers' }, { cmd: 'PROPERTIES', label: 'Properties' },
+  { group: 'Layout', sp: 'paper' },
+  { cmd: 'VPORT', label: 'Viewport', sp: 'paper' }, { cmd: 'VPPAN', label: 'Pan view', sp: 'paper' }, { cmd: 'VPTITLE', label: 'View title', sp: 'paper' },
   { group: 'Underlay' },
   { cmd: 'UNDERLAY', label: 'Underlays' }, { cmd: 'CALIBRATE', label: 'Calibrate' }, { cmd: 'UMOVE', label: 'Move underlay' }, { cmd: 'UROTATE', label: 'Rotate underlay' }
 ];
@@ -50,6 +52,10 @@ function cadIcon(cmd) {
     CIRCLE: '<circle cx="13" cy="13" r="8"/>',
     ARC: '<path d="M4 20 A10 10 0 0 1 22 20"/>',
     POINT: '<circle cx="13" cy="13" r="2.2" fill="currentColor"/><path d="M13 5 V8 M13 18 V21 M5 13 H8 M18 13 H21"/>',
+    SECTION: '<path d="M16 4 V22"/><path d="M16 4 H6 L16 10 Z" fill="currentColor"/><path d="M16 22 H6" stroke-width="0"/><text x="4" y="21" font-size="9" font-weight="700" fill="currentColor" stroke="none">A</text>',
+    VPORT: '<rect x="3.5" y="6" width="19" height="14" rx="1"/><rect x="7" y="9" width="12" height="8" stroke-dasharray="2.5 2"/>',
+    VPPAN: '<rect x="3.5" y="6" width="19" height="14" rx="1"/><path d="M13 9 V17 M9 13 H17 M13 9 L11 11 M13 9 L15 11 M13 17 L11 15 M13 17 L15 15 M9 13 L11 11 M9 13 L11 15 M17 13 L15 11 M17 13 L15 15" stroke-width="1.5"/>',
+    VPTITLE: '<rect x="3.5" y="4" width="19" height="12" rx="1"/><path d="M7 21 H19 M9 19 H17"/>',
     SYMBOL: '<circle cx="9" cy="10" r="5"/><path d="M9 15 V22 M5 22 H13"/><ellipse cx="19" cy="19" rx="4" ry="3"/>',
     HATCH: '<rect x="4.5" y="5.5" width="17" height="15" rx="0.5"/><path d="M8 20 L21 7 M4.5 15 L14 5.5 M13 20.5 L21.5 12"/>',
     ERASE: '<path d="M6 17 L14 6 L21 11 L14 20 H9 Z"/><path d="M10 14 L17 19"/>',
@@ -194,6 +200,7 @@ function cadMountEditor(data) {
   const G = CadGeo;
   let view = { cx: data.view ? data.view.cx : 0, cy: data.view ? data.view.cy : 0, scale: data.view ? data.view.scale : 0.5 };
   const prevViews = [];
+  const views = { model: null };
   let W = 300, H = 300, dpr = 1;
   let rafPending = false;
   let cur = { pt: null, raw: null, snap: null, track: null, screen: null, active: false };
@@ -216,9 +223,10 @@ function cadMountEditor(data) {
         <button class="cad-btn cad-finger" id="cad-finger" title="What one finger does"></button>
         <button class="cad-btn" id="cad-settings" title="Drafting settings">${cadIcon('GEAR')}</button>
       </div>
+      <div class="cad-tabs" id="cad-tabs"></div>
       <div class="cad-main">
         <div class="cad-palette" id="cad-palette">
-          ${CAD_TOOLS.map((t) => (t.group ? `<div class="cad-group">${t.group}</div>` : `<button class="cad-tool" data-cmd="${t.cmd}" title="${t.label}">${cadIcon(t.cmd)}<span>${t.label}</span></button>`)).join('')}
+          ${CAD_TOOLS.map((t) => (t.group ? `<div class="cad-group"${t.sp ? ' data-sp="' + t.sp + '"' : ''}>${t.group}</div>` : `<button class="cad-tool" data-cmd="${t.cmd}"${t.sp ? ' data-sp="' + t.sp + '"' : ''} title="${t.label}">${cadIcon(t.cmd)}<span>${t.label}</span></button>`)).join('')}
         </div>
         <div class="cad-wrap" id="cad-wrap">
           <canvas id="cad-canvas"></canvas>
@@ -240,7 +248,7 @@ function cadMountEditor(data) {
         </div>
         <div class="cad-status">
           <span class="cad-coords" id="cad-coords">X: –  Y: –</span>
-          <span class="cad-units">${esc(unit.label)}</span>
+          <span class="cad-units" id="cad-units">${esc(unit.label)}</span>
           <button class="cad-tog on" id="cad-layer" title="Current layer. Tap for layers"></button>
           <span style="flex:1"></span>
           ${['snap', 'grid', 'ortho', 'polar', 'osnap', 'dyn', 'lwt'].map((k) => `<button class="cad-tog" data-t="${k}">${k.toUpperCase()}</button>`).join('')}
@@ -270,6 +278,7 @@ function cadMountEditor(data) {
   engine.onChange = () => { refreshUI(); requestDraw(); };
   doc.onChange = () => { markDirty(); refreshUI(); requestDraw(); };
 
+  const gridStep = () => (doc.inPaper() ? 10 : (doc.d.gridSpacing || 10));
   // ---- view maths ----
   const clampScale = (s) => Math.max(0.0005, Math.min(5000, s));
   const s2w = (x, y) => [view.cx + (x - W / 2) / view.scale, view.cy - (y - H / 2) / view.scale];
@@ -291,7 +300,8 @@ function cadMountEditor(data) {
     }
     return b;
   }
-  function allBox() { const e = doc.extents(), u = underlayBox(); if (!e) return u; if (!u) return e; return { minX: Math.min(e.minX, u.minX), minY: Math.min(e.minY, u.minY), maxX: Math.max(e.maxX, u.maxX), maxY: Math.max(e.maxY, u.maxY) }; }
+  function sheetBox(l) { const s = CadPlot.layout(l.size, l.landscape !== false); return { minX: 0, minY: 0, maxX: s.w, maxY: s.h }; }
+  function allBox() { if (doc.inPaper()) return sheetBox(doc.layout(doc.space)); const e = doc.extents(), u = underlayBox(); if (!e) return u; if (!u) return e; return { minX: Math.min(e.minX, u.minX), minY: Math.min(e.minY, u.minY), maxX: Math.max(e.maxX, u.maxX), maxY: Math.max(e.maxY, u.maxY) }; }
   function zoomExtents() { pushView(); fitBox(allBox()); requestDraw(); }
   function zoomWindow(a, b) { pushView(); fitBox(G.rectOf(a, b), 1); requestDraw(); }
   function zoomAt(sx, sy, factor) {
@@ -302,7 +312,12 @@ function cadMountEditor(data) {
   }
 
   // ---- persistence ----
-  function snapshotData() { return { ...doc.d, entities: doc.entities, view: { ...view } }; }
+  // Each space (model, each layout) keeps its own view. The saved model view is what reopens next time.
+  function syncViews() {
+    if (doc.inPaper()) { views[doc.space] = { ...view }; const l = doc.layout(doc.space); if (l) l.view = { ...view }; }
+    else views.model = { ...view };
+  }
+  function snapshotData() { syncViews(); return { ...doc.d, entities: doc.modelEntities(), view: { ...(views.model || view) } }; }
   function setSaveLabel() { $('cad-saved').textContent = saveState === 'saved' ? '✓ Saved' : saveState === 'saving' ? 'Saving…' : '● Unsaved'; }
   function markDirty() { saveState = 'dirty'; setSaveLabel(); clearTimeout(saveTimer); saveTimer = setTimeout(save, 2000); }
   async function save() {
@@ -363,7 +378,7 @@ function cadMountEditor(data) {
       if (snap) { pt = snap.pt; track = null; }
     }
     if (wants && !snap && t.snap && !(base && (t.ortho || t.polar))) {
-      const g = doc.d.gridSpacing || 10;
+      const g = gridStep();
       pt = [Math.round(raw[0] / g) * g, Math.round(raw[1] / g) * g];
     }
     cur = { pt, raw, snap, track, screen: [sx, sy], active: true, ptype };
@@ -471,6 +486,7 @@ function cadMountEditor(data) {
     if (e.t === 'TEXT' || e.t === 'MTEXT' || e.t === 'DIM') { drawAnno(c, e, mode); return; }
     if (e.t === 'HATCH') { drawHatch(c, e, mode); return; }
     if (e.t === 'SYM') { drawSym(c, e, mode); return; }
+    if (e.t === 'VPORT') { drawVport(c, e, mode); return; }
     c.beginPath();
     if (e.t === 'LINE') { const a = w2s(e.p1), b = w2s(e.p2); c.moveTo(a[0], a[1]); c.lineTo(b[0], b[1]); }
     else if (e.t === 'CIRCLE') { const ce = w2s(e.c); c.arc(ce[0], ce[1], e.r * view.scale, 0, Math.PI * 2); }
@@ -484,7 +500,7 @@ function cadMountEditor(data) {
     c.stroke();
   }
   function drawGrid(c) {
-    const g0 = doc.d.gridSpacing || 10;
+    const g0 = gridStep();
     let step = g0, px = step * view.scale, guard = 0;
     while (px < 12 && guard++ < 12) { step *= 10; px = step * view.scale; }
     const tl = s2w(0, 0), br = s2w(W, H);
@@ -526,21 +542,11 @@ function cadMountEditor(data) {
     c.fillStyle = 'rgba(255,255,255,0.92)'; c.fillRect(x + 12, y + 10, tw + 8, 17);
     c.fillStyle = '#6b4300'; c.fillText(label, x + 16, y + 23);
   }
-  function draw() {
-    if (destroyed) return;
-    const c = ctx2;
-    c.setTransform(dpr, 0, 0, dpr, 0, 0);
-    c.fillStyle = '#ffffff'; c.fillRect(0, 0, W, H);
-    if (prefs.toggles.grid) drawGrid(c);
-    drawUnderlays(c);
-    // origin marker
-    const o = w2s([0, 0]);
-    c.strokeStyle = '#b9bdc4'; c.lineWidth = 1; c.beginPath(); c.moveTo(o[0] - 10, o[1]); c.lineTo(o[0] + 10, o[1]); c.moveTo(o[0], o[1] - 10); c.lineTo(o[0], o[1] + 10); c.stroke();
-    // entities in view
-    const tl = s2w(0, 0), br = s2w(W, H);
-    const vis = doc.queryVis(tl[0], br[1], br[0], tl[1]);
-    c.lineWidth = 1.6; c.lineJoin = 'round'; c.lineCap = 'round';
+
+  // Entities in the order they are painted: hatches first, then everything else. dd supplies units and plot scale for dashes.
+  function drawEntityPass(c, vis, dd) {
     const lwt = prefs.toggles.lwt !== false;
+    c.lineWidth = 1.6; c.lineJoin = 'round'; c.lineCap = 'round';
     for (const e of vis) {
       if (e.t !== 'HATCH') continue;
       c.strokeStyle = layerColor(e); c.fillStyle = c.strokeStyle;
@@ -551,11 +557,69 @@ function cadMountEditor(data) {
       if (e.t === 'HATCH') continue;
       c.strokeStyle = layerColor(e); c.fillStyle = c.strokeStyle;
       c.lineWidth = lwt ? Math.max(1.2, CadStyle.lwMm(doc.d, e) * 3.78 * 1.3) : 1.6;
-      const lt = (e.t === 'DIM' || e.t === 'POINT' || e.t === 'SYM') ? 'Continuous' : CadStyle.ltypeName(doc.d, e);
-      if (lt !== 'Continuous') { const pat = CadStyle.dashModel(doc.d, lt).map((v) => Math.max(1, v * view.scale)); c.setLineDash(pat); }
+      const lt = (e.t === 'DIM' || e.t === 'POINT' || e.t === 'SYM' || e.t === 'VPORT') ? 'Continuous' : CadStyle.ltypeName(doc.d, e);
+      if (lt !== 'Continuous') { const pat = CadStyle.dashModel(dd, lt).map((v) => Math.max(1, v * view.scale)); c.setLineDash(pat); }
       drawEntity(c, e);
       if (lt !== 'Continuous') c.setLineDash([]);
     }
+  }
+  // Sheet on a grey desk: white paper, frame and title block, then the paper grid.
+  function drawSheet(c) {
+    const l = doc.layout(doc.space); if (!l) return;
+    c.fillStyle = '#d9dce1'; c.fillRect(0, 0, W, H);
+    const sh = CadPlot.sheetItems(l, doc.d), p0 = w2s([0, sh.lay.h]), p1 = w2s([sh.lay.w, 0]);
+    c.save(); c.shadowColor = 'rgba(0,0,0,0.25)'; c.shadowBlur = 10; c.fillStyle = '#ffffff'; c.fillRect(p0[0], p0[1], p1[0] - p0[0], p1[1] - p0[1]); c.restore();
+    if (prefs.toggles.grid) {
+      c.save(); c.beginPath(); c.rect(p0[0], p0[1], p1[0] - p0[0], p1[1] - p0[1]); c.clip(); drawGrid(c); c.restore();
+    }
+    for (const it of sh.items) {
+      if (it.k === 'poly') {
+        c.strokeStyle = it.color; c.lineWidth = Math.max(1, it.w * view.scale); c.beginPath();
+        it.pts.forEach((q, i) => { const s2 = w2s(q); if (i) c.lineTo(s2[0], s2[1]); else c.moveTo(s2[0], s2[1]); }); if (it.closed) c.closePath(); c.stroke();
+      } else if (it.k === 'text') {
+        const px = it.h * view.scale; if (px < 2) continue;
+        const o = w2s(it.p); c.fillStyle = it.color; c.font = `${px}px Helvetica, Arial, sans-serif`; c.textAlign = 'left'; c.textBaseline = 'alphabetic'; c.fillText(it.str, o[0], o[1]);
+      }
+    }
+  }
+  // The model seen through a viewport window: clip to the window, borrow its view, draw, restore.
+  function drawViewportContent(c, vp) {
+    const vv = CadVp.viewFor(vp, view), sv = { cx: view.cx, cy: view.cy, scale: view.scale };
+    c.save();
+    c.beginPath(); for (const l of vp.loops) tracePoly(c, { v: l, closed: true }); c.clip('evenodd');
+    c.fillStyle = '#ffffff'; c.fillRect(0, 0, W, H);
+    view.cx = vv.cx; view.cy = vv.cy; view.scale = vv.scale;
+    try {
+      drawUnderlays(c);
+      const tl = s2w(0, 0), br = s2w(W, H);
+      drawEntityPass(c, doc.modelQuery(tl[0], br[1], br[0], tl[1]).filter((e) => doc.isVisible(e) && CadVp.shownIn(vp, e.layer)), doc.d);
+    } finally { view.cx = sv.cx; view.cy = sv.cy; view.scale = sv.scale; }
+    c.restore();
+  }
+  function drawVport(c, e, mode) {
+    if (mode !== 'sel' && mode !== 'pv' && e.bd === false) return;
+    c.beginPath(); for (const l of e.loops) tracePoly(c, { v: l, closed: true }); c.stroke();
+  }
+  function draw() {
+    if (destroyed) return;
+    const c = ctx2;
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const paper = doc.inPaper();
+    c.lineJoin = 'round'; c.lineCap = 'round';
+    if (paper) drawSheet(c);
+    else {
+      c.fillStyle = '#ffffff'; c.fillRect(0, 0, W, H);
+      if (prefs.toggles.grid) drawGrid(c);
+      drawUnderlays(c);
+      // origin marker
+      const o = w2s([0, 0]);
+      c.strokeStyle = '#b9bdc4'; c.lineWidth = 1; c.beginPath(); c.moveTo(o[0] - 10, o[1]); c.lineTo(o[0] + 10, o[1]); c.moveTo(o[0], o[1] - 10); c.lineTo(o[0], o[1] + 10); c.stroke();
+    }
+    const tl = s2w(0, 0), br = s2w(W, H);
+    if (paper) {
+      for (const vp of doc.query(tl[0], br[1], br[0], tl[1])) if (vp.t === 'VPORT' && doc.isVisible(vp)) drawViewportContent(c, vp);
+      drawEntityPass(c, doc.queryVis(tl[0], br[1], br[0], tl[1]), { ...doc.d, units: 'mm', plotScale: 1 });
+    } else drawEntityPass(c, doc.queryVis(tl[0], br[1], br[0], tl[1]), doc.d);
     c.lineWidth = 1.6;
     // selection
     if (engine.selection.size) {
@@ -807,6 +871,68 @@ function cadMountEditor(data) {
   }
   $('cad-layer').addEventListener('click', openLayers);
 
+
+  // ---- layouts (paper space) ----
+  function renderTabs() {
+    const bar = $('cad-tabs'); if (!bar) return;
+    const tab = (id, label, on) => `<button class="cad-tab${on ? ' on' : ''}" data-sp="${id || ''}">${esc(label)}</button>`;
+    bar.innerHTML = tab('', 'Model', !doc.inPaper()) + doc.d.layouts.map((l) => tab(l.id, l.name, doc.space === l.id)).join('') + '<button class="cad-tab add" id="cad-tab-add" title="New layout">＋</button>' + (doc.inPaper() ? '<button class="cad-tab gear" id="cad-tab-gear" title="Layout settings">⚙</button>' : '');
+  }
+  function switchSpace(id) {
+    id = id || null;
+    if (id === doc.space) return;
+    if (engine.active) engine.cancel();
+    engine.clearSelection(); syncViews();
+    if (!doc.inPaper()) doc.d.modelView = { cx: view.cx, cy: view.cy, scale: view.scale };
+    doc.enterSpace(id);
+    root.classList.toggle('paper', doc.inPaper());
+    prevViews.length = 0;
+    if (doc.inPaper()) { const l = doc.layout(id); if (l.view && l.view.scale) view = { ...l.view }; else { fitBox(sheetBox(l), 0.94); } }
+    else view = views.model ? { ...views.model } : view;
+    const u = $('cad-units'); if (u) u.textContent = doc.inPaper() ? 'mm (paper)' : unit.label;
+    renderTabs(); refreshUI(); requestDraw();
+  }
+  function newLayout() {
+    if (engine.active) engine.cancel();
+    const l = doc.addLayout({ size: 'A3', landscape: true, tb: { title: doc.d.name } });
+    markDirty(); switchSpace(l.id);
+    toast('Layout added. Use Viewport to put the model on the sheet.');
+  }
+  function openLayoutSettings() {
+    const l = doc.layout(doc.space); if (!l) return;
+    const tb = Object.assign(CadPlot.defaultTitleBlock(doc.d), l.tb || {});
+    const f = (id, label, v) => `<div class="field"><label>${label}</label><input type="text" id="${id}" value="${esc(v || '')}"></div>`;
+    const sheet = el(`<div class="sheet-backdrop"><div class="sheet" style="max-height:88vh;overflow:auto"><div class="sheet-handle"></div><h2>Layout settings</h2>
+      ${f('ls-name', 'Layout name', l.name)}
+      <div style="display:flex;gap:10px"><div class="field" style="flex:1"><label>Sheet size</label><select id="ls-size">${Object.keys(CadVp.SHEETS).map((n) => `<option ${n === l.size ? 'selected' : ''}>${n}</option>`).join('')}</select></div>
+      <div class="field" style="flex:1"><label>Orientation</label><select id="ls-or"><option value="1" ${l.landscape !== false ? 'selected' : ''}>Landscape</option><option value="0" ${l.landscape === false ? 'selected' : ''}>Portrait</option></select></div></div>
+      <div style="font-weight:700;margin:8px 0 2px">Title block</div>
+      ${f('ls-project', 'Project / structure', tb.project)}${f('ls-title', 'Drawing title', tb.title)}
+      <div style="display:flex;gap:10px"><div style="flex:1">${f('ls-no', 'Drawing no.', tb.drawingNo)}</div><div style="flex:1">${f('ls-rev', 'Revision', tb.rev)}</div></div>
+      <div style="display:flex;gap:10px"><div style="flex:1">${f('ls-drawn', 'Drawn by', tb.drawnBy)}</div><div style="flex:1">${f('ls-checked', 'Checked by', tb.checkedBy)}</div></div>
+      <div style="display:flex;gap:10px"><div style="flex:1">${f('ls-date', 'Date', tb.date)}</div><div style="flex:1">${f('ls-scale', 'Scale shown in title block', (l.tb && l.tb.scaleText) || 'AS SHOWN')}</div></div>
+      <div style="display:flex;gap:10px;margin-top:8px"><button class="btn btn-block" id="ls-del" style="color:#b3261e">Delete layout</button><button class="btn btn-primary btn-block" id="ls-ok">Done</button></div></div></div>`);
+    presentOverlay(sheet);
+    const q = (id) => sheet.querySelector(id);
+    q('#ls-ok').addEventListener('click', () => {
+      const nm = q('#ls-name').value.trim() || l.name;
+      doc.patchLayout(l.id, { name: doc.d.layouts.some((x) => x.id !== l.id && x.name === nm) ? l.name : nm, size: q('#ls-size').value, landscape: q('#ls-or').value === '1',
+        tb: { project: q('#ls-project').value, title: q('#ls-title').value, drawingNo: q('#ls-no').value, rev: q('#ls-rev').value, drawnBy: q('#ls-drawn').value, checkedBy: q('#ls-checked').value, date: q('#ls-date').value, scaleText: q('#ls-scale').value } });
+      sheet.remove(); markDirty(); renderTabs(); requestDraw();
+    });
+    q('#ls-del').addEventListener('click', () => {
+      if (!confirm('Delete layout "' + l.name + '" and everything on it? The model is not affected. This cannot be undone.')) return;
+      sheet.remove(); switchSpace(null); doc.deleteLayout(l.id); markDirty(); renderTabs(); requestDraw();
+    });
+  }
+  $('cad-tabs').addEventListener('click', (ev) => {
+    const b = ev.target.closest('button'); if (!b) return;
+    if (b.id === 'cad-tab-add') newLayout();
+    else if (b.id === 'cad-tab-gear') openLayoutSettings();
+    else if (b.dataset.sp !== undefined) { const id = b.dataset.sp || null; if (id === doc.space) { if (id) openLayoutSettings(); } else switchSpace(id); }
+  });
+  renderTabs();
+
   // ---- properties of the selection ----
   function openProperties() {
     const ids = Array.from(engine.selection).filter((id) => { const e = doc.byId.get(id); return e && doc.isSelectable(e); });
@@ -817,7 +943,7 @@ function cadMountEditor(data) {
     const lay = same((e) => e.layer), col = same((e) => (e.rgb ? 'c:' + e.rgb : e.color == null ? 'by' : String(e.color)));
     const ltS = same((e) => e.lt || ''), lwS = same((e) => (e.lw == null ? '' : String(e.lw)));
     const rgb0 = one && one.rgb ? one.rgb : CadStyle.colorHex(doc.d, ents[0]);
-    const isTxt = one && (one.t === 'TEXT' || one.t === 'MTEXT'), isDim = one && one.t === 'DIM', isHat = one && one.t === 'HATCH';
+    const isTxt = one && (one.t === 'TEXT' || one.t === 'MTEXT'), isDim = one && one.t === 'DIM', isHat = one && one.t === 'HATCH', isVp = one && one.t === 'VPORT';
     const sheet = el(`<div class="sheet-backdrop"><div class="sheet" style="max-height:86vh;overflow:auto"><div class="sheet-handle"></div>
       <h2>Properties <span style="font-weight:500;font-size:14px;color:#6b717c">${ents.length} object${ents.length > 1 ? 's' : ''}${one ? ' · ' + one.t : ''}</span></h2>
       <div class="field"><label>Layer</label><select id="pp-layer">${lay === '*' ? '<option value="*">Various</option>' : ''}${doc.d.layers.map((l) => `<option ${l.name === lay ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select></div>
@@ -827,6 +953,11 @@ function cadMountEditor(data) {
       ${isTxt ? `<div class="field"><label>Text</label><textarea id="pp-text" rows="${one.t === 'MTEXT' ? 4 : 2}" style="width:100%;font-size:16px;-webkit-user-select:text;user-select:text">${esc(one.text)}</textarea></div>
         <div class="field"><label>Height (${esc(unit.label)})</label><input type="number" id="pp-h" step="any" min="0" value="${+one.h.toFixed(4)}"></div>
         <div class="field"><label>Rotation (degrees)</label><input type="number" id="pp-rot" step="any" value="${+(((one.rot || 0) * 180 / Math.PI)).toFixed(3)}"></div>` : ''}
+      ${isVp ? `<div class="field"><label>Viewport scale 1 :</label><div style="display:flex;gap:8px"><select id="pp-vsc" style="flex:1">${CadVp.SCALES.map((n) => `<option ${n === one.sc ? 'selected' : ''}>${n}</option>`).join('')}<option value="custom" ${CadVp.SCALES.indexOf(one.sc) < 0 ? 'selected' : ''}>Custom…</option></select><input type="number" id="pp-vsc2" min="0.01" step="any" value="${one.sc}" style="width:110px"></div></div>
+        <label class="field" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="pp-vlock" ${one.lock ? 'checked' : ''}> Lock the view (stops accidental pan and scale changes)</label>
+        <label class="field" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="pp-vbd" ${one.bd !== false ? 'checked' : ''}> Show the border</label>
+        <div class="field"><label>Layers shown in this viewport</label><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:4px">${doc.d.layers.map((l, i) => `<label style="display:flex;align-items:center;gap:6px;font-size:14px"><input type="checkbox" data-vfz="${esc(l.name)}" ${CadVp.shownIn(one, l.name) ? 'checked' : ''}> ${esc(l.name)}</label>`).join('')}</div></div>
+        <div class="field"><button class="btn btn-secondary btn-block" id="pp-vfit" type="button">Fit the whole model in this viewport</button></div>` : ''}
       ${isHat ? `<div class="field" style="font-size:13px;color:${one.det ? '#b3261e' : '#6b717c'}">${one.det ? 'Detached: the boundary was opened or erased, so the hatch kept its last shape.' : one.src ? 'Linked to its boundary: it follows when you edit the shape.' : 'Not linked to a boundary (it was moved on its own or copied).'}</div>
         <div class="field"><label>Hatch pattern</label><select id="pp-pat">${CadHatch.NAMES.map((n) => `<option value="${n}" ${n === one.pat ? 'selected' : ''}>${esc(CadHatch.PATTERNS[n].label)}</option>`).join('')}</select></div>
         <div class="field"><label>Pattern scale</label><input type="number" id="pp-hsc" step="any" min="0.01" value="${+(one.sc || 1).toFixed(4)}"></div>
@@ -834,6 +965,13 @@ function cadMountEditor(data) {
       ${isDim ? `<div class="field"><label>Dimension text (&lt;&gt; = measured value ${esc(CadDim.dimText({ ...one, txt: '' }))})</label><input type="text" id="pp-dim" value="${esc(one.txt || '<>')}"></div>` : ''}
       <div style="display:flex;gap:10px"><button class="btn btn-block" id="pp-cancel">Cancel</button><button class="btn btn-primary btn-block" id="pp-ok">Apply</button></div></div></div>`);
     presentOverlay(sheet);
+    if (isVp) {
+      sheet.querySelector('#pp-vfit').addEventListener('click', () => {
+        const mb = doc.modelExtents(); if (!mb) { toast('The model is empty.'); return; }
+        if (one.lock) { toast('Unlock the viewport first.'); return; }
+        const f = CadVp.fit(one, mb); doc.setProps([one.id], { sc: f.sc, cx: f.cx, cy: f.cy }); sheet.remove(); requestDraw(); refreshUI();
+      });
+    }
     sheet.querySelector('#pp-cancel').addEventListener('click', () => sheet.remove());
     sheet.querySelector('#pp-ok').addEventListener('click', () => doc.transact(() => {
       const q = (id) => sheet.querySelector(id);
@@ -848,6 +986,16 @@ function cadMountEditor(data) {
       if (isTxt) {
         const t = q('#pp-text').value.trim(), h = parseFloat(q('#pp-h').value), r = parseFloat(q('#pp-rot').value);
         const patch = {}; if (t && t !== one.text) patch.text = t; if (h > 0 && h !== one.h) patch.h = h; if (isFinite(r) && Math.abs(r * Math.PI / 180 - (one.rot || 0)) > 1e-9) patch.rot = r * Math.PI / 180;
+        if (Object.keys(patch).length) doc.setProps([one.id], patch);
+      }
+      if (isVp) {
+        const sel = q('#pp-vsc').value, sc = sel === 'custom' ? parseFloat(q('#pp-vsc2').value) : parseFloat(sel), patch = {};
+        if (sc > 0 && sc !== one.sc) patch.sc = sc;
+        if (q('#pp-vlock').checked !== !!one.lock) patch.lock = q('#pp-vlock').checked;
+        if (q('#pp-vbd').checked !== (one.bd !== false)) patch.bd = q('#pp-vbd').checked;
+        const fz = Array.from(sheet.querySelectorAll('[data-vfz]')).filter((b) => !b.checked).map((b) => b.dataset.vfz);
+        if (fz.join('|') !== (one.fz || []).join('|')) patch.fz = fz;
+        if (patch.sc && one.lock && !patch.lock) { delete patch.sc; toast('That viewport is locked, so its scale was not changed.'); }
         if (Object.keys(patch).length) doc.setProps([one.id], patch);
       }
       if (isHat) {
@@ -926,7 +1074,7 @@ function cadMountEditor(data) {
   $('cad-undo').addEventListener('click', doUndo);
   $('cad-redo').addEventListener('click', doRedo);
   $('cad-fit').addEventListener('click', zoomExtents);
-  $('cad-export').addEventListener('click', () => { if (engine.active) engine.cancel(); cadOpenExportSheet(doc, markDirty); });
+  $('cad-export').addEventListener('click', () => { if (engine.active) engine.cancel(); if (doc.inPaper()) { cadOpenLayoutExportSheet(doc, markDirty); return; } cadOpenExportSheet(doc, markDirty); });
   $('cad-cancel').addEventListener('click', () => engine.cancel());
   $('cad-enter').addEventListener('click', () => submitCmd());
   $('cad-back').addEventListener('click', async () => { await save(); navigate('#/cad'); });
@@ -1230,6 +1378,10 @@ function injectCadCss() {
 .cad-title{background:none;border:0;color:#fff;font-size:16px;font-weight:650;max-width:34vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:6px 6px;text-align:left}
 .cad-saved{font-size:12px;color:#b8bcc4;white-space:nowrap}
 .cad-main{flex:1;min-height:0;display:flex}
+.cad-tabs{display:flex;gap:4px;padding:4px 8px;background:#2d3139;overflow-x:auto;flex-shrink:0;-webkit-overflow-scrolling:touch}
+.cad-tab{background:#3b4048;color:#d6d9de;border:0;border-radius:8px 8px 0 0;padding:6px 14px;font-size:13px;font-weight:600;white-space:nowrap;flex-shrink:0}
+.cad-tab.on{background:#f6f7f9;color:#22252b}.cad-tab.add,.cad-tab.gear{padding:6px 10px}
+.cad-tool[data-sp="paper"],.cad-group[data-sp="paper"]{display:none}.paper .cad-tool[data-sp="paper"]{display:flex}.paper .cad-group[data-sp="paper"]{display:block}
 .cad-palette{width:128px;flex-shrink:0;background:#f3f4f6;border-right:1px solid #dfe1e5;display:grid;grid-template-columns:1fr 1fr;align-content:start;overflow-y:auto;padding:2px 0}
 .cad-group{grid-column:1/-1;font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:#7a808b;padding:7px 10px 2px}
 .cad-selcount{font-size:13px;font-weight:700;color:#1565c0;white-space:nowrap;padding:0 4px}

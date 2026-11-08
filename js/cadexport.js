@@ -96,6 +96,61 @@ function cadOpenExportSheet(doc, onChanged) {
   refresh();
 }
 
+// Export a layout (paper space): PDF of this sheet or of all sheets, PNG, flat DXF, or insert the sheet into a report.
+function cadOpenLayoutExportSheet(doc, onChanged) {
+  const lyt = doc.layout(doc.space); if (!lyt) return;
+  const d = doc.d, model = doc.modelEntities();
+  const data = { ...d, entities: model };
+  const sheet = el(`
+    <div class="sheet-backdrop"><div class="sheet" style="max-height:90vh; overflow:auto;">
+      <div class="sheet-handle"></div>
+      <h2>Print layout: ${esc(lyt.name)}</h2>
+      <div class="field"><label>Format</label>
+        <select id="lx-format"><option value="pdf">PDF, this layout</option>${d.layouts.length > 1 ? '<option value="pdfall">PDF, all layouts (one page each)</option>' : ''}<option value="png">PNG image, this layout</option><option value="dxf">DXF, this layout as drawn (flat, for AutoCAD / BricsCAD)</option></select></div>
+      <label class="cad-mode" style="margin-bottom:10px"><input type="checkbox" id="lx-mono"> Black and white</label>
+      <button class="btn btn-secondary btn-block" id="lx-pens" style="margin-bottom:10px">Pen settings (print colours and weights)…</button>
+      <canvas id="lx-prev" style="display:block; max-width:100%; max-height:300px; margin:0 auto 12px; border:1px solid #d3d6db; border-radius:8px; background:#fff"></canvas>
+      <p class="muted" style="font-size:13px">Sheet size, title block and scale text are set in Layout settings (the gear next to the tabs). The DXF is the sheet as plotted at true size in millimetres: objects are on one layer and viewports are cut to their windows.</p>
+      <div style="position:sticky; bottom:0; background:#fff; padding-top:8px;">
+        <button class="btn btn-primary btn-block" id="lx-save">Save file</button>
+        <button class="btn btn-secondary btn-block" id="lx-insert" style="margin-top:8px;">Insert into a report…</button>
+        <button class="btn btn-ghost btn-block" id="lx-cancel">Close</button>
+      </div>
+    </div></div>`);
+  presentOverlay(sheet);
+  const $ = (id) => sheet.querySelector(id), images = {};
+  const ex = d.layoutExport || {}; $('#lx-format').value = ex.format && Array.from($('#lx-format').options).some((o) => o.value === ex.format) ? ex.format : 'pdf'; $('#lx-mono').checked = !!ex.mono;
+  const optsNow = () => ({ mono: $('#lx-mono').checked, underlays: true });
+  const planFor = (l) => CadPlot.planLayout(data, l, optsNow());
+  function refresh() {
+    const f = $('#lx-format').value;
+    $('#lx-insert').style.display = f === 'png' ? '' : 'none';
+    CadPlot.renderCanvas(planFor(lyt), $('#lx-prev'), 1.6, images);
+  }
+  (async () => { for (const u of (d.underlays || [])) { try { const a = await DB.getCadAsset(u.assetId); if (a && a.blob) images[u.assetId] = await createImageBitmap(a.blob); } catch (e) { console.error(e); } } refresh(); })();
+  sheet.addEventListener('input', refresh); sheet.addEventListener('change', refresh);
+  const persist = () => { d.layoutExport = { format: $('#lx-format').value, mono: $('#lx-mono').checked }; if (onChanged) onChanged(); };
+  async function makeBlob() {
+    const f = $('#lx-format').value, base = cadSafeFile((d.name || 'drawing') + ' - ' + lyt.name);
+    if (f === 'dxf') return { blob: new Blob([CadDxf.writePlan(planFor(lyt))], { type: 'application/dxf' }), name: base + '.dxf' };
+    if (f === 'png') {
+      const c = document.createElement('canvas'); CadPlot.renderCanvas(planFor(lyt), c, 200 / 25.4, images);
+      return { blob: await new Promise((res) => c.toBlob(res, 'image/png')), name: base + '.png' };
+    }
+    if (!window.jspdf) { toast('PDF library not loaded. Connect to the internet once, then try again.'); return null; }
+    // other layouts are planned from their own object lists (they are not loaded into the editor while this one is open)
+    const plans = f === 'pdfall' ? d.layouts.map((l) => planFor(l)) : [planFor(lyt)];
+    const pdf = CadPlot.renderPdf(plans, window.jspdf.jsPDF, images);
+    return { blob: pdf.output('blob'), name: cadSafeFile(d.name || 'drawing') + (f === 'pdfall' ? ' - all layouts' : ' - ' + lyt.name) + '.pdf' };
+  }
+  $('#lx-cancel').addEventListener('click', () => { persist(); sheet.remove(); });
+  sheet.addEventListener('click', (e) => { if (e.target === sheet) { persist(); sheet.remove(); } });
+  $('#lx-save').addEventListener('click', async () => { persist(); try { const r = await makeBlob(); if (r) { downloadBlob(r.blob, r.name); toast('Saved ' + r.name); } } catch (err) { console.error(err); toast('Export failed: ' + err.message); } });
+  $('#lx-insert').addEventListener('click', async () => { persist(); try { const r = await makeBlob(); if (r) cadOpenInsertSheet(r.blob, (lyt.tb && lyt.tb.title) || lyt.name); } catch (err) { console.error(err); toast('Export failed: ' + err.message); } });
+  $('#lx-pens').addEventListener('click', () => cadOpenPenSheet(doc, () => { if (onChanged) onChanged(); refresh(); }));
+  refresh();
+}
+
 // Pick an inspection, then where in its report the PNG should go.
 async function cadOpenInsertSheet(blob, title) {
   const inspections = (await DB.listInspections()).filter((i) => !i.deleted);
@@ -160,7 +215,7 @@ function cadOpenPenSheet(doc, onChanged) {
   const hexes = new Map();
   const add = (h, label) => { if (!hexes.has(h)) hexes.set(h, label); };
   for (const l of (dd.layers || [])) add(CadStyle.layerHex(l), l.name);
-  for (const e of doc.entities) add(CadStyle.colorHex(dd, e), e.layer);
+  for (const e of doc.modelEntities().concat(doc.inPaper() ? doc.entities : [])) add(CadStyle.colorHex(dd, e), e.layer);
   const pens = dd.pens = dd.pens || {};
   const lwOpts = (sel) => `<option value="" ${sel == null ? 'selected' : ''}>Object weight</option>` + CadStyle.LW_LIST.map((v) => `<option value="${v / 100}" ${sel === v / 100 ? 'selected' : ''}>${(v / 100).toFixed(2)} mm</option>`).join('');
   const sheet = el(`<div class="sheet-backdrop"><div class="sheet" style="max-height:88vh;overflow:auto"><div class="sheet-handle"></div><h2>Pen settings</h2>

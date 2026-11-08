@@ -49,6 +49,9 @@ const CadEdit = (() => {
       case 'LWPOLYLINE':
         n.v = e.v.map((q) => { const p = xf.fn([q[0], q[1]]); return [p[0], p[1], xf.flip ? -(q[2] || 0) : (q[2] || 0)]; });
         break;
+      case 'VPORT':                                          // the window moves or turns; what it shows stays tied to its centre
+        n.loops = e.loops.map((l) => l.map((q) => { const p = xf.fn([q[0], q[1]]); return [p[0], p[1], xf.flip ? -(q[2] || 0) : (q[2] || 0)]; }));
+        break;
       case 'SYM': {
         n.p = xf.fn(e.p); n.sz = e.sz * xf.k;
         const o = xf.fn([e.p[0] + Math.cos(e.rot || 0), e.p[1] + Math.sin(e.rot || 0)]);
@@ -98,6 +101,7 @@ const CadEdit = (() => {
         G.polySegments(e).forEach((s, k) => out.push({ pt: s.k === 's' ? G.mid(s.p1, s.p2) : G.arcMid(s), i: e.v.length + k, kind: 'mid', seg: k }));
         break;
       }
+      case 'VPORT': (e.loops[0] || []).forEach((q, i) => out.push({ pt: [q[0], q[1]], i, kind: 'end' })); break;
       case 'TEXT': case 'MTEXT': case 'SYM': out.push({ pt: e.p, i: 0, kind: 'end' }); break;
       case 'DIM': { const f = D.frame(e); out.push({ pt: e.p1, i: 0, kind: 'end' }, { pt: e.p2, i: 1, kind: 'end' }, { pt: G.mid(f.A, f.B), i: 2, kind: 'mid' }); break; }
       default: break;
@@ -136,6 +140,11 @@ const CadEdit = (() => {
         }
         break;
       }
+      case 'VPORT': {
+        const V = typeof CadVp !== 'undefined' ? CadVp : require('./cadvp.js'), rl = V.rectGrip(e, g.i, np);
+        if (rl) n.loops = [rl]; else n.loops = e.loops.map((l, k) => (k === 0 ? l.map((q, i) => (i === g.i ? [np[0], np[1], q[2] || 0] : q)) : l));
+        return V.holdContent(e, n);
+      }
       case 'TEXT': case 'MTEXT': case 'SYM': n.p = np; break;
       case 'DIM': if (g.i === 0) n.p1 = np; else if (g.i === 1) n.p2 = np; else n.off = add(e.off, d); break;
       default: return null;
@@ -169,6 +178,12 @@ const CadEdit = (() => {
         let any = false; const n = clone(e);
         n.loops = e.loops.map((l) => l.map((q) => { if (ins([q[0], q[1]])) { any = true; return [q[0] + d[0], q[1] + d[1], q[2] || 0]; } return [q[0], q[1], q[2] || 0]; }));
         return any ? n : null;
+      }
+      case 'VPORT': {
+        let any = false; const n = clone(e);
+        n.loops = e.loops.map((l) => l.map((q) => { if (ins([q[0], q[1]])) { any = true; return [q[0] + d[0], q[1] + d[1], q[2] || 0]; } return [q[0], q[1], q[2] || 0]; }));
+        if (!any) return null;
+        const V = typeof CadVp !== 'undefined' ? CadVp : require('./cadvp.js'); return V.holdContent(e, n);
       }
       case 'TEXT': case 'MTEXT': case 'SYM': return ins(e.p) ? { ...clone(e), p: mv(e.p) } : null;
       case 'DIM': {

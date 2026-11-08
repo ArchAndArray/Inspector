@@ -115,7 +115,7 @@ const CadGeo = (() => {
   const hatchPrims = (e) => (e.loops || []).flatMap((l) => polySegments({ v: l, closed: true }));
   const symPrims = (e) => SY.shapes(e).flatMap((sh) => polySegments({ v: sh.pts.map((q) => [q[0], q[1], 0]), closed: sh.closed }));
   function hitPrims(e) {
-    if (e.t === 'HATCH') return hatchPrims(e);
+    if (e.t === 'HATCH' || e.t === 'VPORT') return hatchPrims(e);
     if (e.t === 'SYM') return symPrims(e);
     if (e.t === 'TEXT' || e.t === 'MTEXT') return boxSegs(D.textCorners(e));
     if (e.t === 'DIM') return prims(e).concat(boxSegs(D.textBoxOf(e)));
@@ -141,7 +141,7 @@ const CadGeo = (() => {
     if (e.t === 'POINT') grow(e.p);
     if (e.t === 'TEXT' || e.t === 'MTEXT') for (const q of D.textCorners(e)) grow(q);
     if (e.t === 'DIM') for (const q of D.textBoxOf(e)) grow(q);
-    for (const p of (e.t === 'HATCH' ? hatchPrims(e) : e.t === 'SYM' ? symPrims(e) : prims(e))) {
+    for (const p of (e.t === 'HATCH' || e.t === 'VPORT' ? hatchPrims(e) : e.t === 'SYM' ? symPrims(e) : prims(e))) {
       if (p.k === 's') { grow(p.p1); grow(p.p2); continue; }
       if (!isArc(p)) { grow([p.c[0] - p.r, p.c[1] - p.r]); grow([p.c[0] + p.r, p.c[1] + p.r]); continue; }
       grow(polar(p.c, p.a0, p.r)); grow(polar(p.c, p.a1, p.r));

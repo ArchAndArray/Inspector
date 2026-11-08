@@ -15,8 +15,9 @@ const CadPlot = (() => {
   const DM = (typeof CadDim !== 'undefined') ? CadDim : require('./caddim.js');
   const ST = (typeof CadStyle !== 'undefined') ? CadStyle : require('./cadstyle.js');
   const SY = (typeof CadSym !== 'undefined') ? CadSym : require('./cadsym.js');
+  const VP = (typeof CadVp !== 'undefined') ? CadVp : require('./cadvp.js');
   const CH = (typeof CadHatch !== 'undefined') ? CadHatch : require('./cadhatch.js');
-  const SIZES = { A4: [210, 297], A3: [297, 420] };
+  const SIZES = { A4: [210, 297], A3: [297, 420], A2: [420, 594], A1: [594, 841], A0: [841, 1189] };
   const UNIT_MM = { mm: 1, m: 1000, in: 25.4 };
   const STD_SCALES = [1, 2, 5, 10, 20, 25, 50, 75, 100, 125, 150, 200, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 20000, 50000, 100000];
   const MARGIN = 10, TB_W = 180, TB_H = 36, TB_GAP = 4;
@@ -59,32 +60,38 @@ const CadPlot = (() => {
   }
 
   // Returns { sheet, items, scale, scaleText, fits, suggested, empty }.
-  function plan(data, opts) {
-    const o = Object.assign({ size: 'A4', landscape: true, scale: 'fit', mono: false, tb: {} }, opts || {});
-    const lay = layout(o.size, o.landscape), ents = visibleEntities(data);
-    let box = boxOf(ents);
-    const uls = o.underlays === false ? [] : (data.underlays || []).filter((u) => u.on !== false && (!o.underlayIds || o.underlayIds.indexOf(u.id) >= 0));
-    const ulCorners = (u) => { const c = Math.cos(u.rot || 0), s = Math.sin(u.rot || 0); return [[0, 0], [u.w, 0], [u.w, u.h], [0, u.h]].map(([x, y]) => [u.x + x * c - y * s, u.y + x * s + y * c]); };
-    if (o.fitPictures !== false) for (const u of uls) for (const q of ulCorners(u)) { if (!box) box = { minX: q[0], minY: q[1], maxX: q[0], maxY: q[1] }; else { box.minX = Math.min(box.minX, q[0]); box.minY = Math.min(box.minY, q[1]); box.maxX = Math.max(box.maxX, q[0]); box.maxY = Math.max(box.maxY, q[1]); } }
-    const um = UNIT_MM[data.units] || 1;
-    const items = [];
-    let denom = null, fits = true, suggested = null;
-    const aw = lay.area.x1 - lay.area.x0, ah = lay.area.y1 - lay.area.y0;
-    const fitDenom = (b) => {
-      const bw = Math.max(b.maxX - b.minX, 1e-9) * um, bh = Math.max(b.maxY - b.minY, 1e-9) * um;
-      const need = Math.max(bw / aw, bh / ah);
-      return STD_SCALES.find((s) => s >= need) || Math.ceil(need);
+  // Sheet border, title block and credit line as items in sheet millimetres.
+  function sheetFrame(items, lay, data, tbIn, scaleText, sizeName) {
+    const K = '#000000', raw = (pts, closed, w) => items.push({ k: 'poly', pts, closed, color: K, w });
+    const rect = (r, w) => raw([[r.x0, r.y0], [r.x1, r.y0], [r.x1, r.y1], [r.x0, r.y1]], true, w);
+    rect(lay.frame, 0.5); rect(lay.tb, 0.35);
+    const tb = Object.assign(defaultTitleBlock(data), tbIn || {});
+    const bw = lay.tb.x1 - lay.tb.x0, X0 = lay.tb.x0, Y0 = lay.tb.y0;
+        const cell = (x, y, w, h, label, value, big) => {
+      items.push({ k: 'text', p: [X0 + x + 1.2, Y0 + y + h - 2.6], h: 2, rot: 0, str: label, align: 'left', color: '#606060' });
+      if (value) items.push({ k: 'text', p: [X0 + x + 1.2, Y0 + y + 2.2], h: big ? 4.2 : 3.4, rot: 0, str: String(value), align: 'left', color: K });
     };
-    if (box) {
-      suggested = fitDenom(box);
-      if (o.scale === 'plot') { denom = data.plotScale || 50; fits = (box.maxX - box.minX) * um / denom <= aw + 1e-6 && (box.maxY - box.minY) * um / denom <= ah + 1e-6; }
-      else if (typeof o.scale === 'number' && o.scale > 0) { denom = o.scale; fits = (box.maxX - box.minX) * um / denom <= aw + 1e-6 && (box.maxY - box.minY) * um / denom <= ah + 1e-6; }
-      else denom = suggested;
-    } else denom = data.plotScale || 50;
-    const kmm = um / denom;                                     // sheet mm per model unit
-    const cx = box ? (box.minX + box.maxX) / 2 : 0, cy = box ? (box.minY + box.maxY) / 2 : 0;
-    const ox = (lay.area.x0 + lay.area.x1) / 2, oy = (lay.area.y0 + lay.area.y1) / 2;
-    const M = (p) => [ox + (p[0] - cx) * kmm, oy + (p[1] - cy) * kmm];
+    const hline = (y) => raw([[X0, Y0 + y], [X0 + bw, Y0 + y]], false, 0.25);
+    const vline = (x, y0, y1) => raw([[X0 + x, Y0 + y0], [X0 + x, Y0 + y1]], false, 0.25);
+    const f = bw / TB_W;                                         // shrink columns if the sheet is narrow
+    hline(24); hline(12);
+    cell(0, 24, bw, 12, 'PROJECT / STRUCTURE', tb.project, true);
+    cell(0, 12, 110 * f, 12, 'DRAWING TITLE', tb.title, true); vline(110 * f, 12, 24);
+    cell(110 * f, 12, 40 * f, 12, 'DRAWING NO.', tb.drawingNo); vline(150 * f, 12, 24);
+    cell(150 * f, 12, 30 * f, 12, 'REV', tb.rev);
+    const row = [['SCALE @ ' + sizeName, scaleText, 34], ['DATE', tb.date, 34], ['DRAWN', tb.drawnBy, 40], ['CHECKED', tb.checkedBy, 40], ['UNITS', data.units || 'mm', 32]];
+    let x = 0; row.forEach(([l, v, w], i) => { const ww = w * f; cell(x, 0, ww, 12, l, v); x += ww; if (i < row.length - 1) vline(x, 0, 12); });
+    items.push({ k: 'text', p: [lay.frame.x0 + 1, lay.frame.y0 - 4], h: 2.2, rot: 0, str: 'Inspector by Arch&Array', align: 'left', color: '#909090' });
+
+  }
+  // Frame and title block of a layout (paper space), for the screen and the plotter.
+  function sheetItems(lyt, data) {
+    const lay = layout(lyt.size, lyt.landscape !== false), items = [];
+    sheetFrame(items, lay, data, lyt.tb, (lyt.tb && lyt.tb.scaleText) || 'AS SHOWN', lyt.size);
+    return { lay, items };
+  }
+  // Turn model (or paper) entities into plot items. M maps entity coordinates to sheet mm, kmm = sheet mm per entity unit.
+  function genItems(data, ents, M, kmm, o, items) {
     const pens = data.pens || {};
     const color = (e) => {
       if (o.mono) return '#000000';
@@ -93,7 +100,6 @@ const CadPlot = (() => {
     };
     let curW = 0.25, curDash = null;
     const LW = 0.25;
-    for (const u of uls) items.push({ k: 'img', id: u.assetId, pts: ulCorners(u).map(M), opacity: u.opacity == null ? 0.5 : u.opacity, iw: u.iw, ih: u.ih });
     const poly = (pts, closed, col, w) => items.push({ k: 'poly', pts: pts.map(M), closed: !!closed, color: col, w: w || curW || LW, dash: curDash && curDash.length ? curDash : null });
     const txt = (p, h, rot, str, align, col) => { if (str && h * kmm >= 0.4) items.push({ k: 'text', p: M(p), h: h * kmm, rot: rot || 0, str, align: align || 'left', color: col }); };
 
@@ -150,28 +156,103 @@ const CadPlot = (() => {
       }
     }
 
-    // border and title block (sheet coordinates, not mapped)
-    const K = '#000000', raw = (pts, closed, w) => items.push({ k: 'poly', pts, closed, color: K, w });
-    const rect = (r, w) => raw([[r.x0, r.y0], [r.x1, r.y0], [r.x1, r.y1], [r.x0, r.y1]], true, w);
-    rect(lay.frame, 0.5); rect(lay.tb, 0.35);
-    const tb = Object.assign(defaultTitleBlock(data), o.tb || {});
-    const bw = lay.tb.x1 - lay.tb.x0, X0 = lay.tb.x0, Y0 = lay.tb.y0;
-    const scaleText = '1:' + (Number.isInteger(denom) ? denom : +denom.toFixed(2));
-    const cell = (x, y, w, h, label, value, big) => {
-      items.push({ k: 'text', p: [X0 + x + 1.2, Y0 + y + h - 2.6], h: 2, rot: 0, str: label, align: 'left', color: '#606060' });
-      if (value) items.push({ k: 'text', p: [X0 + x + 1.2, Y0 + y + 2.2], h: big ? 4.2 : 3.4, rot: 0, str: String(value), align: 'left', color: K });
+  }
+
+  // ---- layouts (paper space) ----
+  const itemBox = (pts) => { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const p of pts) { if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0]; if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1]; } return [x0, y0, x1, y1]; };
+  // Items from one viewport, cut to its window (even-odd region of paper-mm rings).
+  function clipItems(items, rings) {
+    const out = [], inside = (p) => CH.inside(rings, p), convex = rings.length === 1 && VP.isConvex(rings[0]);
+    const full = (pts, closed) => {
+      if (!pts.every(inside)) return false;
+      const n = closed ? pts.length : pts.length - 1;
+      for (let i = 0; i < n; i++) { const a = pts[i], b = pts[(i + 1) % pts.length], pcs = VP.clipSeg(a, b, rings); if (pcs.length !== 1 || Math.hypot(pcs[0][0][0] - a[0], pcs[0][0][1] - a[1]) > 1e-6 || Math.hypot(pcs[0][1][0] - b[0], pcs[0][1][1] - b[1]) > 1e-6) return false; }
+      return true;
     };
-    const hline = (y) => raw([[X0, Y0 + y], [X0 + bw, Y0 + y]], false, 0.25);
-    const vline = (x, y0, y1) => raw([[X0 + x, Y0 + y0], [X0 + x, Y0 + y1]], false, 0.25);
-    const f = bw / TB_W;                                         // shrink columns if the sheet is narrow
-    hline(24); hline(12);
-    cell(0, 24, bw, 12, 'PROJECT / STRUCTURE', tb.project, true);
-    cell(0, 12, 110 * f, 12, 'DRAWING TITLE', tb.title, true); vline(110 * f, 12, 24);
-    cell(110 * f, 12, 40 * f, 12, 'DRAWING NO.', tb.drawingNo); vline(150 * f, 12, 24);
-    cell(150 * f, 12, 30 * f, 12, 'REV', tb.rev);
-    const row = [['SCALE @ ' + o.size, scaleText, 34], ['DATE', tb.date, 34], ['DRAWN', tb.drawnBy, 40], ['CHECKED', tb.checkedBy, 40], ['UNITS', data.units || 'mm', 32]];
-    let x = 0; row.forEach(([l, v, w], i) => { const ww = w * f; cell(x, 0, ww, 12, l, v); x += ww; if (i < row.length - 1) vline(x, 0, 12); });
-    items.push({ k: 'text', p: [lay.frame.x0 + 1, lay.frame.y0 - 4], h: 2.2, rot: 0, str: 'Inspector by Arch&Array', align: 'left', color: '#909090' });
+    for (const it of items) {
+      if (it.k === 'poly') {
+        if (full(it.pts, it.closed)) { out.push(it); continue; }
+        for (const pc of VP.clipPoly(it.pts, it.closed, rings)) out.push({ ...it, pts: pc, closed: false });
+      } else if (it.k === 'segs') {
+        const segs = []; for (const [a, b] of it.segs) for (const q of VP.clipSeg(a, b, rings)) segs.push(q);
+        if (segs.length) out.push({ ...it, segs });
+      } else if (it.k === 'fill') {
+        if (it.pts.every(inside)) out.push(it); else if (convex) { const q = VP.clipRingConvex(it.pts, rings[0]); if (q.length >= 3) out.push({ ...it, pts: q }); }
+      } else if (it.k === 'fillr') {
+        const rs = [];
+        for (const rg of it.rings) { if (rg.every(inside) && rings.length === 1) rs.push(rg); else if (convex) { const q = VP.clipRingConvex(rg, rings[0]); if (q.length >= 3) rs.push(q); } else { const bb = itemBox(rg); if (inside([(bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2])) rs.push(rg); } }
+        if (rs.length) out.push({ ...it, rings: rs });
+      } else if (it.k === 'text') { if (inside(it.p)) out.push(it); }
+      else if (it.k === 'img') out.push({ ...it, clip: rings });
+      else out.push(it);
+    }
+    return out;
+  }
+  // A layout as a plot: paper entities in sheet mm, each viewport's model drawn through its window, then the sheet frame.
+  function planLayout(data, lyt, opts) {
+    const o = Object.assign({ mono: false }, opts || {});
+    const lay = layout(lyt.size, lyt.landscape !== false), items = [];
+    const L = new Map((data.layers || []).map((l) => [l.name, l]));
+    const plottable = (e) => { const l = L.get(e.layer); return !l || (l.on !== false && !l.frozen && l.plot !== false); };
+    const model = (data.entities || []).filter(plottable), paper = (lyt.entities || []).filter(plottable);
+    const um = UNIT_MM[data.units] || 1, ident = (p) => [p[0], p[1]];
+    const uls = o.underlays === false ? [] : (data.underlays || []).filter((u) => u.on !== false && (!o.underlayIds || o.underlayIds.indexOf(u.id) >= 0));
+    const ulCorners = (u) => { const c = Math.cos(u.rot || 0), s = Math.sin(u.rot || 0); return [[0, 0], [u.w, 0], [u.w, u.h], [0, u.h]].map(([x, y]) => [u.x + x * c - y * s, u.y + x * s + y * c]); };
+    let nvp = 0;
+    for (const vp of paper) {
+      if (vp.t !== 'VPORT') continue;
+      nvp++;
+      const rings = VP.polys(vp, 0.05), k = VP.factor(vp), C = VP.centre(vp), M = (p) => [C[0] + (p[0] - vp.cx) * k, C[1] + (p[1] - vp.cy) * k];
+      const vitems = [];
+      for (const u of uls) vitems.push({ k: 'img', id: u.assetId, pts: ulCorners(u).map(M), opacity: u.opacity == null ? 0.5 : u.opacity, iw: u.iw, ih: u.ih });
+      genItems(data, model.filter((e) => VP.shownIn(vp, e.layer)), M, k, o, vitems);
+      for (const it of clipItems(vitems, rings)) items.push(it);
+    }
+    // paper objects are in millimetres at 1:1 (dashes, text and hatches are already paper-sized)
+    const pdata = { ...data, units: 'mm', plotScale: 1 };
+    const pitems = [];
+    genItems(pdata, paper.filter((e) => e.t !== 'VPORT'), ident, 1, o, pitems);
+    for (const e of paper) {
+      if (e.t !== 'VPORT' || e.bd === false) continue;
+      const pens = data.pens || {}, hex = ST.colorHex(data, e), pn = pens[hex];
+      for (const ring of VP.polys(e, 0.05)) pitems.push({ k: 'poly', pts: ring, closed: true, color: o.mono ? '#000000' : (pn && pn.color ? pn.color : ST.printable(hex)), w: pn && pn.lw != null ? pn.lw : ST.lwMm(data, e), dash: null });
+    }
+    for (const it of pitems) items.push(it);
+    const tbs = Object.assign({}, lyt.tb || {});
+    sheetFrame(items, lay, data, tbs, tbs.scaleText || 'AS SHOWN', lyt.size);
+    return { sheet: { w: lay.w, h: lay.h }, items, scale: null, scaleText: tbs.scaleText || 'AS SHOWN', fits: true, suggested: null, empty: !nvp && !paper.length, area: lay.area };
+  }
+  function plan(data, opts) {
+    const o = Object.assign({ size: 'A4', landscape: true, scale: 'fit', mono: false, tb: {} }, opts || {});
+    const lay = layout(o.size, o.landscape), ents = visibleEntities(data);
+    let box = boxOf(ents);
+    const uls = o.underlays === false ? [] : (data.underlays || []).filter((u) => u.on !== false && (!o.underlayIds || o.underlayIds.indexOf(u.id) >= 0));
+    const ulCorners = (u) => { const c = Math.cos(u.rot || 0), s = Math.sin(u.rot || 0); return [[0, 0], [u.w, 0], [u.w, u.h], [0, u.h]].map(([x, y]) => [u.x + x * c - y * s, u.y + x * s + y * c]); };
+    if (o.fitPictures !== false) for (const u of uls) for (const q of ulCorners(u)) { if (!box) box = { minX: q[0], minY: q[1], maxX: q[0], maxY: q[1] }; else { box.minX = Math.min(box.minX, q[0]); box.minY = Math.min(box.minY, q[1]); box.maxX = Math.max(box.maxX, q[0]); box.maxY = Math.max(box.maxY, q[1]); } }
+    const um = UNIT_MM[data.units] || 1;
+    const items = [];
+    let denom = null, fits = true, suggested = null;
+    const aw = lay.area.x1 - lay.area.x0, ah = lay.area.y1 - lay.area.y0;
+    const fitDenom = (b) => {
+      const bw = Math.max(b.maxX - b.minX, 1e-9) * um, bh = Math.max(b.maxY - b.minY, 1e-9) * um;
+      const need = Math.max(bw / aw, bh / ah);
+      return STD_SCALES.find((s) => s >= need) || Math.ceil(need);
+    };
+    if (box) {
+      suggested = fitDenom(box);
+      if (o.scale === 'plot') { denom = data.plotScale || 50; fits = (box.maxX - box.minX) * um / denom <= aw + 1e-6 && (box.maxY - box.minY) * um / denom <= ah + 1e-6; }
+      else if (typeof o.scale === 'number' && o.scale > 0) { denom = o.scale; fits = (box.maxX - box.minX) * um / denom <= aw + 1e-6 && (box.maxY - box.minY) * um / denom <= ah + 1e-6; }
+      else denom = suggested;
+    } else denom = data.plotScale || 50;
+    const kmm = um / denom;                                     // sheet mm per model unit
+    const cx = box ? (box.minX + box.maxX) / 2 : 0, cy = box ? (box.minY + box.maxY) / 2 : 0;
+    const ox = (lay.area.x0 + lay.area.x1) / 2, oy = (lay.area.y0 + lay.area.y1) / 2;
+    const M = (p) => [ox + (p[0] - cx) * kmm, oy + (p[1] - cy) * kmm];
+    for (const u of uls) items.push({ k: 'img', id: u.assetId, pts: ulCorners(u).map(M), opacity: u.opacity == null ? 0.5 : u.opacity, iw: u.iw, ih: u.ih });
+    genItems(data, ents, M, kmm, o, items);
+
+    const scaleText = '1:' + (Number.isInteger(denom) ? denom : +denom.toFixed(2));
+    sheetFrame(items, lay, data, o.tb, scaleText, o.size);
 
     return { sheet: { w: lay.w, h: lay.h }, items, scale: denom, scaleText, fits, suggested, empty: !box, area: lay.area };
   }
@@ -189,6 +270,7 @@ const CadPlot = (() => {
         const iw = im.naturalWidth || im.width, ih = im.naturalHeight || im.height, [p0, p1, , p3] = it.pts;
         const ux = p1[0] - p0[0], uy = p1[1] - p0[1], vx = p3[0] - p0[0], vy = p3[1] - p0[1];
         c.save(); c.beginPath(); c.rect(X(p.area.x0), Y(p.area.y1), (p.area.x1 - p.area.x0) * pxPerMm, (p.area.y1 - p.area.y0) * pxPerMm); c.clip();
+        if (it.clip) { c.beginPath(); for (const rg of it.clip) { rg.forEach((q, i) => (i ? c.lineTo(X(q[0]), Y(q[1])) : c.moveTo(X(q[0]), Y(q[1])))); c.closePath(); } c.clip('evenodd'); }
         c.globalAlpha = it.opacity;
         c.setTransform(ux / iw * pxPerMm, -uy / iw * pxPerMm, -vx / ih * pxPerMm, vy / ih * pxPerMm, X(p0[0] + vx), Y(p0[1] + vy));
         c.drawImage(im, 0, 0); c.restore();
@@ -221,14 +303,21 @@ const CadPlot = (() => {
     const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round((x1 - x0) * ppm)); cv.height = Math.max(1, Math.round((y1 - y0) * ppm));
     const c = cv.getContext('2d'), iw = im.naturalWidth || im.width, ih = im.naturalHeight || im.height, [p0, p1, , p3] = it.pts;
     const ux = p1[0] - p0[0], uy = p1[1] - p0[1], vx = p3[0] - p0[0], vy = p3[1] - p0[1];
+    if (it.clip) { c.beginPath(); for (const rg of it.clip) { rg.forEach((q, i) => (i ? c.lineTo((q[0] - x0) * ppm, (y1 - q[1]) * ppm) : c.moveTo((q[0] - x0) * ppm, (y1 - q[1]) * ppm))); c.closePath(); } c.clip('evenodd'); }
     c.globalAlpha = it.opacity;
     c.setTransform(ux / iw * ppm, -uy / iw * ppm, -vx / ih * ppm, vy / ih * ppm, (p0[0] + vx - x0) * ppm, (y1 - (p0[1] + vy)) * ppm);
     c.drawImage(im, 0, 0);
     return { url: cv.toDataURL('image/png'), x: x0, y: y1, w: x1 - x0, h: y1 - y0 };
   }
-  function renderPdf(p, JsPDF, images) {
+  // One plan = one page; an array of plans = one page each.
+  function renderPdf(plans, JsPDF, images) {
+    const list = Array.isArray(plans) ? plans : [plans], p0 = list[0];
+    const doc = new JsPDF({ unit: 'mm', format: [p0.sheet.w, p0.sheet.h], orientation: p0.sheet.w > p0.sheet.h ? 'landscape' : 'portrait' });
+    list.forEach((p, i) => { if (i) doc.addPage([p.sheet.w, p.sheet.h], p.sheet.w > p.sheet.h ? 'landscape' : 'portrait'); drawPdfPage(doc, p, images); });
+    return doc;
+  }
+  function drawPdfPage(doc, p, images) {
     const H = p.sheet.h;
-    const doc = new JsPDF({ unit: 'mm', format: [p.sheet.w, p.sheet.h], orientation: p.sheet.w > p.sheet.h ? 'landscape' : 'portrait' });
     doc.setLineCap && doc.setLineCap('round'); doc.setLineJoin && doc.setLineJoin('round');
     for (const it of p.items) {
       if (it.k === 'img') {
@@ -251,7 +340,9 @@ const CadPlot = (() => {
         if (doc.setLineDashPattern) doc.setLineDashPattern([], 0);
         for (const q of CH.trapezoids(it.rings)) { const [a, b, c2, d] = q; doc.lines([[b[0] - a[0], -(b[1] - a[1])], [c2[0] - b[0], -(c2[1] - b[1])], [d[0] - c2[0], -(d[1] - c2[1])]], a[0], H - a[1], [1, 1], 'FD', true); }
       } else if (it.k === 'fill') {
-        doc.setFillColor(...hex(it.color)); doc.triangle(it.pts[0][0], H - it.pts[0][1], it.pts[1][0], H - it.pts[1][1], it.pts[2][0], H - it.pts[2][1], 'F');
+        doc.setFillColor(...hex(it.color));
+        if (it.pts.length === 3) doc.triangle(it.pts[0][0], H - it.pts[0][1], it.pts[1][0], H - it.pts[1][1], it.pts[2][0], H - it.pts[2][1], 'F');
+        else { const q = it.pts, rel = []; for (let i = 1; i < q.length; i++) rel.push([q[i][0] - q[i - 1][0], -(q[i][1] - q[i - 1][1])]); doc.lines(rel, q[0][0], H - q[0][1], [1, 1], 'F', true); }
       } else {
         doc.setTextColor(...hex(it.color)); doc.setFont('helvetica', 'normal'); doc.setFontSize(it.h / 0.352778);
         doc.text(it.str, it.p[0], H - it.p[1], { angle: it.rot * 180 / Math.PI, align: it.align === 'center' ? 'center' : 'left' });
@@ -260,7 +351,7 @@ const CadPlot = (() => {
     return doc;
   }
 
-  return { plan, renderCanvas, renderPdf, defaultTitleBlock, layout, SIZES, STD_SCALES };
+  return { sheetItems, planLayout, clipItems, plan, renderCanvas, renderPdf, defaultTitleBlock, layout, SIZES, STD_SCALES };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = CadPlot;
